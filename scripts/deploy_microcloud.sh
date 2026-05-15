@@ -35,6 +35,9 @@ CEPH_DISK_GIB=""
 USER_PREFIX="lab"
 AUTO_APPROVE=false
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
+NETWORK_INTERFACE=""
+OVN_UPLINK_INTERFACE=""
+CEPH_OSD_DISK=""
 
 # -----------------------------------------------------------------------
 # Argument parsing
@@ -48,6 +51,9 @@ for arg in "$@"; do
         --node-memory-mb=*) NODE_MEMORY_MB="${arg#*=}" ;;
         --root-disk-gib=*)  ROOT_DISK_GIB="${arg#*=}" ;;
         --ceph-disk-gib=*)  CEPH_DISK_GIB="${arg#*=}" ;;
+        --network-interface=*) NETWORK_INTERFACE="${arg#*=}" ;;
+        --ovn-uplink-interface=*) OVN_UPLINK_INTERFACE="${arg#*=}" ;;
+        --ceph-osd-disk=*) CEPH_OSD_DISK="${arg#*=}" ;;
         --user-prefix=*)    USER_PREFIX="${arg#*=}" ;;
         --ssh-key=*)        SSH_KEY_PATH="${arg#*=}" ;;
         --auto-approve)     AUTO_APPROVE=true ;;
@@ -273,6 +279,9 @@ print_kv "vCPU / node" "${NODE_CPU}"
 print_kv "RAM / node" "${NODE_MEMORY_GB} GB"
 print_kv "Root disk / node" "${ROOT_DISK_GIB} GiB"
 print_kv "Ceph disk / node" "${CEPH_DISK_GIB} GiB"
+print_kv "Cluster NIC" "${NETWORK_INTERFACE:-auto-detect}"
+print_kv "OVN uplink NIC" "${OVN_UPLINK_INTERFACE:-auto-detect}"
+print_kv "Ceph OSD disk" "${CEPH_OSD_DISK:-auto-detect}"
 print_kv "Workspace" "${WORKSPACE_NAME}"
 echo ""
 

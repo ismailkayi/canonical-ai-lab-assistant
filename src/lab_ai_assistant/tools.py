@@ -1,8 +1,7 @@
 """
-Tool definitions for the MicroCloud-first AI agent.
+Tool definitions for the MicroCloud AI agent.
 
-Tools are the vocabulary the LLM uses to request actions.  The agent
-picks a tool + parameters; the orchestrator executes it.
+These tools are what the LLM can call. The orchestrator executes them.
 """
 
 from typing import Any
@@ -12,29 +11,15 @@ def get_tool_definitions() -> dict[str, Any]:
     """Return the full tool catalog used by the AI assistant."""
     return {
         "tools": [
-            # ----------------------------------------------------------------
-            # Host preparation
-            # ----------------------------------------------------------------
             {
                 "name": "prep_host",
                 "description": (
-                    "Prepare the Ubuntu host: install prerequisite packages and "
-                    "optionally install the inference snap."
+                    "Prepare the Ubuntu host for local lab deployments. "
+                    "Installs LXD, OpenTofu, Ansible, and base prerequisites."
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "install_inference": {
-                            "type": "boolean",
-                            "description": "Also install the inference snap",
-                            "default": True,
-                        },
-                        "install_microcloud_prereqs": {
-                            "type": "boolean",
-                            "description": "Install packages needed for MicroCloud work",
-                            "default": True,
-                        },
-                    },
+                    "properties": {},
                     "required": [],
                 },
             },
@@ -46,230 +31,162 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "engine": {
                             "type": "string",
-                            "description": "Snap name (e.g. nemotron-3-nano)",
+                            "description": "Snap name (default: nemotron-3-nano)",
                             "default": "nemotron-3-nano",
                         }
                     },
                     "required": [],
                 },
             },
-            # ----------------------------------------------------------------
-            # Scenario selection and sizing
-            # ----------------------------------------------------------------
             {
-                "name": "select_scenario",
+                "name": "inspect_host_environment",
                 "description": (
-                    "Analyse the user's intent and select the most appropriate "
-                    "MicroCloud deployment scenario. Returns the scenario definition "
-                    "including required parameters the user must still provide."
+                    "Inspect host capabilities before proposing topology: CPU, RAM, disks, "
+                    "LXD networks, and storage pools. Always call this before sizing/deploy."
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                                "enum": ["standard", "ha", "no_ovn", "custom"],
-                            "description": (
-                                "Scenario name: "
-                                    "standard (3-node, OVN + Ceph — default), "
-                                    "ha (5-node, OVN + Ceph, HA/production), "
-                                    "no_ovn (3-node, Ceph only, no OVN — explicit user opt-out), "
-                                    "custom (AI reasons from scratch about the topology)"
-                            ),
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "Brief rationale for the selection",
-                        },
-                    },
-                    "required": ["scenario"],
+                    "properties": {},
+                    "required": [],
                 },
             },
-            {
-                "name": "get_sizing_recommendation",
-                "description": (
-                    "Return a per-node and total resource recommendation "
-                    "(CPU, RAM, disk) for the selected scenario and workload."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                                "enum": ["standard", "ha", "no_ovn", "custom"],
-                        },
-                        "nodes": {
-                            "type": "integer",
-                            "description": "Intended node count",
-                        },
-                        "workload_description": {
-                            "type": "string",
-                            "description": (
-                                "Free-text description of the workload, "
-                                "e.g. 'staging for 10 developers', 'production k8s'"
-                            ),
-                        },
-                        "tier": {
-                            "type": "string",
-                            "enum": ["minimal", "small", "medium", "large"],
-                            "description": "Force a specific sizing tier (optional)",
-                        },
-                    },
-                    "required": ["scenario"],
-                },
-            },
-            # ----------------------------------------------------------------
-            # Deployment
-            # ----------------------------------------------------------------
-            {
-                "name": "deploy_microcloud",
-                "description": (
-                    "Deploy a MicroCloud cluster with all parameters validated. "
-                    "Call this only after scenario + sizing are agreed with the user."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                                "enum": ["standard", "ha", "no_ovn", "custom"],
-                            "description": "Deployment scenario",
-                        },
-                        "nodes": {
-                            "type": "integer",
-                            "description": "Number of nodes",
-                            "default": 3,
-                        },
-                        "sizing_tier": {
-                            "type": "string",
-                            "enum": ["minimal", "small", "medium", "large"],
-                            "description": "Resource tier per node",
-                            "default": "small",
-                        },
-                        "network_interface": {
-                            "type": "string",
-                            "description": "Network interface for cluster traffic (e.g. eth0)",
-                        },
-                        "ovn_uplink_interface": {
-                            "type": "string",
-                                "description": "NIC for OVN uplink — must have no IP (required for standard and ha)",
-                        },
-                        "ceph_osd_disk": {
-                            "type": "string",
-                                "description": "Block device path for Ceph OSD — must be unformatted (required by all scenarios)",
-                        },
-                        "ipv4_gateway": {
-                            "type": "string",
-                            "description": "IPv4 gateway for OVN uplink (e.g. 10.10.10.1/24)",
-                        },
-                        "ipv4_range": {
-                            "type": "string",
-                            "description": "IPv4 allocation range for OVN (e.g. 10.10.10.100-10.10.10.200)",
-                        },
-                        "preseed_file": {
-                            "type": "string",
-                            "description": "Path to a custom microcloud preseed YAML (optional)",
-                        },
-                    },
-                    "required": ["scenario", "nodes", "network_interface", "storage_disk"],
-                                    "required": ["scenario", "nodes", "network_interface", "ceph_osd_disk"],
-                },
-            },
-            # ----------------------------------------------------------------
-            # Documentation
-            # ----------------------------------------------------------------
             {
                 "name": "get_documentation",
                 "description": (
-                    "Fetch content from official MicroCloud / LXD / MicroCeph "
-                    "documentation. Use this when you need to answer a question "
-                    "about requirements, networking, storage, or best practices."
+                    "Fetch official MicroCloud/LXD/MicroCeph documentation. "
+                    "Use when uncertain or when user asks technical why/how questions."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "topic": {
                             "type": "string",
-                            "description": (
-                                "Topic or doc key, e.g.: "
-                                "microcloud, microcloud-networking, microcloud-storage, "
-                                "microcloud-requirements, microcloud-preseed, "
-                                "lxd, microceph, inference-snaps"
-                            ),
+                            "description": "Topic key (e.g. microcloud, microcloud-networking, microceph)",
                         },
                         "url": {
                             "type": "string",
-                            "description": "Fetch a specific URL directly (optional, overrides topic)",
+                            "description": "Direct URL override (optional)",
                         },
                     },
                     "required": ["topic"],
                 },
             },
-                # ----------------------------------------------------------------
-                # AI-designed topology (no predefined scenario)
-                # ----------------------------------------------------------------
-                {
-                    "name": "propose_custom_topology",
-                    "description": (
-                        "The AI designs a deployment topology from scratch based on "
-                        "the user's workload, team size, availability requirements, "
-                        "and host resources. Use this instead of select_scenario when "
-                        "no standard scenario fits, or when the user wants the AI to "
-                        "think freely. The AI must provide full reasoning."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "node_count": {
-                                "type": "integer",
-                                "description": "Proposed number of nodes (must be odd, >= 3)",
-                            },
-                            "node_cpu": {
-                                "type": "integer",
-                                "description": "Proposed vCPU count per node",
-                            },
-                            "node_ram_gb": {
-                                "type": "integer",
-                                "description": "Proposed RAM in GB per node",
-                            },
-                            "root_disk_gb": {
-                                "type": "integer",
-                                "description": "Proposed root disk in GB per node",
-                            },
-                            "ceph_disk_gb": {
-                                "type": "integer",
-                                "description": "Proposed Ceph OSD disk in GB per node",
-                            },
-                            "use_ovn": {
-                                "type": "boolean",
-                                "description": "Whether to include MicroOVN (default: true)",
-                                "default": True,
-                            },
-                            "ceph_replication_factor": {
-                                "type": "integer",
-                                "description": "Ceph replication factor (2 or 3, default: 3)",
-                                "default": 3,
-                            },
-                            "reasoning": {
-                                "type": "string",
-                                "description": (
-                                    "Full explanation of WHY this topology was chosen: "
-                                    "workload needs, HA considerations, host resources, "
-                                    "trade-offs compared to alternatives."
-                                ),
-                            },
-                            "trade_offs": {
-                                "type": "string",
-                                "description": "What this topology gives up vs a larger or smaller setup",
-                            },
-                            "alternative": {
-                                "type": "string",
-                                "description": "Brief description of the next-best alternative topology",
-                            },
+            {
+                "name": "select_scenario",
+                "description": (
+                    "Choose a baseline scenario only if it fits clearly. "
+                    "Allowed: standard, ha, no_ovn, custom."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": ["standard", "ha", "no_ovn", "custom"],
+                            "description": "Baseline scenario selection",
                         },
-                        "required": ["node_count", "node_cpu", "node_ram_gb", "ceph_disk_gb", "reasoning"],
+                        "reason": {
+                            "type": "string",
+                            "description": "Why this scenario is appropriate",
+                        },
                     },
+                    "required": ["scenario"],
                 },
+            },
+            {
+                "name": "propose_custom_topology",
+                "description": (
+                    "Design topology from scratch based on workload + host capacity. "
+                    "Must include reasoning, trade-offs, and an alternative."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_count": {"type": "integer"},
+                        "node_cpu": {"type": "integer"},
+                        "node_ram_gb": {"type": "integer"},
+                        "root_disk_gb": {"type": "integer"},
+                        "ceph_disk_gb": {"type": "integer"},
+                        "use_ovn": {"type": "boolean", "default": True},
+                        "ceph_replication_factor": {"type": "integer", "default": 3},
+                        "reasoning": {"type": "string"},
+                        "trade_offs": {"type": "string"},
+                        "alternative": {"type": "string"},
+                    },
+                    "required": [
+                        "node_count",
+                        "node_cpu",
+                        "node_ram_gb",
+                        "ceph_disk_gb",
+                        "reasoning",
+                    ],
+                },
+            },
+            {
+                "name": "get_sizing_recommendation",
+                "description": (
+                    "Return per-node and total resource recommendation for a given workload."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": ["standard", "ha", "no_ovn", "custom"],
+                        },
+                        "nodes": {"type": "integer"},
+                        "workload_description": {"type": "string"},
+                        "tier": {
+                            "type": "string",
+                            "enum": ["minimal", "small", "medium", "large"],
+                        },
+                    },
+                    "required": ["scenario"],
+                },
+            },
+            {
+                "name": "deploy_microcloud",
+                "description": (
+                    "Deploy a cluster. Use after planning is complete and user explicitly confirms."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": ["standard", "ha", "no_ovn", "custom"],
+                            "default": "custom",
+                        },
+                        "user_prefix": {
+                            "type": "string",
+                            "description": "Name prefix for workspace/resources (e.g. ismail)",
+                            "default": "lab",
+                        },
+                        "nodes": {"type": "integer", "default": 3},
+                        "sizing_tier": {
+                            "type": "string",
+                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
+                        },
+                        "node_cpu": {"type": "integer"},
+                        "node_memory_mb": {"type": "integer"},
+                        "root_disk_gib": {"type": "integer"},
+                        "ceph_disk_gib": {"type": "integer"},
+                        "network_interface": {
+                            "type": "string",
+                            "description": "Cluster NIC (kept for plan traceability)",
+                        },
+                        "ovn_uplink_interface": {
+                            "type": "string",
+                            "description": "Dedicated no-IP OVN uplink NIC",
+                        },
+                        "ceph_osd_disk": {
+                            "type": "string",
+                            "description": "Dedicated unformatted OSD disk path",
+                        },
+                    },
+                    "required": ["nodes"],
+                },
+            },
         ]
     }
 
