@@ -30,7 +30,12 @@ class LabOrchestrator:
     def bootstrap_host(self) -> str:
         """Prepare the host and install the inference snap."""
         prep_output = self._run_script(self.config.prep_host_script)
-        return f"Host preparation completed.\n\nPrep host output:\n{prep_output}"
+        inference_output = self._run_script(self.config.install_inference_script)
+        return (
+            "Host preparation completed.\n\n"
+            f"Prep host output:\n{prep_output}\n\n"
+            f"Inference setup output:\n{inference_output}"
+        )
 
     def start_chat(self):
         """Start interactive chat session."""
