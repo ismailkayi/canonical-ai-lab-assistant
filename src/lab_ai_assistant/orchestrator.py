@@ -28,14 +28,23 @@ class LabOrchestrator:
         self._load_history()
 
     def bootstrap_host(self) -> str:
-        """Prepare the host and install the inference snap."""
-        prep_output = self._run_script(self.config.prep_host_script)
-        inference_output = self._run_script(self.config.install_inference_script)
-        return (
-            "Host preparation completed.\n\n"
-            f"Prep host output:\n{prep_output}\n\n"
-            f"Inference setup output:\n{inference_output}"
-        )
+        """Prepare the host and install the inference snap.
+
+        Streams output live so the user can see progress and respond to sudo prompts.
+        """
+        for script in [self.config.prep_host_script, self.config.install_inference_script]:
+            if not script.exists():
+                print(f"[warn] Script not found, skipping: {script}")
+                continue
+            print(f"\n--- {script.name} ---")
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=self.config.repo_root,
+                # No capture_output — output goes directly to the terminal
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"{script.name} failed (exit {result.returncode})")
+        return "Bootstrap complete. Run 'lab-ai check' to verify the inference service."
 
     def start_chat(self):
         """Start interactive chat session."""
