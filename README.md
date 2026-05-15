@@ -42,16 +42,17 @@ lab-ai chat  (Python CLI)
     │
     ▼
 AI engine  ←─── local LLM (Nemotron 3 Nano snap)
-    │             understands plain language, picks scenario,
-     │             designs topologies, calculates sizing,
-     │             reasons about trade-offs
+    │             understands plain language,
+    │             inspects host capacity,
+    │             designs topology with trade-offs
     ▼
 Orchestrator
     │
-     ├── select_scenario            (standard / ha / no_ovn)
-     ├── propose_custom_topology    (AI designs from scratch, shows reasoning)
-     ├── get_sizing_recommendation  (CPU / RAM / disk per node)
-     ├── get_documentation          (fetches official Ubuntu docs on demand)
+    ├── inspect_host_environment    (CPU / RAM / disks / LXD facts)
+    ├── select_scenario             (baseline only: standard / ha / no_ovn)
+    ├── propose_custom_topology     (AI designs from scratch)
+    ├── get_sizing_recommendation   (CPU / RAM / disk per node)
+    ├── get_documentation           (official docs when needed)
     │
     └── deploy_microcloud.sh
             │
@@ -65,14 +66,14 @@ Orchestrator
                   └── Inside those VMs:
                         - Installs microcloud, microceph, microovn, lxd snaps
                         - Auto-detects NIC and disk on each node
-                        - Runs `microcloud preseed` to bootstrap the cluster
+                        - Runs microcloud preseed to bootstrap the cluster
 ```
 
-Everything runs locally. No cloud provider, no internet required after setup.
+Everything runs locally. No cloud provider is required.
 
 ---
 
-## Deployment scenarios
+## Baseline scenarios
 
 MicroCloud always uses **MicroCeph** for storage and **MicroOVN** for networking.
 There is no LVM option — every node needs a dedicated, unformatted disk for Ceph OSD.
@@ -82,7 +83,10 @@ There is no LVM option — every node needs a dedicated, unformatted disk for Ce
 | `standard` | 3 | OVN | Ceph | Normal lab (default) |
 | `ha` | 5 | OVN | Ceph | Production / staging, 2-node fault tolerance |
 | `no_ovn` | 3 | none | Ceph | Only if user explicitly skips OVN |
-| `custom` | any (odd, ≥3) | OVN | Ceph | AI designs the topology from scratch |
+| `custom` | any (odd, ≥3) | OVN | Ceph | Starting point for fully custom AI plans |
+
+Important: these are baseline templates, not hard limits. The assistant can propose
+custom node counts, sizing, and trade-offs based on host inspection and workload goals.
 
 ---
 
@@ -158,7 +162,7 @@ canonical-ai-lab-assistant/
     ├── cli.py                   # lab-ai commands (chat, bootstrap, check…)
     ├── ai_engine.py             # Nemotron API + system prompt
     ├── orchestrator.py          # Connects AI decisions to script execution
-    ├── scenarios.py             # Scenario catalog (minimal/standard/ha/custom)
+    ├── scenarios.py             # Baseline scenario catalog (standard/ha/no_ovn/custom)
     ├── sizing.py                # Resource sizing advisor
     ├── doc_fetcher.py           # Fetches official Ubuntu docs on demand
     └── tools.py                 # Tool definitions the LLM can call
@@ -166,15 +170,16 @@ canonical-ai-lab-assistant/
 
 ---
 
-## How a deployment works step by step
+## How deployment planning works
 
-1. You describe what you need (`lab-ai chat`)
-2. The AI reads your message and calls `select_scenario` internally → picks minimal / standard / ha / custom
-3. The AI calls `get_sizing_recommendation` → calculates CPU / RAM / disk per node based on your host resources
-4. If any required parameter is missing (user prefix, node count) the AI asks you
-5. You confirm the plan
-6. `deploy_microcloud.sh` runs:
+1. You describe what you need in plain language.
+2. The AI inspects the host with inspect_host_environment.
+3. The AI may fetch docs with get_documentation if requirements are unclear.
+4. The AI either picks a baseline scenario or proposes a custom topology.
+5. The AI explains reasoning, trade-offs, and one alternative.
+6. If required deployment parameters are missing, it asks follow-up questions.
+7. After explicit confirmation, deploy_microcloud.sh runs:
    - Detects your LXD bridge and storage pool automatically
    - Runs `tofu apply` → creates LXD VMs
    - Runs `ansible-playbook microcloud.yml` → installs snaps inside VMs and bootstraps the cluster
-7. You get a summary with node IPs and LXD UI links
+8. You get a summary with node IPs and LXD UI links
