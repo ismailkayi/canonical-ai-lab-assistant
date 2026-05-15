@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canonical-ai-lab-assistant"
+version = "0.1.0"
+description = "AI-powered Lab Automation Assistant for Canonical Infrastructure"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [
+    {name = "Ismail Kayi", email = "ismail.kayi@canonical.com"}
+]
+
+dependencies = [
+    "typer[all]>=0.9.0",      # CLI framework
+    "pydantic>=2.0",           # Data validation
+    "requests>=2.31.0",        # HTTP client
+    "python-dotenv>=1.0.0",    # Environment management
+    "rich>=13.0.0",            # Rich terminal output
+    "langchain>=0.1.0",        # LLM orchestration framework
+    "llama-index>=0.9.0",      # RAG framework (future)
+    "pyyaml>=6.0",             # YAML parsing
+    "structlog>=23.0.0",       # Structured logging
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+[project.scripts]
+lab-ai = "lab_ai_assistant.cli:main"
+
+[tool.setuptools]
+packages = ["lab_ai_assistant"]
+package-dir = {"" = "src"}
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
