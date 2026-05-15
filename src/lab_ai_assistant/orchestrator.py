@@ -86,6 +86,11 @@ class LabOrchestrator:
         display_message = ai_response.get("message") or ai_response.get("content", "")
 
         action = ai_response.get("action")
+        # Show reasoning if the AI provided it (makes the AI feel like it's thinking)
+        reasoning = ai_response.get("reasoning", "")
+        if reasoning:
+            display_message = f"[thinking: {reasoning}]\n\n{display_message}" if display_message else f"[thinking: {reasoning}]"
+
         if not action:
             return display_message
 
@@ -170,7 +175,42 @@ class LabOrchestrator:
             content = doc.get("content", "")
             return f"📖 **{title}**\nSource: {doc['url']}\n\n{content[:2500]}"
 
-        return None  # not a local tool
+            if action == "propose_custom_topology":
+                nodes = parameters.get("node_count", 3)
+                cpu = parameters.get("node_cpu", 2)
+                ram = parameters.get("node_ram_gb", 8)
+                root = parameters.get("root_disk_gb", 40)
+                ceph = parameters.get("ceph_disk_gb", 50)
+                ovn = parameters.get("use_ovn", True)
+                replication = parameters.get("ceph_replication_factor", 3)
+                reasoning = parameters.get("reasoning", "")
+                trade_offs = parameters.get("trade_offs", "")
+                alternative = parameters.get("alternative", "")
+
+                total_cpu = nodes * cpu
+                total_ram = nodes * ram
+                total_ceph = nodes * ceph
+
+                lines = [
+                    f"Custom topology proposal",
+                    f"",
+                    f"  Nodes            : {nodes}",
+                    f"  vCPU / node      : {cpu}  (total: {total_cpu} vCPU)",
+                    f"  RAM / node       : {ram} GB  (total: {total_ram} GB)",
+                    f"  Root disk / node : {root} GB",
+                    f"  Ceph disk / node : {ceph} GB  (total Ceph pool: ~{total_ceph} GB usable/{replication}× replicated)",
+                    f"  OVN networking   : {'yes' if ovn else 'no (explicitly skipped)'}",
+                    f"  Ceph replication : {replication}×",
+                ]
+                if reasoning:
+                    lines += ["", "Why this topology:", f"  {reasoning}"]
+                if trade_offs:
+                    lines += ["", "Trade-offs:", f"  {trade_offs}"]
+                if alternative:
+                    lines += ["", "Alternative:", f"  {alternative}"]
+                return "\n".join(lines)
+
+            return None  # not a local tool
 
     def _execute_action(self, action: str, parameters: dict[str, Any]) -> str:
         """Execute a script-backed action."""

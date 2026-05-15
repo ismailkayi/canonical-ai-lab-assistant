@@ -68,13 +68,13 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "scenario": {
                             "type": "string",
-                            "enum": ["minimal", "standard", "ha", "custom"],
+                                "enum": ["standard", "ha", "no_ovn", "custom"],
                             "description": (
                                 "Scenario name: "
-                                "minimal (3-node, no OVN, LVM, PoC/dev), "
-                                "standard (3-node, OVN, LVM, typical lab), "
-                                "ha (5-node, OVN, Ceph, production-like), "
-                                "custom (user-defined everything)"
+                                    "standard (3-node, OVN + Ceph — default), "
+                                    "ha (5-node, OVN + Ceph, HA/production), "
+                                    "no_ovn (3-node, Ceph only, no OVN — explicit user opt-out), "
+                                    "custom (AI reasons from scratch about the topology)"
                             ),
                         },
                         "reason": {
@@ -96,7 +96,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "scenario": {
                             "type": "string",
-                            "enum": ["minimal", "standard", "ha", "custom"],
+                                "enum": ["standard", "ha", "no_ovn", "custom"],
                         },
                         "nodes": {
                             "type": "integer",
@@ -132,7 +132,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "scenario": {
                             "type": "string",
-                            "enum": ["minimal", "standard", "ha", "custom"],
+                                "enum": ["standard", "ha", "no_ovn", "custom"],
                             "description": "Deployment scenario",
                         },
                         "nodes": {
@@ -152,19 +152,11 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                         "ovn_uplink_interface": {
                             "type": "string",
-                            "description": "NIC for OVN uplink (required for standard and ha scenarios)",
-                        },
-                        "storage_disk": {
-                            "type": "string",
-                            "description": "Block device path for LVM storage pool (e.g. /dev/sdb)",
+                                "description": "NIC for OVN uplink — must have no IP (required for standard and ha)",
                         },
                         "ceph_osd_disk": {
                             "type": "string",
-                            "description": "Block device path for Ceph OSD (required for ha scenario)",
-                        },
-                        "storage_size": {
-                            "type": "string",
-                            "description": "Storage pool size (e.g. 50GB). Ignored when a full disk is given.",
+                                "description": "Block device path for Ceph OSD — must be unformatted (required by all scenarios)",
                         },
                         "ipv4_gateway": {
                             "type": "string",
@@ -180,6 +172,7 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                     },
                     "required": ["scenario", "nodes", "network_interface", "storage_disk"],
+                                    "required": ["scenario", "nodes", "network_interface", "ceph_osd_disk"],
                 },
             },
             # ----------------------------------------------------------------
@@ -212,6 +205,71 @@ def get_tool_definitions() -> dict[str, Any]:
                     "required": ["topic"],
                 },
             },
+                # ----------------------------------------------------------------
+                # AI-designed topology (no predefined scenario)
+                # ----------------------------------------------------------------
+                {
+                    "name": "propose_custom_topology",
+                    "description": (
+                        "The AI designs a deployment topology from scratch based on "
+                        "the user's workload, team size, availability requirements, "
+                        "and host resources. Use this instead of select_scenario when "
+                        "no standard scenario fits, or when the user wants the AI to "
+                        "think freely. The AI must provide full reasoning."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "node_count": {
+                                "type": "integer",
+                                "description": "Proposed number of nodes (must be odd, >= 3)",
+                            },
+                            "node_cpu": {
+                                "type": "integer",
+                                "description": "Proposed vCPU count per node",
+                            },
+                            "node_ram_gb": {
+                                "type": "integer",
+                                "description": "Proposed RAM in GB per node",
+                            },
+                            "root_disk_gb": {
+                                "type": "integer",
+                                "description": "Proposed root disk in GB per node",
+                            },
+                            "ceph_disk_gb": {
+                                "type": "integer",
+                                "description": "Proposed Ceph OSD disk in GB per node",
+                            },
+                            "use_ovn": {
+                                "type": "boolean",
+                                "description": "Whether to include MicroOVN (default: true)",
+                                "default": True,
+                            },
+                            "ceph_replication_factor": {
+                                "type": "integer",
+                                "description": "Ceph replication factor (2 or 3, default: 3)",
+                                "default": 3,
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": (
+                                    "Full explanation of WHY this topology was chosen: "
+                                    "workload needs, HA considerations, host resources, "
+                                    "trade-offs compared to alternatives."
+                                ),
+                            },
+                            "trade_offs": {
+                                "type": "string",
+                                "description": "What this topology gives up vs a larger or smaller setup",
+                            },
+                            "alternative": {
+                                "type": "string",
+                                "description": "Brief description of the next-best alternative topology",
+                            },
+                        },
+                        "required": ["node_count", "node_cpu", "node_ram_gb", "ceph_disk_gb", "reasoning"],
+                    },
+                },
         ]
     }
 

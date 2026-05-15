@@ -12,14 +12,12 @@ from typing import Any
 
 
 class StorageBackend(str, Enum):
-    LVM = "lvm"
-    CEPH = "ceph"
+    CEPH = "ceph"  # MicroCloud always uses Ceph; LVM is not a valid option
 
 
 class NetworkMode(str, Enum):
-    FLAT = "flat"          # Simple, no OVN
-    OVN = "ovn"            # OVN-based virtual networking (standard MC)
-    OVN_UPLINK = "ovn_uplink"  # OVN with physical uplink (full MicroCloud)
+    NO_OVN = "no_ovn"      # Ceph only, no OVN — explicit opt-out, unusual
+    OVN = "ovn"            # Standard MicroCloud with MicroOVN (default)
 
 
 class SizingTier(str, Enum):
@@ -107,104 +105,109 @@ class MCScenario:
 
 SCENARIOS: dict[str, MCScenario] = {
 
-    "minimal": MCScenario(
-        name="minimal",
-        label="Minimal (PoC / Dev)",
-        description=(
-            "Smallest possible 3-node MicroCloud, no OVN, no Ceph. "
-            "Uses LVM local storage. Ideal for a quick proof-of-concept or "
-            "a developer sandbox where resource usage must be minimal."
-        ),
-        min_nodes=3,
-        default_nodes=3,
-        network_mode=NetworkMode.FLAT,
-        storage_backend=StorageBackend.LVM,
-        default_sizing=SizingTier.MINIMAL,
-        requires_dedicated_storage_disk=True,
-        required_params=["network_interface", "storage_disk"],
-        optional_params=["nodes", "storage_size"],
-        notes="OVN is disabled. No distributed Ceph storage. Suitable for lab only.",
-    ),
-
+    # ------------------------------------------------------------------
+    # STANDARD: the default for almost every deployment
+    # 3-node, MicroCeph for distributed storage, MicroOVN for networking
+    # ------------------------------------------------------------------
     "standard": MCScenario(
         name="standard",
-        label="Standard (3-node with OVN + LVM)",
+        label="Standard (3-node, OVN + Ceph)",
         description=(
-            "Standard 3-node MicroCloud with MicroOVN for virtual networking "
-            "and LVM for local storage. The baseline scenario for most lab "
-            "deployments."
+            "The baseline MicroCloud: 3 nodes, MicroCeph for distributed block "
+            "storage, MicroOVN for virtual networking. Each node needs one "
+            "dedicated disk for Ceph OSD. Suitable for most lab environments."
         ),
         min_nodes=3,
         default_nodes=3,
         network_mode=NetworkMode.OVN,
-        storage_backend=StorageBackend.LVM,
+        storage_backend=StorageBackend.CEPH,
         default_sizing=SizingTier.SMALL,
         requires_dedicated_storage_disk=True,
-        required_params=["network_interface", "ovn_uplink_interface", "storage_disk"],
-        optional_params=["nodes", "storage_size", "ipv4_gateway", "ipv4_range"],
-        notes="Requires a dedicated NIC or VLAN for OVN uplink traffic.",
+        required_params=["network_interface", "ovn_uplink_interface", "ceph_osd_disk"],
+        optional_params=["nodes", "ipv4_gateway", "ipv4_range"],
+        notes=(
+            "The dedicated OVN uplink NIC must have no IP address assigned. "
+            "The Ceph OSD disk must be unformatted and not mounted."
+        ),
     ),
 
+    # ------------------------------------------------------------------
+    # HA: 5-node, full resilience
+    # ------------------------------------------------------------------
     "ha": MCScenario(
         name="ha",
-        label="High Availability (5-node, Ceph + OVN)",
+        label="High Availability (5-node, OVN + Ceph)",
         description=(
-            "Full 5-node HA MicroCloud: MicroCeph for distributed block storage, "
-            "MicroOVN for virtual networking, LXD cluster for compute. "
-            "Suitable for staging/production environments."
+            "Production-grade 5-node MicroCloud: MicroCeph (5 OSDs) for "
+            "redundant distributed storage, MicroOVN for virtual networking. "
+            "Can tolerate the loss of any 2 nodes without data loss."
         ),
         min_nodes=5,
         default_nodes=5,
-        network_mode=NetworkMode.OVN_UPLINK,
+        network_mode=NetworkMode.OVN,
         storage_backend=StorageBackend.CEPH,
         default_sizing=SizingTier.MEDIUM,
         requires_dedicated_storage_disk=True,
-        required_params=[
-            "network_interface",
-            "ovn_uplink_interface",
-            "storage_disk",
-            "ceph_osd_disk",
-        ],
-        optional_params=[
-            "nodes",
-            "storage_size",
-            "ipv4_gateway",
-            "ipv4_range",
-            "ipv6_gateway",
-            "ipv6_range",
-        ],
+        required_params=["network_interface", "ovn_uplink_interface", "ceph_osd_disk"],
+        optional_params=["nodes", "ipv4_gateway", "ipv4_range", "ipv6_gateway", "ipv6_range"],
         notes=(
-            "Ceph requires at least 3 OSD disks across the cluster. "
-            "Plan ≥ 1 dedicated disk per node for Ceph OSD."
+            "5 nodes = Ceph replication factor 3 with 2 spare. "
+            "Each node needs a dedicated, unformatted disk for Ceph OSD."
         ),
     ),
 
+    # ------------------------------------------------------------------
+    # NO_OVN: only when the user explicitly requests it
+    # ------------------------------------------------------------------
+    "no_ovn": MCScenario(
+        name="no_ovn",
+        label="Ceph-only (no OVN)",
+        description=(
+            "3-node MicroCloud with MicroCeph but WITHOUT MicroOVN. "
+            "Use this only when the user explicitly says they don't need "
+            "overlay networking. Flat networking via the cluster bridge only."
+        ),
+        min_nodes=3,
+        default_nodes=3,
+        network_mode=NetworkMode.NO_OVN,
+        storage_backend=StorageBackend.CEPH,
+        default_sizing=SizingTier.SMALL,
+        requires_dedicated_storage_disk=True,
+        required_params=["network_interface", "ceph_osd_disk"],
+        optional_params=["nodes"],
+        notes=(
+            "No OVN means no tenant networking isolation. Instances share the "
+            "cluster bridge. Only choose this if the user explicitly opts out of OVN."
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # CUSTOM: AI-designed topology, no predefined constraints
+    # ------------------------------------------------------------------
     "custom": MCScenario(
         name="custom",
-        label="Custom (user-defined)",
+        label="Custom (AI-designed topology)",
         description=(
-            "Fully custom topology. The AI collects all parameters from the user "
-            "based on their specific requirements."
+            "The AI reasons from scratch about the optimal deployment. "
+            "Not bound to standard node counts. The AI decides everything "
+            "based on the user's workload, team size, budget, and HA needs."
         ),
         min_nodes=3,
         default_nodes=3,
         network_mode=NetworkMode.OVN,
-        storage_backend=StorageBackend.LVM,
+        storage_backend=StorageBackend.CEPH,
         default_sizing=SizingTier.SMALL,
         requires_dedicated_storage_disk=True,
-        required_params=["network_interface", "storage_disk"],
+        required_params=["network_interface", "ovn_uplink_interface", "ceph_osd_disk"],
         optional_params=[
             "nodes",
-            "storage_size",
-            "ovn_uplink_interface",
-            "ceph_osd_disk",
             "ipv4_gateway",
             "ipv4_range",
             "ipv6_gateway",
             "ipv6_range",
             "preseed_file",
         ],
-        notes="All options are negotiated during the conversation.",
+        notes="All topology decisions are made by the AI based on the conversation.",
     ),
 }
 

@@ -43,12 +43,15 @@ lab-ai chat  (Python CLI)
     ▼
 AI engine  ←─── local LLM (Nemotron 3 Nano snap)
     │             understands plain language, picks scenario,
-    │             calculates sizing, asks missing questions
+     │             designs topologies, calculates sizing,
+     │             reasons about trade-offs
     ▼
 Orchestrator
     │
-    ├── select_scenario / get_sizing_recommendation  (Python, instant)
-    ├── get_documentation  (fetches official Ubuntu docs on demand)
+     ├── select_scenario            (standard / ha / no_ovn)
+     ├── propose_custom_topology    (AI designs from scratch, shows reasoning)
+     ├── get_sizing_recommendation  (CPU / RAM / disk per node)
+     ├── get_documentation          (fetches official Ubuntu docs on demand)
     │
     └── deploy_microcloud.sh
             │
@@ -71,12 +74,15 @@ Everything runs locally. No cloud provider, no internet required after setup.
 
 ## Deployment scenarios
 
+MicroCloud always uses **MicroCeph** for storage and **MicroOVN** for networking.
+There is no LVM option — every node needs a dedicated, unformatted disk for Ceph OSD.
+
 | Scenario | Nodes | Networking | Storage | Use case |
 |---|---|---|---|---|
-| `minimal` | 3 | bridge only | LVM | Quick PoC, no OVN |
-| `standard` | 3 | OVN | LVM | Normal lab |
-| `ha` | 5 | OVN | Ceph | Staging / resilient |
-| `custom` | any (odd, ≥3) | your choice | your choice | Advanced |
+| `standard` | 3 | OVN | Ceph | Normal lab (default) |
+| `ha` | 5 | OVN | Ceph | Production / staging, 2-node fault tolerance |
+| `no_ovn` | 3 | none | Ceph | Only if user explicitly skips OVN |
+| `custom` | any (odd, ≥3) | OVN | Ceph | AI designs the topology from scratch |
 
 ---
 
@@ -84,7 +90,8 @@ Everything runs locally. No cloud provider, no internet required after setup.
 
 - Ubuntu 24.04 host
 - At least 24 CPU cores and 48 GB RAM (for a 3-node standard cluster)
-- LXD installed (`snap install lxd`)
+
+LXD, OpenTofu, and Ansible are installed automatically by `lab-ai bootstrap`.
 
 ---
 
