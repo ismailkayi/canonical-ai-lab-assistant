@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import requests
@@ -50,8 +51,9 @@ class AIEngine:
 
         try:
             response = self._call_inference(messages)
+            # Store full raw JSON so AI remembers its own tool calls on next turn
             self.conversation_history.append(
-                {"role": "assistant", "content": response.get("content", "")}
+                {"role": "assistant", "content": response.get("_raw", response.get("content", ""))}
             )
             return response
         except Exception as exc:
@@ -74,12 +76,15 @@ class AIEngine:
         response.raise_for_status()
 
         result = response.json()
-        content = result.get("message", {}).get("content", "")
+        raw_content = result.get("message", {}).get("content", "")
+        cleaned = _strip_markdown_json(raw_content)
 
         try:
-            return json.loads(content)
+            parsed = json.loads(cleaned)
+            parsed["_raw"] = raw_content
+            return parsed
         except json.JSONDecodeError:
-            return {"content": content}
+            return {"content": raw_content, "_raw": raw_content}
 
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
         """System prompt focused on custom topology planning."""
@@ -147,3 +152,38 @@ Never use baseline templates or fixed scenario buckets.
 
     def get_conversation_history(self) -> list:
         return self.conversation_history.copy()
+
+    def feed_tool_result(self, tool_name: str, result: str) -> dict[str, Any]:
+        """Inject a tool result into conversation history and get the AI's next step.
+
+        This closes the agentic loop: the AI sees the tool output and reasons
+        further before giving the user a final synthesised response.
+        """
+        self.conversation_history.append({
+            "role": "user",
+            "content": (
+                f"Tool '{tool_name}' completed. Result:\n\n{result}\n\n"
+                "Analyze this result and continue your plan. "
+                "If you have enough information, give your final recommendation. "
+                "If you need another tool, call it."
+            ),
+        })
+        system_prompt = self._get_default_system_prompt()
+        messages = [{"role": "system", "content": system_prompt}] + self.conversation_history
+        try:
+            response = self._call_inference(messages)
+            self.conversation_history.append(
+                {"role": "assistant", "content": response.get("_raw", response.get("content", ""))}
+            )
+            return response
+        except Exception as exc:
+            logger.error(f"Error in tool result synthesis: {exc}")
+            return {"content": f"Error: {str(exc)}", "error": True}
+
+
+def _strip_markdown_json(content: str) -> str:
+    """Remove markdown code fences that LLMs sometimes wrap around JSON output."""
+    content = content.strip()
+    content = re.sub(r"^```(?:json)?\s*", "", content)
+    content = re.sub(r"\s*```$", "", content)
+    return content.strip()

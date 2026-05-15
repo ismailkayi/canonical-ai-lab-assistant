@@ -85,47 +85,52 @@ class LabOrchestrator:
                 print(f"Error: {exc}\n")
 
     def _process_user_input(self, user_message: str) -> str:
+        """Process user input through the agentic loop.
+
+        The loop runs until the AI returns no tool call (final answer) or
+        the maximum number of tool rounds is reached.
+        """
+        MAX_TOOL_ROUNDS = 5
+
         ai_response = self.ai_engine.chat(user_message)
 
-        if ai_response.get("error"):
-            return ai_response.get("content", "An error occurred")
+        for _round in range(MAX_TOOL_ROUNDS):
+            if ai_response.get("error"):
+                return ai_response.get("content", "An error occurred")
 
-        display_message = ai_response.get("message") or ai_response.get("content", "")
-        reasoning = ai_response.get("reasoning", "")
-        if reasoning:
-            display_message = (
-                f"[thinking: {reasoning}]\n\n{display_message}"
-                if display_message
-                else f"[thinking: {reasoning}]"
-            )
+            action = ai_response.get("action")
+            message = ai_response.get("message") or ai_response.get("content", "")
+            reasoning = ai_response.get("reasoning", "")
 
-        action = ai_response.get("action")
-        if not action:
-            return display_message
+            # No tool call → this is the final user-facing answer
+            if not action:
+                if reasoning:
+                    return f"[thinking: {reasoning}]\n\n{message}" if message else f"[thinking: {reasoning}]"
+                return message or ""
 
-        parameters = ai_response.get("parameters", {})
+            parameters = ai_response.get("parameters", {})
 
-        local_result = self._handle_local_tool(action, parameters)
-        if local_result is not None:
-            return f"{display_message}\n\n{local_result}" if display_message else local_result
+            # Deployment requires explicit user confirmation before execution
+            if ai_response.get("needs_confirmation"):
+                confirmation_prompt = ai_response.get("confirmation_prompt", "Shall I proceed?")
+                prefix = f"[thinking: {reasoning}]\n\n{message}" if reasoning else message
+                return f"{prefix}\n\n{confirmation_prompt}\n(Reply 'yes' to confirm)"
 
-        is_valid, error_msg = validate_tool_parameters(action, parameters)
-        if not is_valid:
-            return f"I still need more information: {error_msg}"
+            # Execute the tool
+            tool_result = self._handle_local_tool(action, parameters)
+            if tool_result is None:
+                is_valid, error_msg = validate_tool_parameters(action, parameters)
+                if not is_valid:
+                    return f"I still need more information: {error_msg}"
+                logger.info(f"Executing action: {action} params={parameters}")
+                tool_result = self._execute_action(action, parameters)
+                self._record_deployment(action, parameters, tool_result)
 
-        if ai_response.get("needs_confirmation"):
-            confirmation_prompt = ai_response.get("confirmation_prompt", "Shall I proceed?")
-            return (
-                f"{display_message}\n\n"
-                f"{confirmation_prompt}\n"
-                f"(Reply 'yes' to confirm)"
-            )
+            # Feed result back to AI for synthesis (closes the loop)
+            ai_response = self.ai_engine.feed_tool_result(action, tool_result)
 
-        logger.info(f"Executing action: {action} params={parameters}")
-        result = self._execute_action(action, parameters)
-        self._record_deployment(action, parameters, result)
-
-        return f"{display_message}\n\nResult:\n{result}" if display_message else f"Result:\n{result}"
+        # Fallback: return whatever the AI last said
+        return ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds.")
 
     def _handle_local_tool(self, action: str, parameters: dict[str, Any]) -> str | None:
         """Execute tools that do not require external scripts."""
@@ -253,18 +258,25 @@ class LabOrchestrator:
                 cmd.append("--auto-approve")
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(
+            # Stream output live so the user sees Terraform/Ansible progress
+            output_lines: list[str] = []
+            with subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=self.config.response_timeout,
                 cwd=self.config.repo_root,
-            )
+            ) as proc:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    print(line, end="", flush=True)
+                    output_lines.append(line)
+                proc.wait()
 
-            if result.returncode != 0:
-                return f"Script failed:\n{result.stderr or result.stdout}"
-
-            return result.stdout or "(no output)"
+            output = "".join(output_lines)
+            if proc.returncode != 0:
+                return f"Script failed (exit {proc.returncode}):\n{output[-2000:]}"
+            return output or "(no output)"
 
         except subprocess.TimeoutExpired:
             return "Action timed out."
