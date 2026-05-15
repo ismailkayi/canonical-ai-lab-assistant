@@ -2,237 +2,166 @@
 
 **AI-powered infrastructure automation for Canonical deployments**
 
-An intelligent CLI assistant that uses AI to automate the deployment and management of MicroCloud and Canonical Kubernetes clusters. Talk to your infrastructure like you would to a person.
 
-## Vision
 
-Instead of learning complex CLI commands and scripts, users can simply chat with an AI agent:
 
-```
-You: Deploy me a 3 node microcloud setup with eth0 and lvm storage
-Assistant: I'll deploy MicroCloud with 3 nodes. This will take about 10 minutes...
-```
 
-The AI handles:
-- Parameter extraction and validation
-- Documentation lookups
-- Asking clarification questions
-- Orchestrating deployment scripts
-- Tracking deployment history
 
-## Key Features
 
-- 🤖 **Natural Language Interface**: Describe what you want, AI figures out the rest
-- 🚀 **Multi-Scenario Support**: MicroCloud, Kubernetes Snap, Kubernetes+Juju
-- 💭 **Smart Reasoning**: Uses Nemotron inference snap with step-by-step planning
-- 📚 **Context-Aware**: References official documentation automatically
-- ⚙️ **Safe Execution**: Asks for confirmation before destructive operations
-- 💾 **History Tracking**: Maintains deployment history and state
-- 🔌 **Modular**: Extensible tool system for adding new capabilities
 
-## Architecture
 
-```
-┌─────────────────────────────────────────┐
-│  CLI Interface (Typer)                  │
-├─────────────────────────────────────────┤
-│  AI Agent (Nemotron 3 Nano)             │
-├─────────────────────────────────────────┤
-│  Tool Executor                          │
-│  ├─ orchestrate.sh (non-interactive)    │
-│  ├─ Ansible playbooks                   │
-│  └─ Terraform                           │
-├─────────────────────────────────────────┤
-│  Lab Automation Backend                 │
-│  (from ismailkayi/lab-automation)       │
-└─────────────────────────────────────────┘
-```
 
-## Quick Start
 
-### Prerequisites
 
-- Ubuntu 22.04 LTS or later
-- Python 3.10+
-- Access to ismailkayi/lab-automation repository
 
-### Installation
 
-```bash
-# Clone repository
-git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
-cd canonical-ai-lab-assistant
 
-# Install inference engine
-sudo snap install nemotron-3-nano
 
-# Install project
-pip install -e ".[dev]"
 
-# Verify setup
-lab-ai check
-```
 
-### First Deployment
 
-```bash
-# Start interactive chat
-lab-ai chat
 
-# Example conversation
-You: Deploy 3 node microcloud
-Assistant: I'll need to know:
-  1. Which network interface? (e.g., eth0)
-  2. Storage type? (lvm or ceph)
-```
 
-## Development
 
-### Project Structure
 
-```
-canonical-ai-lab-assistant/
-├── pyproject.toml              # Project configuration
-├── README.md
-├── src/lab_ai_assistant/
-│   ├── __init__.py
-│   ├── cli.py                  # CLI entry point
-│   ├── config.py               # Configuration management
-│   ├── ai_engine.py            # AI/LLM integration
-│   ├── orchestrator.py         # Main orchestration logic
-│   ├── tools.py                # Tool definitions
-│   └── utils.py                # Utility functions
-└── tests/
-```
 
-### Running Tests
 
-```bash
-pytest -v
-pytest --cov=src/lab_ai_assistant
-```
 
-### Code Quality
 
-```bash
-# Format
-black src/ tests/
 
-# Lint
-ruff check src/ tests/
 
-# Type checking
-mypy src/
-```
 
-## Supported Scenarios
 
-### 1. MicroCloud Deployment
 
-Deploy a 3-node MicroCloud cluster with shared storage and networking.
 
-```
-You: Deploy microcloud with 3 nodes
-Assistant: [Asks for network interface and storage type]
-```
 
-### 2. Canonical Kubernetes (Snap)
 
-Deploy Kubernetes using the k8s snap directly on VMs.
 
-```
-You: Deploy kubernetes with 1 control plane and 2 workers
-Assistant: [Validates parameters and deploys]
-```
 
-### 3. Canonical Kubernetes (Juju)
 
-Deploy Kubernetes using Juju controller for enterprise-grade management.
 
-```
-You: Deploy k8s with 3 control planes for high availability
-Assistant: [Sets up Juju controller and deploys k8s bundle]
-```
 
-## Tool Definitions
 
-Available AI tools:
 
-- **deploy_microcloud**: Deploy MicroCloud clusters
-- **deploy_k8s_snap**: Deploy Kubernetes via snap
-- **deploy_k8s_juju**: Deploy Kubernetes via Juju
-- **manage_lab**: Update, rebuild, or delete existing deployments
-- **get_lab_status**: Query deployment status
-- **list_workspaces**: Show all deployments
-- **get_documentation**: Fetch relevant documentation
 
-## Configuration
 
-Environment variables (`.env`):
 
-```env
-INFERENCE_HOST=http://localhost:8000
-INFERENCE_MODEL=nemotron-3-nano
-LOG_LEVEL=INFO
-```
 
-State directory: `~/.lab-ai-assistant/`
 
-## Roadmap
 
-### Phase 1: Foundation (Current)
-- ✅ CLI framework
-- ✅ Tool definitions
-- ✅ Basic orchestrate.sh wrapper
-- ⏳ AI engine integration (Nemotron)
 
-### Phase 2: AI Integration
-- ⏳ Function calling with Nemotron
-- ⏳ Multi-turn conversations
-- ⏳ Confirmation flow
 
-### Phase 3: Enhanced Features
-- ⏳ Deployment history tracking
-- ⏳ Error handling & recovery
-- ⏳ Logging & debugging
 
-### Phase 4: RAG & Documentation
-- ⏳ Vector database for docs
-- ⏳ Semantic search
-- ⏳ Context-aware responses
 
-### Phase 5: Snap Packaging
-- ⏳ Snap manifest
-- ⏳ Dependency bundling
-- ⏳ Release automation
 
-## Contributing
 
-Contributions welcome! Please:
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests and linting
-5. Submit a pull request
 
-## License
 
-GPL-3.0-or-later
 
-## References
 
-- [Canonical Inference Snaps](https://documentation.ubuntu.com/inference-snaps/)
-- [Lab Automation](https://github.com/ismailkayi/lab-automation)
-- [MicroCloud](https://microcloud.io/)
-- [Canonical Kubernetes](https://ubuntu.com/kubernetes/charm)
 
-## Support
 
-For issues and questions:
-- GitHub Issues: [Report a bug](https://github.com/ismailkayi/canonical-ai-lab-assistant/issues)
-- Discussions: [Ask a question](https://github.com/ismailkayi/canonical-ai-lab-assistant/discussions)
 
----
 
-**Built with ❤️ for Canonical infrastructure automation**
+ # Canonical AI Lab Assistant
+
+ MicroCloud-first AI assistant for Canonical lab automation.
+
+ This repository is self-contained. The host preparation logic, inference snap installation, and MicroCloud deployment scaffolding all live here, so there is no dependency on the older `lab-automation` repository for the first phase.
+
+ ## Phase 1 Scope
+
+ The first stage is intentionally narrow:
+
+ - prepare the Ubuntu host
+ - install the local inference snap
+ - guide and plan a MicroCloud deployment
+ - keep Kubernetes out of scope for now
+
+ ## What Is Included
+
+ - `scripts/prep_host.sh`: installs basic host prerequisites and can chain the inference install
+ - `scripts/install_inference_snap.sh`: installs the Canonical inference snap
+ - `scripts/deploy_microcloud.sh`: MicroCloud deployment plan scaffold for the assistant to call
+ - `src/lab_ai_assistant/`: CLI, AI engine, tool definitions, and orchestration logic
+
+ ## Quick Start
+
+ ```bash
+ git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
+ cd canonical-ai-lab-assistant
+ pip install -e .
+ ```
+
+ ## Bootstrap Host
+
+ ```bash
+ lab-ai bootstrap
+ ```
+
+ That command runs the repo-local host prep script and installs the inference snap.
+
+ ## Chat With The Assistant
+
+ ```bash
+ lab-ai chat
+ ```
+
+ Example:
+
+ ```text
+ You: Deploy a 3 node MicroCloud setup on eth0 with LVM storage
+ Assistant: I need the storage size and whether you want to use the default preseed.
+ ```
+
+ ## Commands
+
+ - `lab-ai check`: verify the local inference service is available
+ - `lab-ai bootstrap`: prepare the host and install the inference snap
+ - `lab-ai setup`: show the repo-local scripts and setup hints
+ - `lab-ai chat`: start the interactive MicroCloud assistant
+
+ ## Current Behavior
+
+ The assistant is currently limited to MicroCloud-related tasks:
+
+ - host preparation
+ - inference snap installation
+ - MicroCloud deployment planning
+
+ Kubernetes support will be added later after the MicroCloud-only flow is stable.
+
+ ## Project Layout
+
+ ```text
+ canonical-ai-lab-assistant/
+ ├── README.md
+ ├── pyproject.toml
+ ├── scripts/
+ │   ├── deploy_microcloud.sh
+ │   ├── install_inference_snap.sh
+ │   └── prep_host.sh
+ └── src/
+     └── lab_ai_assistant/
+         ├── ai_engine.py
+         ├── cli.py
+         ├── config.py
+         ├── orchestrator.py
+         ├── tools.py
+         └── utils.py
+ ```
+
+ ## Inference Snap
+
+ The default engine is `nemotron-3-nano`. You can override it with environment variables:
+
+ ```env
+ INFERENCE_HOST=http://localhost:8000
+ INFERENCE_MODEL=nemotron-3-nano
+ LOG_LEVEL=INFO
+ ```
+
+ ## Next Step
+
+ The next implementation step is to wire the MicroCloud deployment script to real deployment logic and keep the AI flow parameter-based instead of menu-based.

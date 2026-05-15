@@ -1,11 +1,10 @@
-"""Lab orchestration and execution layer."""
+"""Lab orchestration and execution layer for MicroCloud-only workflows."""
 
 import json
 import logging
 import subprocess
-from pathlib import Path
-from typing import Any, Optional
 from datetime import datetime
+from typing import Any
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.tools import validate_tool_parameters
@@ -23,6 +22,11 @@ class LabOrchestrator:
         self.deployment_history = []
         self._load_history()
 
+    def bootstrap_host(self) -> str:
+        """Prepare the host and install the inference snap."""
+        prep_output = self._run_script(self.config.prep_host_script)
+        return f"Host preparation completed.\n\nPrep host output:\n{prep_output}"
+
     def start_chat(self):
         """Start interactive chat session."""
         if not self.ai_engine.is_available():
@@ -33,7 +37,7 @@ class LabOrchestrator:
 
         logger.info("Starting chat session")
         print("\n" + "="*60)
-        print("Canonical Lab AI Assistant")
+        print("Canonical AI Lab Assistant - MicroCloud first")
         print("="*60)
         print("Type 'help' for commands, 'quit' to exit\n")
 
@@ -52,7 +56,6 @@ class LabOrchestrator:
                     self._print_help()
                     continue
 
-                # Process user message through AI
                 response = self._process_user_input(user_input)
                 print(f"\nAssistant: {response}\n")
 
@@ -73,88 +76,70 @@ class LabOrchestrator:
         Returns:
             Response to display to user
         """
-        # Send to AI engine
         ai_response = self.ai_engine.chat(user_message)
 
         if ai_response.get("error"):
             return ai_response.get("content", "An error occurred")
 
-        # Check if AI detected an action
         action = ai_response.get("action")
         if not action:
-            # Just a conversational response
             return ai_response.get("content", "No response")
 
-        # Action detected - needs parameter validation and execution
         parameters = ai_response.get("parameters", {})
 
-        # Validate parameters
         is_valid, error_msg = validate_tool_parameters(action, parameters)
         if not is_valid:
             return f"Parameter validation failed: {error_msg}\nPlease provide: {error_msg}"
 
-        # Check if confirmation needed
         if ai_response.get("needs_confirmation"):
             confirmation_prompt = ai_response.get("confirmation_prompt", "Proceed?")
             return f"{ai_response.get('explanation', '')}\n\n{confirmation_prompt}\n[User must confirm]"
 
-        # Execute action
         logger.info(f"Executing action: {action} with parameters: {parameters}")
         result = self._execute_action(action, parameters)
 
-        # Log to history
         self._record_deployment(action, parameters, result)
 
         return f"Action: {action}\nParameters: {json.dumps(parameters, indent=2)}\n\nResult:\n{result}"
 
     def _execute_action(self, action: str, parameters: dict[str, Any]) -> str:
-        """
-        Execute an action using orchestrate.sh.
+        """Execute a MicroCloud action using repo scripts.
 
         Args:
-            action: Action name (deploy_microcloud, etc.)
+            action: Action name (prep_host, install_inference_snap, deploy_microcloud)
             parameters: Action parameters
 
         Returns:
             Execution result
         """
         try:
-            # Map action to orchestrate.sh scenario
             scenario_map = {
-                "deploy_microcloud": "microcloud",
-                "deploy_k8s_snap": "k8s-snap",
-                "deploy_k8s_juju": "k8s-juju",
-                "manage_lab": "manage",
-                "get_lab_status": "status",
+                "prep_host": self.config.prep_host_script,
+                "install_inference_snap": self.config.install_inference_script,
+                "deploy_microcloud": self.config.deploy_microcloud_script,
             }
 
-            scenario = scenario_map.get(action)
-            if not scenario:
+            script_path = scenario_map.get(action)
+            if not script_path:
                 return f"Unknown action: {action}"
 
-            # Build command
-            cmd = [
-                str(self.config.orchestrate_script),
-                "--non-interactive",
-                "--scenario", scenario,
-            ]
+            cmd = ["bash", str(script_path)]
 
-            # Add parameters as flags
             for key, value in parameters.items():
                 if value is not None:
                     cmd.append(f"--{key}={value}")
 
-            cmd.append("--auto-approve")
+            if action == "deploy_microcloud":
+                cmd.append("--auto-approve")
 
             logger.info(f"Executing command: {' '.join(cmd)}")
 
-            # Execute
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.config.response_timeout,
-                cwd=self.config.lab_scripts_path
+                cwd=self.config.repo_root,
             )
 
             if result.returncode != 0:
@@ -167,6 +152,19 @@ class LabOrchestrator:
         except Exception as e:
             logger.error(f"Action execution error: {e}")
             return f"Error: {str(e)}"
+
+    def _run_script(self, script_path) -> str:
+        """Run a repo script and return its output."""
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=self.config.response_timeout,
+            cwd=self.config.repo_root,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout)
+        return result.stdout.strip()
 
     def _record_deployment(
         self,
@@ -207,19 +205,16 @@ class LabOrchestrator:
         """Print help information."""
         help_text = """
 Commands:
-  - "Deploy 3 node microcloud setup" - Deploy MicroCloud
-  - "Deploy K8s with 3 control planes and 2 workers" - Deploy Kubernetes
-  - "Show deployment status" - Get current lab status
-  - "Delete the current deployment" - Clean up
+    - "Prepare this host" - Install prerequisites and the inference snap
+    - "Deploy 3 node microcloud setup" - Deploy MicroCloud
+    - "Use eth0 and LVM storage" - Fill missing deployment parameters
   - "help" - Show this message
   - "quit" - Exit
 
 Examples:
-  You: Deploy me 3 node microcloud with eth0 network
-  Assistant: [Asks for clarification on storage]
-  You: Use LVM with 50GB
-  Assistant: [Summarizes and asks for confirmation]
-  You: Yes, proceed
-  Assistant: [Executes deployment]
+    You: Prepare this host for MicroCloud
+    Assistant: [Runs prep_host and installs inference snap]
+    You: Deploy 3 node microcloud with eth0 and LVM storage
+    Assistant: [Asks for missing details, then deploys]
 """
         print(help_text)

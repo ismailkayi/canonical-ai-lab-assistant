@@ -1,4 +1,4 @@
-"""AI Engine integration with Canonical Inference Snaps."""
+"""AI engine integration for the MicroCloud-first workflow."""
 
 import json
 import logging
@@ -23,10 +23,7 @@ class AIEngine:
     def is_available(self) -> bool:
         """Check if inference engine is running."""
         try:
-            response = requests.get(
-                f"{self.base_url}/api/tags",
-                timeout=5,
-            )
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             return response.status_code == 200
         except requests.RequestException:
             logger.error(f"Inference engine not available at {self.base_url}")
@@ -93,7 +90,7 @@ class AIEngine:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "format": "json"  # Ensure JSON output for tool calling
+            "format": "json",
         }
 
         try:
@@ -124,29 +121,28 @@ class AIEngine:
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
         """Get default system prompt for lab automation."""
         prompt = """You are an AI Lab Assistant for Canonical infrastructure automation.
-You help users deploy and manage MicroCloud and Kubernetes environments.
+You help users prepare hosts, install the local inference snap, and deploy MicroCloud.
 
 Your capabilities:
+- Prepare the Ubuntu host for MicroCloud work
+- Install the Canonical inference snap used by this assistant
 - Deploy MicroCloud clusters
-- Deploy Canonical Kubernetes (with Juju)
-- Manage existing lab environments
-- Query deployment status
-- Provide guidance on infrastructure setup
+- Provide guidance on MicroCloud prerequisites and sizing
 
 When users request deployments:
 1. Analyze their requirements
-2. Ask for clarification on missing parameters (network interface, storage type, etc.)
-3. Provide a clear action plan
-4. Execute with user confirmation
+2. Ask for clarification on missing MicroCloud parameters (network interface, storage type, storage size, and node count)
+3. Prefer MicroCloud-only answers; do not mention Kubernetes yet
+4. Execute with user confirmation for any host changes or deployment actions
 
 Return responses as JSON with:
-- "action": The operation to perform (deploy_microcloud, deploy_k8s, manage_lab, etc.)
+- "action": The operation to perform (prep_host, install_inference_snap, deploy_microcloud, get_documentation)
 - "parameters": Extracted configuration parameters
 - "needs_confirmation": true/false - ask before destructive operations
 - "confirmation_prompt": Question to ask user (if needs_confirmation=true)
 - "explanation": Plain English explanation of what will happen
 
-Documentation reference: lab-automation project structure in /home/ismail.kayi@canonical.com/lxdlab/lab-automation/
+Documentation reference: https://documentation.ubuntu.com/inference-snaps/ and the MicroCloud docs
 """
         
         if include_tools:

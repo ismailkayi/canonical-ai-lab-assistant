@@ -1,17 +1,47 @@
-"""Tool definitions for AI agent function calling."""
+"""Tool definitions for the MicroCloud-first AI agent."""
 
 from typing import Any
 
 
 def get_tool_definitions() -> dict[str, Any]:
-    """
-    Return standardized tool definitions for AI function calling.
-    
-    Returns:
-        Tool schema compatible with function calling APIs.
-    """
+    """Return tool definitions used by the AI assistant."""
     return {
         "tools": [
+            {
+                "name": "prep_host",
+                "description": "Prepare the Ubuntu host for MicroCloud and local inference snaps",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "install_inference": {
+                            "type": "boolean",
+                            "description": "Install the inference snap as part of host preparation",
+                            "default": True,
+                        },
+                        "install_microcloud_prereqs": {
+                            "type": "boolean",
+                            "description": "Install common host packages needed for MicroCloud work",
+                            "default": True,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "install_inference_snap",
+                "description": "Install the Canonical inference snap used by this assistant",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "engine": {
+                            "type": "string",
+                            "description": "Inference snap name",
+                            "default": "nemotron-3-nano",
+                        }
+                    },
+                    "required": [],
+                },
+            },
             {
                 "name": "deploy_microcloud",
                 "description": "Deploy a MicroCloud cluster with specified nodes and configuration",
@@ -20,8 +50,8 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "nodes": {
                             "type": "integer",
-                            "description": "Number of nodes in the cluster (minimum 3)",
-                            "default": 3
+                            "description": "Number of nodes in the cluster",
+                            "default": 3,
                         },
                         "network_interface": {
                             "type": "string",
@@ -31,7 +61,7 @@ def get_tool_definitions() -> dict[str, Any]:
                             "type": "string",
                             "enum": ["lvm", "ceph"],
                             "description": "Storage backend type",
-                            "default": "lvm"
+                            "default": "lvm",
                         },
                         "storage_size": {
                             "type": "string",
@@ -42,128 +72,29 @@ def get_tool_definitions() -> dict[str, Any]:
                             "description": "Path to custom preseed file (optional)",
                         },
                     },
-                    "required": ["nodes", "network_interface"]
-                }
-            },
-            {
-                "name": "deploy_k8s_snap",
-                "description": "Deploy Canonical Kubernetes using snap on provided nodes",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "control_plane_nodes": {
-                            "type": "integer",
-                            "description": "Number of control plane nodes",
-                            "default": 1
-                        },
-                        "worker_nodes": {
-                            "type": "integer",
-                            "description": "Number of worker nodes",
-                            "default": 1
-                        },
-                        "network_interface": {
-                            "type": "string",
-                            "description": "Network interface for cluster",
-                        },
-                    },
-                    "required": ["control_plane_nodes", "worker_nodes", "network_interface"]
-                }
-            },
-            {
-                "name": "deploy_k8s_juju",
-                "description": "Deploy Canonical Kubernetes using Juju with controller and machines",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "control_plane_nodes": {
-                            "type": "integer",
-                            "description": "Number of control plane nodes (minimum 1, 3+ for HA)",
-                            "default": 1
-                        },
-                        "worker_nodes": {
-                            "type": "integer",
-                            "description": "Number of worker nodes",
-                            "default": 1
-                        },
-                        "network_interface": {
-                            "type": "string",
-                            "description": "Network interface for cluster communication",
-                        },
-                    },
-                    "required": ["control_plane_nodes", "worker_nodes", "network_interface"]
-                }
-            },
-            {
-                "name": "manage_lab",
-                "description": "Manage existing lab deployment (update, rebuild, or delete)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                            "enum": ["microcloud", "k8s-snap", "k8s-juju"],
-                            "description": "Type of deployment to manage"
-                        },
-                        "action": {
-                            "type": "string",
-                            "enum": ["update", "rebuild", "delete"],
-                            "description": "Management action to perform"
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace identifier (optional, auto-detect if single workspace)",
-                        },
-                    },
-                    "required": ["scenario", "action"]
-                }
-            },
-            {
-                "name": "get_lab_status",
-                "description": "Get current status of lab deployment",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                            "enum": ["microcloud", "k8s-snap", "k8s-juju"],
-                            "description": "Type of deployment to query"
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace identifier (optional)",
-                        },
-                    },
-                    "required": ["scenario"]
-                }
-            },
-            {
-                "name": "list_workspaces",
-                "description": "List all available deployments/workspaces",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                }
+                    "required": ["nodes", "network_interface"],
+                },
             },
             {
                 "name": "get_documentation",
-                "description": "Fetch relevant documentation for a topic",
+                "description": "Fetch relevant MicroCloud documentation for a topic",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "topic": {
                             "type": "string",
-                            "description": "Documentation topic (e.g., 'microcloud-setup', 'k8s-requirements')",
-                        },
+                            "description": "Documentation topic (e.g., 'microcloud-setup', 'storage', 'networking')",
+                        }
                     },
-                    "required": ["topic"]
-                }
-            }
+                    "required": ["topic"],
+                },
+            },
         ]
     }
 
 
 def get_tool_by_name(name: str) -> dict[str, Any] | None:
-    """Get specific tool definition by name."""
+    """Get a tool definition by name."""
     tools = get_tool_definitions()["tools"]
     for tool in tools:
         if tool["name"] == name:
@@ -172,27 +103,16 @@ def get_tool_by_name(name: str) -> dict[str, Any] | None:
 
 
 def validate_tool_parameters(tool_name: str, parameters: dict[str, Any]) -> tuple[bool, str]:
-    """
-    Validate parameters against tool schema.
-    
-    Args:
-        tool_name: Name of the tool
-        parameters: Parameters to validate
-        
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
+    """Validate parameters against the selected tool schema."""
     tool = get_tool_by_name(tool_name)
     if not tool:
         return False, f"Tool '{tool_name}' not found"
-    
+
     schema = tool["parameters"]
     required_params = schema.get("required", [])
-    
-    # Check required parameters
+
     for param in required_params:
         if param not in parameters:
             return False, f"Missing required parameter: {param}"
-    
-    # TODO: Add type validation here
+
     return True, ""

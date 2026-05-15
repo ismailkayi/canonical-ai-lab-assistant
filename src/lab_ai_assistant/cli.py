@@ -1,4 +1,4 @@
-"""CLI entry point for Lab AI Assistant."""
+"""CLI entry point for the MicroCloud-first Lab AI Assistant."""
 
 import logging
 import sys
@@ -57,20 +57,28 @@ def check():
 @app.command()
 def version():
     """Show version information."""
-    console.print(f"Canonical Lab AI Assistant v{__version__}")
+    console.print(f"Canonical AI Lab Assistant v{__version__}")
+
+
+@app.command()
+def bootstrap():
+    """Prepare the host and install the inference snap."""
+    config = get_config()
+    orchestrator = LabOrchestrator(config)
+    result = orchestrator.bootstrap_host()
+    console.print(result)
 
 
 @app.command()
 def setup():
-    """Setup inference engine."""
+    """Show setup instructions for the inference snap."""
     config = get_config()
-    console.print(f"[cyan]Setting up inference engine: {config.inference_engine}[/cyan]")
-    console.print(f"\nTo install, run:")
-    console.print(f"  sudo snap install {config.inference_engine}")
-    console.print(f"\nAfter installation, the service should be available at:")
-    console.print(f"  {config.inference_host}")
-    console.print(f"\nThen start the assistant with:")
-    console.print(f"  lab-ai chat")
+    console.print(f"[cyan]Inference engine:[/cyan] {config.inference_engine}")
+    console.print(f"[cyan]Host prep script:[/cyan] {config.prep_host_script}")
+    console.print(f"[cyan]Install script:[/cyan] {config.install_inference_script}")
+    console.print(f"[cyan]Deploy script:[/cyan] {config.deploy_microcloud_script}")
+    console.print("\nRun `lab-ai bootstrap` to prepare the host and install the inference snap.")
+    console.print("Then run `lab-ai chat` to start the MicroCloud assistant.")
 
 
 @app.callback()
@@ -81,7 +89,7 @@ def main(
         help="Enable debug logging"
     )
 ):
-    """Canonical Lab AI Assistant - Infrastructure automation with AI."""
+    """Canonical AI Lab Assistant - MicroCloud-first infrastructure automation."""
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
