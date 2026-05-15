@@ -1,0 +1,255 @@
+---
+# ==============================================================================
+# MicroCloud Cluster Provisioning Playbook
+# Installs required snaps and bootstraps a MicroCloud cluster via preseed
+# ==============================================================================
+
+- name: Prepare MicroCloud Nodes
+  hosts: microcloud
+  gather_facts: false
+  tasks:
+    - name: Wait for LXD VM to boot and become reachable
+      wait_for_connection:
+        timeout: 120
+
+    - name: Gather OS facts now that system is up
+      setup:
+
+    - name: Wait for snapd system seed to complete (Ubuntu boot requirement)
+      command: snap wait system seed.loaded
+      changed_when: false
+      retries: 10
+      delay: 5
+
+    - name: Check required snaps
+      command: snap list {{ item.name }}
+      loop:
+        - { name: 'microcloud', channel: '2/stable' }
+        - { name: 'microceph', channel: 'squid/stable' }
+        - { name: 'microovn', channel: '24.03/stable' }
+        - { name: 'lxd', channel: '5.21/stable' }
+      loop_control:
+        label: "{{ item.name }}"
+      register: snap_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Install missing snaps only
+      command: snap install {{ item.item.name }} --channel={{ item.item.channel }}
+      loop: "{{ snap_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.rc != 0
+      changed_when: true
+
+    - name: Detect OVN uplink interface (no IP assigned, not lo, not primary)
+      # MicroCloud OVN requires a dedicated interface with no IP address.
+      # We find the first interface that has no IPv4 address and is not lo or
+      # the primary (default-route) interface — portable across any LXD VM shape.
+      shell: |
+        primary="{{ ansible_facts['default_ipv4']['interface'] }}"
+        for iface in $(ip -o link show | awk -F': ' '!/lo/ {print $2}' | cut -d'@' -f1); do
+          [ "$iface" = "$primary" ] && continue
+          ip -4 addr show "$iface" | grep -q 'inet ' || { echo "$iface"; break; }
+        done
+      register: ovn_iface_detect
+      changed_when: false
+
+    - name: Detect available Ceph disk path (non-root, unmounted)
+      shell: |
+        root_src="$(findmnt -n -o SOURCE /)"
+        root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
+
+        for disk in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}'); do
+          [ "$disk" = "$root_disk" ] && continue
+
+          if lsblk -nr -o MOUNTPOINT "/dev/$disk" | grep -q '[^[:space:]]'; then
+            continue
+          fi
+
+          echo "/dev/$disk"
+          break
+        done
+      register: ceph_disk_detect
+      changed_when: false
+
+    - name: Fail if no IP-free uplink interface found
+      fail:
+        msg: >
+          Could not find a network interface without an IPv4 address for use as
+          the OVN uplink on {{ inventory_hostname }}. Ensure each node has a
+          dedicated NIC with no IP assigned.
+      when: ovn_iface_detect.stdout | trim == ""
+
+    - name: Fail if no non-root disk is available for Ceph
+      fail:
+        msg: >
+          Could not find a suitable non-root block device for Ceph on
+          {{ inventory_hostname }}. Ensure each MicroCloud node has an extra disk attached.
+      when: ceph_disk_detect.stdout | trim == ""
+
+    - name: Set OVN uplink interface fact
+      set_fact:
+        ovn_uplink_iface: "{{ ovn_iface_detect.stdout | trim }}"
+
+    - name: Set Ceph disk path fact
+      set_fact:
+        ceph_disk_path: "{{ ceph_disk_detect.stdout | trim }}"
+
+# --- Bootstrap the MicroCloud cluster from the first node ---
+- name: Bootstrap MicroCloud Cluster (Node 1)
+  hosts: microcloud[0]
+  tasks:
+    - name: Derive /24 lookup subnet from node's default IPv4 address
+      # ansible_default_ipv4.address gives e.g. "10.88.0.10"
+      # We strip the last octet and append ".0/24" → "10.88.0.0/24"
+      set_fact:
+        lookup_subnet: "{{ ansible_facts['default_ipv4']['address'].split('.')[:-1] | join('.') + '.0/24' }}"
+
+    - name: Select non-overlapping OVN subnet base
+      set_fact:
+        ovn_subnet_base: "{{ '192.168.250' if lookup_subnet.startswith('10.') else '10.250.1' }}"
+
+    - name: Read preferred UPLINK network name state in LXD
+      command: lxc network show UPLINK
+      register: uplink_name_check
+      changed_when: false
+      failed_when: false
+
+    - name: Read preferred OVN default network name state in LXD
+      command: lxc network show default
+      register: ovn_default_name_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set MicroCloud network names
+      set_fact:
+        microcloud_uplink_network_name: >-
+          {{ 'UPLINK' if (uplink_name_check.rc != 0 or 'type: physical' in uplink_name_check.stdout) else 'uplink-' ~ (inventory_hostname | regex_replace('-node-[0-9]+$', '') | truncate(8, True, '')) }}
+        microcloud_ovn_network_name: >-
+          {{ 'default' if (ovn_default_name_check.rc != 0 or 'type: ovn' in ovn_default_name_check.stdout) else 'ovn-' ~ (inventory_hostname | regex_replace('-node-[0-9]+$', '') | truncate(8, True, '')) }}
+        ovn_ipv4_gateway: "{{ ovn_subnet_base }}.1/24"
+        ovn_ipv4_range: "{{ ovn_subnet_base }}.100-{{ ovn_subnet_base }}.200"
+
+    - name: Write MicroCloud preseed file to /tmp
+      copy:
+        dest: /tmp/microcloud-preseed.yaml
+        mode: '0600'
+        content: |
+          initiator: {{ inventory_hostname }}
+          lookup_subnet: {{ lookup_subnet }}
+          session_passphrase: microcloud-lab-session-passphrase
+          systems:
+          {% for host in groups['microcloud'] %}
+            - name: {{ host }}
+              ovn_uplink_interface: {{ hostvars[host].ovn_uplink_iface }}
+              storage:
+                ceph:
+                  - path: {{ hostvars[host].ceph_disk_path }}
+                    wipe: true
+          {% endfor %}
+          ovn:
+            ipv4_gateway: {{ ovn_ipv4_gateway }}
+            ipv4_range: {{ ovn_ipv4_range }}
+            dns_servers: 8.8.8.8
+          ceph:
+            internal_network: {{ lookup_subnet }}
+
+    - name: Read preseed file content for stdin
+      slurp:
+        src: /tmp/microcloud-preseed.yaml
+      register: preseed_content
+
+    - name: Check if MicroCloud cluster is already initialized
+      command: microcloud cluster list
+      register: cluster_check
+      changed_when: false
+      failed_when: false
+
+    - name: Start preseed on joiner nodes (async)
+      command: microcloud preseed
+      args:
+        stdin: "{{ preseed_content.content | b64decode }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['microcloud'][1:] }}"
+      register: joiner_preseed_jobs
+      async: 900
+      poll: 0
+      when: cluster_check.rc != 0 or cluster_check.stdout_lines | length <= 1
+
+    - name: Apply microcloud preseed on initiator (cluster bootstrap)
+      command: microcloud preseed
+      args:
+        stdin: "{{ preseed_content.content | b64decode }}"
+      register: microcloud_init
+      changed_when: microcloud_init.rc == 0
+      when: cluster_check.rc != 0 or cluster_check.stdout_lines | length <= 1
+
+    - name: Wait for joiner preseed jobs to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ (joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list }}"
+      register: joiner_preseed_result
+      until: joiner_preseed_result.finished
+      retries: 120
+      delay: 5
+      changed_when: false
+      when: joiner_preseed_jobs is defined and ((joiner_preseed_jobs.results | default([])) | selectattr('ansible_job_id', 'defined') | list | length) > 0
+
+    - name: Read OVN UPLINK network state in LXD
+      command: lxc network show {{ microcloud_uplink_network_name }}
+      register: ovn_uplink_show
+      changed_when: false
+      failed_when: false
+
+    - name: Set OVN UPLINK created flag
+      set_fact:
+        ovn_uplink_created: "{{ ovn_uplink_show.rc == 0 and ('status: Created' in ovn_uplink_show.stdout) and ('type: physical' in ovn_uplink_show.stdout) }}"
+
+    - name: Create or complete OVN UPLINK target config on each node
+      command: lxc network create {{ microcloud_uplink_network_name }} --type=physical parent={{ hostvars[item].ovn_uplink_iface }} --target={{ item }}
+      loop: "{{ groups['microcloud'] }}"
+      register: uplink_target_create
+      changed_when: uplink_target_create.rc == 0
+      failed_when:
+        - uplink_target_create.rc != 0
+        - "'already defined' not in (uplink_target_create.stderr | default(''))"
+      when: not ovn_uplink_created
+
+    - name: Finalize OVN UPLINK network cluster-wide if not created
+      command: >
+        lxc network create {{ microcloud_uplink_network_name }} --type=physical
+        ipv4.gateway={{ ovn_ipv4_gateway }}
+        ipv4.ovn.ranges={{ ovn_ipv4_range }}
+        dns.nameservers=8.8.8.8
+      register: uplink_finalize
+      changed_when: uplink_finalize.rc == 0
+      failed_when:
+        - uplink_finalize.rc != 0
+        - "'already exists' not in (uplink_finalize.stderr | default(''))"
+      when: not ovn_uplink_created
+
+    - name: Read OVN default network state in LXD
+      command: lxc network show {{ microcloud_ovn_network_name }}
+      register: ovn_default_show
+      changed_when: false
+      failed_when: false
+
+    - name: Set OVN default network created flag
+      set_fact:
+        ovn_default_created: "{{ ovn_default_show.rc == 0 and ('status: Created' in ovn_default_show.stdout) and ('type: ovn' in ovn_default_show.stdout) }}"
+
+    - name: Create OVN default logical network if not created
+      command: lxc network create {{ microcloud_ovn_network_name }} --type=ovn network={{ microcloud_uplink_network_name }} ipv6.address=none
+      register: ovn_default_create
+      changed_when: ovn_default_create.rc == 0
+      failed_when:
+        - ovn_default_create.rc != 0
+        - "'already exists' not in (ovn_default_create.stderr | default(''))"
+      when: not ovn_default_created
+
+    - name: Verify MicroCloud cluster formed
+      command: microcloud cluster list
+      register: cluster_list
+      changed_when: false
