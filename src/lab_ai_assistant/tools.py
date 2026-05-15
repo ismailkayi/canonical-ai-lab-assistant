@@ -31,8 +31,8 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "engine": {
                             "type": "string",
-                            "description": "Snap name (default: nemotron-3-nano)",
-                            "default": "nemotron-3-nano",
+                            "description": "Snap name (default: gemma4)",
+                            "default": "gemma4",
                         }
                     },
                     "required": [],

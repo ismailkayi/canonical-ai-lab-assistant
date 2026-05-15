@@ -44,7 +44,7 @@ DOC_SOURCES: dict[str, str] = {
     "microceph-install": "https://canonical-microceph.readthedocs.io/en/latest/how-to/install/",
     # Inference snaps
     "inference-snaps": "https://documentation.ubuntu.com/inference-snaps/",
-    "nemotron": "https://documentation.ubuntu.com/inference-snaps/reference/snaps/",
+    "gemma4": "https://documentation.ubuntu.com/inference-snaps/reference/snaps/",
 }
 
 # Keyword → doc key mapping for fuzzy lookups
@@ -59,7 +59,7 @@ _KEYWORD_MAP: list[tuple[list[str], str]] = [
     (["faq", "question", "common"], "microcloud-faq"),
     (["lxd", "container", "vm", "instance"], "lxd"),
     (["microceph", "distributed storage", "ceph"], "microceph"),
-    (["inference", "snap", "nemotron", "llm", "model"], "nemotron"),
+    (["inference", "snap", "gemma4", "llm", "model"], "gemma4"),
 ]
 
 

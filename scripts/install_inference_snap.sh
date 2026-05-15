@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENGINE="nemotron-3-nano"
+ENGINE="gemma4"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -9,7 +9,7 @@ while [[ $# -gt 0 ]]; do
             ENGINE="${1#*=}"
             ;;
         --engine)
-            ENGINE="${2:-nemotron-3-nano}"
+            ENGINE="${2:-gemma4}"
             shift
             ;;
         *)
