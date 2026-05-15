@@ -124,7 +124,7 @@ class SizingAdvisor:
         Produce a sizing recommendation.
 
         Args:
-            scenario_name: one of minimal / standard / ha / custom
+            scenario_name: topology class (custom is the only supported value)
             nodes: explicit node count (overrides scenario default)
             workload_description: free-text description used to auto-select tier
             override_tier: force a specific tier
@@ -134,7 +134,7 @@ class SizingAdvisor:
         """
         scenario = get_scenario(scenario_name)
         if scenario is None:
-            scenario = get_scenario("standard")
+            scenario = get_scenario("custom")
             assert scenario is not None
 
         node_count = nodes or scenario.default_nodes
@@ -201,9 +201,9 @@ class SizingAdvisor:
         warnings = []
         sizing = SIZING_TIERS[tier]
 
-        if tier == SizingTier.MINIMAL and scenario.name not in ("minimal",):
+        if tier == SizingTier.MINIMAL:
             warnings.append(
-                "Minimal sizing with a non-minimal scenario may cause "
+                "Minimal sizing may cause "
                 "instability. Consider upgrading to the 'small' tier."
             )
 

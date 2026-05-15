@@ -1,4 +1,4 @@
-"""AI engine integration for the scenario-aware MicroCloud assistant."""
+"""AI engine integration for the custom-topology MicroCloud assistant."""
 
 import json
 import logging
@@ -82,12 +82,12 @@ class AIEngine:
             return {"content": content}
 
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
-        """System prompt focused on planning quality, not scenario matching."""
+        """System prompt focused on custom topology planning."""
         scenario_catalog = scenarios_summary()
         sizing_tiers = _sizing_advisor.describe_tiers()
 
         prompt = f"""You are a senior Canonical platform architect.
-Your job is to DESIGN the right MicroCloud topology, not just map text to a fixed scenario.
+Your job is to DESIGN the right MicroCloud topology from scratch.
 
 CORE IDEA:
 - A script executes.
@@ -103,9 +103,7 @@ REQUIRED PLANNING FLOW:
 1. Understand workload and business intent (PoC, team size, uptime expectations, budget).
 2. Call inspect_host_environment before final sizing decisions.
 3. If uncertain on technical details, call get_documentation.
-4. Either:
-   - choose a baseline scenario via select_scenario, OR
-   - design from scratch via propose_custom_topology.
+4. Design a topology from scratch via propose_custom_topology.
 5. Explain trade-offs and provide one alternative design.
 6. Ask for missing parameters one by one.
 7. Only call deploy_microcloud after explicit user confirmation.
@@ -116,7 +114,7 @@ WHAT "MORE AI" LOOKS LIKE:
 - Suggest phased rollouts (start 3, scale to 5) when practical.
 - Ground claims with docs when the user asks "why".
 
-SCENARIO CATALOG (baseline only, not a hard cage):
+PLANNING MODE SUMMARY:
 {scenario_catalog}
 
 SIZING REFERENCE:
@@ -135,6 +133,7 @@ Always return valid JSON with keys:
 DEPLOYMENT SAFETY:
 Never call deploy_microcloud until user says yes.
 Never invent network interface names or disk paths.
+Never use baseline templates or fixed scenario buckets.
 """
 
         if include_tools:

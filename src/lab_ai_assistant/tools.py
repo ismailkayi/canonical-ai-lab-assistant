@@ -72,28 +72,6 @@ def get_tool_definitions() -> dict[str, Any]:
                 },
             },
             {
-                "name": "select_scenario",
-                "description": (
-                    "Choose a baseline scenario only if it fits clearly. "
-                    "Allowed: standard, ha, no_ovn, custom."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "scenario": {
-                            "type": "string",
-                            "enum": ["standard", "ha", "no_ovn", "custom"],
-                            "description": "Baseline scenario selection",
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "Why this scenario is appropriate",
-                        },
-                    },
-                    "required": ["scenario"],
-                },
-            },
-            {
                 "name": "propose_custom_topology",
                 "description": (
                     "Design topology from scratch based on workload + host capacity. "
@@ -102,6 +80,11 @@ def get_tool_definitions() -> dict[str, Any]:
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "scenario": {
+                            "type": "string",
+                            "enum": ["custom"],
+                            "default": "custom",
+                        },
                         "node_count": {"type": "integer"},
                         "node_cpu": {"type": "integer"},
                         "node_ram_gb": {"type": "integer"},
@@ -130,10 +113,7 @@ def get_tool_definitions() -> dict[str, Any]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "scenario": {
-                            "type": "string",
-                            "enum": ["standard", "ha", "no_ovn", "custom"],
-                        },
+                        "scenario": {"type": "string", "enum": ["custom"], "default": "custom"},
                         "nodes": {"type": "integer"},
                         "workload_description": {"type": "string"},
                         "tier": {
@@ -141,7 +121,7 @@ def get_tool_definitions() -> dict[str, Any]:
                             "enum": ["minimal", "small", "medium", "large"],
                         },
                     },
-                    "required": ["scenario"],
+                    "required": [],
                 },
             },
             {
@@ -154,7 +134,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "scenario": {
                             "type": "string",
-                            "enum": ["standard", "ha", "no_ovn", "custom"],
+                            "enum": ["custom"],
                             "default": "custom",
                         },
                         "user_prefix": {

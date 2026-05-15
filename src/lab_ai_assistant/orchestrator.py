@@ -1,4 +1,4 @@
-"""Lab orchestration and execution layer for scenario-aware MicroCloud workflows."""
+"""Lab orchestration and execution layer for custom-topology MicroCloud workflows."""
 
 import json
 import logging
@@ -9,7 +9,7 @@ from typing import Any
 from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.doc_fetcher import DocFetcher
-from lab_ai_assistant.scenarios import get_scenario, scenarios_summary
+from lab_ai_assistant.scenarios import scenarios_summary
 from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
 from lab_ai_assistant.tools import validate_tool_parameters
 
@@ -55,9 +55,6 @@ class LabOrchestrator:
                     break
                 if user_input.lower() == "help":
                     self._print_help()
-                    continue
-                if user_input.lower() in ("scenarios", "list scenarios"):
-                    print(scenarios_summary())
                     continue
                 if user_input.lower().startswith("sizing"):
                     print(self.sizing_advisor.describe_tiers())
@@ -121,26 +118,6 @@ class LabOrchestrator:
         if action == "inspect_host_environment":
             return self._inspect_host_environment()
 
-        if action == "select_scenario":
-            scenario_name = parameters.get("scenario", "standard")
-            reason = parameters.get("reason", "")
-            scenario = get_scenario(scenario_name)
-            if not scenario:
-                return f"Unknown scenario: {scenario_name}"
-            lines = [
-                f"Selected scenario: {scenario.label}",
-                f"  {scenario.description}",
-                f"  Nodes: {scenario.default_nodes} (min {scenario.min_nodes})",
-                f"  Network: {scenario.network_mode.value}",
-                f"  Storage: {scenario.storage_backend.value}",
-                f"  Required parameters: {', '.join(scenario.required_params)}",
-            ]
-            if reason:
-                lines.insert(1, f"  Reason: {reason}")
-            if scenario.notes:
-                lines.append(f"  Note: {scenario.notes}")
-            return "\n".join(lines)
-
         if action == "propose_custom_topology":
             nodes = int(parameters.get("node_count", 3))
             cpu = int(parameters.get("node_cpu", 2))
@@ -178,7 +155,7 @@ class LabOrchestrator:
             return "\n".join(lines)
 
         if action == "get_sizing_recommendation":
-            scenario_name = parameters.get("scenario", "standard")
+            scenario_name = parameters.get("scenario", "custom")
             nodes = parameters.get("nodes")
             workload = parameters.get("workload_description", "")
             tier_str = parameters.get("tier")
@@ -324,7 +301,6 @@ class LabOrchestrator:
         print(
             """
 Commands:
-  scenarios   - list baseline scenarios
   sizing      - show sizing tiers
   help        - show this help
   quit        - exit

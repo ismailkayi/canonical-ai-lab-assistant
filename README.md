@@ -10,8 +10,8 @@ You type what you want in plain language. The assistant figures out the details,
 
 ```
 You: I need a small 3-node test cluster
-Assistant: Got it. Based on your host (32 CPU / 128 GB RAM) I recommend the
-           "standard" scenario with 4 vCPU / 16 GB RAM per node.
+Assistant: Got it. Based on your host (32 CPU / 128 GB RAM), I propose a
+           3-node custom topology with 4 vCPU / 16 GB RAM per node.
            What user prefix should I use? (e.g. "alice")
 
 You: alice
@@ -49,7 +49,6 @@ AI engine  ←─── local LLM (Nemotron 3 Nano snap)
 Orchestrator
     │
     ├── inspect_host_environment    (CPU / RAM / disks / LXD facts)
-    ├── select_scenario             (baseline only: standard / ha / no_ovn)
     ├── propose_custom_topology     (AI designs from scratch)
     ├── get_sizing_recommendation   (CPU / RAM / disk per node)
     ├── get_documentation           (official docs when needed)
@@ -73,20 +72,21 @@ Everything runs locally. No cloud provider is required.
 
 ---
 
-## Baseline scenarios
+## Planning model
 
-MicroCloud always uses **MicroCeph** for storage and **MicroOVN** for networking.
-There is no LVM option — every node needs a dedicated, unformatted disk for Ceph OSD.
+There are no fixed baseline scenarios in the decision flow.
+The assistant always plans topology from scratch based on:
 
-| Scenario | Nodes | Networking | Storage | Use case |
-|---|---|---|---|---|
-| `standard` | 3 | OVN | Ceph | Normal lab (default) |
-| `ha` | 5 | OVN | Ceph | Production / staging, 2-node fault tolerance |
-| `no_ovn` | 3 | none | Ceph | Only if user explicitly skips OVN |
-| `custom` | any (odd, ≥3) | OVN | Ceph | Starting point for fully custom AI plans |
+- workload intent
+- host capacity (CPU/RAM/disk/LXD facts)
+- availability target
+- cost/performance trade-offs
 
-Important: these are baseline templates, not hard limits. The assistant can propose
-custom node counts, sizing, and trade-offs based on host inspection and workload goals.
+MicroCloud facts remain fixed:
+
+- storage is always **MicroCeph**
+- OVN is default unless explicitly disabled by user request
+- Ceph needs dedicated, unformatted OSD disks per node
 
 ---
 
@@ -162,7 +162,7 @@ canonical-ai-lab-assistant/
     ├── cli.py                   # lab-ai commands (chat, bootstrap, check…)
     ├── ai_engine.py             # Nemotron API + system prompt
     ├── orchestrator.py          # Connects AI decisions to script execution
-    ├── scenarios.py             # Baseline scenario catalog (standard/ha/no_ovn/custom)
+    ├── scenarios.py             # Planning primitives (custom-topology mode)
     ├── sizing.py                # Resource sizing advisor
     ├── doc_fetcher.py           # Fetches official Ubuntu docs on demand
     └── tools.py                 # Tool definitions the LLM can call
@@ -175,7 +175,7 @@ canonical-ai-lab-assistant/
 1. You describe what you need in plain language.
 2. The AI inspects the host with inspect_host_environment.
 3. The AI may fetch docs with get_documentation if requirements are unclear.
-4. The AI either picks a baseline scenario or proposes a custom topology.
+4. The AI proposes a custom topology (node count, sizing, OVN mode).
 5. The AI explains reasoning, trade-offs, and one alternative.
 6. If required deployment parameters are missing, it asks follow-up questions.
 7. After explicit confirmation, deploy_microcloud.sh runs:
