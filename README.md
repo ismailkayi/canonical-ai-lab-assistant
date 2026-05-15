@@ -95,7 +95,9 @@ MicroCloud facts remain fixed:
 - Ubuntu 24.04 host
 - At least 24 CPU cores and 48 GB RAM (for a 3-node standard cluster)
 
-LXD, OpenTofu, and Ansible are installed automatically by `lab-ai bootstrap`.
+`lab-ai bootstrap` installs host runtime dependencies automatically
+(snapd, LXD, OpenTofu, Ansible, SSH key setup).
+It is intentionally focused on runtime host requirements, not Python dev tooling.
 
 ---
 

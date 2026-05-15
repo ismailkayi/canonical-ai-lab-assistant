@@ -71,6 +71,30 @@ ensure_sudo_session() {
     fi
 }
 
+# Snap-first scope: prepare only host-level runtime requirements.
+# Do not install Python dev tooling here (venv/pip) because that's for local development.
+ensure_snapd() {
+    if ! command -v snap >/dev/null 2>&1; then
+        log_info "Installing snapd..."
+        sudo apt update
+        sudo apt install -y snapd
+        add_done "snapd installed"
+    else
+        add_skipped "snapd already installed"
+    fi
+}
+
+ensure_host_tools() {
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        log_info "Installing OpenSSH client tools..."
+        sudo apt update
+        sudo apt install -y openssh-client
+        add_done "OpenSSH client installed"
+    else
+        add_skipped "OpenSSH client already installed"
+    fi
+}
+
 ensure_lxd() {
     local routable_bridge_count="0"
     local storage_count="0"
@@ -165,15 +189,6 @@ ensure_ansible() {
 }
 
 ensure_ssh_key() {
-    if ! command -v ssh-keygen >/dev/null 2>&1; then
-        log_info "Installing OpenSSH client tools..."
-        sudo apt update
-        sudo apt install -y openssh-client
-        add_done "OpenSSH client installed"
-    else
-        add_skipped "OpenSSH client already installed"
-    fi
-
     if [[ ! -f "$SSH_KEY_PATH" ]]; then
         log_info "Generating lab SSH key at $SSH_KEY_PATH..."
         ssh-keygen -t rsa -b 4096 -f "$SSH_KEY_PATH" -N "" -q
@@ -198,6 +213,8 @@ initialize_tofu() {
 
 main() {
     ensure_sudo_session
+    ensure_snapd
+    ensure_host_tools
     ensure_lxd
     ensure_opentofu
     ensure_ansible
