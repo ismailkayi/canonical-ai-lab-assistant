@@ -41,7 +41,7 @@ Your terminal
 lab-ai chat  (Python CLI)
     │
     ▼
-AI engine  ←─── local LLM (Nemotron 3 Nano snap)
+AI engine  ←─── local LLM (gemma4 snap)
     │             understands plain language,
     │             inspects host capacity,
     │             designs topology with trade-offs
@@ -134,12 +134,12 @@ lab-ai chat
 Copy `.env.example` to `.env` and adjust if needed:
 
 ```env
-INFERENCE_HOST=http://localhost:8000
-INFERENCE_MODEL=nemotron-3-nano
+INFERENCE_HOST=http://127.0.0.1:8336
+INFERENCE_MODEL=gemma4
 LOG_LEVEL=INFO
 ```
 
-The default engine is the **Canonical Nemotron 3 Nano inference snap** — a local,
+The default engine is the **Canonical gemma4 inference snap** — a local,
 offline LLM that runs entirely on your machine.
 
 ---

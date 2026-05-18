@@ -153,18 +153,76 @@ def get_tool_definitions() -> dict[str, Any]:
                         "ceph_disk_gib": {"type": "integer"},
                         "network_interface": {
                             "type": "string",
-                            "description": "Cluster NIC (kept for plan traceability)",
+                            "description": "Optional override for cluster NIC; auto-detected in nested-LXD mode.",
                         },
                         "ovn_uplink_interface": {
                             "type": "string",
-                            "description": "Dedicated no-IP OVN uplink NIC",
+                            "description": "Optional override for OVN uplink NIC; auto-detected in nested-LXD mode.",
                         },
                         "ceph_osd_disk": {
                             "type": "string",
-                            "description": "Dedicated unformatted OSD disk path",
+                            "description": "Optional bare-metal OSD disk override; nested-LXD mode provisions per-node virtual disks automatically.",
                         },
                     },
                     "required": ["nodes"],
+                },
+            },
+            {
+                "name": "delete_environment",
+                "description": (
+                    "Destroy a deployed MicroCloud environment and clean up all associated resources. "
+                    "This runs terraform destroy to remove VMs, networks, and storage volumes."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {
+                            "type": "string",
+                            "description": "Name of the workspace/environment to delete (e.g. lab_microcloud)",
+                        },
+                    },
+                    "required": ["workspace"],
+                },
+            },
+            {
+                "name": "list_environments",
+                "description": (
+                    "List managed MicroCloud environments with node counts and running status. "
+                    "Use this before delete or scale operations when workspace name is unknown."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+            {
+                "name": "scale_environment",
+                "description": (
+                    "Scale an existing MicroCloud environment to a target odd node count >= 3. "
+                    "Use after explicit user confirmation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {
+                            "type": "string",
+                            "description": "Workspace/environment name to scale (e.g. lab_microcloud)",
+                        },
+                        "target_nodes": {
+                            "type": "integer",
+                            "description": "Desired total node count after scaling (odd and >= 3)",
+                        },
+                        "sizing_tier": {
+                            "type": "string",
+                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
+                        },
+                        "node_cpu": {"type": "integer"},
+                        "node_memory_mb": {"type": "integer"},
+                        "root_disk_gib": {"type": "integer"},
+                        "ceph_disk_gib": {"type": "integer"},
+                    },
+                    "required": ["workspace", "target_nodes"],
                 },
             },
         ]

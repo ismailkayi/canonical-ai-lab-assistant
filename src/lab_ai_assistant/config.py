@@ -16,9 +16,12 @@ class Config:
     prep_host_script: Path = scripts_dir / "prep_host.sh"
     install_inference_script: Path = scripts_dir / "install_inference_snap.sh"
     deploy_microcloud_script: Path = scripts_dir / "deploy_microcloud.sh"
+    cleanup_microcloud_script: Path = scripts_dir / "cleanup_microcloud.sh"
+    list_environments_script: Path = scripts_dir / "list_microcloud_environments.sh"
+    scale_microcloud_script: Path = scripts_dir / "scale_microcloud.sh"
 
     inference_engine: str = "gemma4"
-    inference_host: str = os.getenv("INFERENCE_HOST", "http://localhost:8080")
+    inference_host: str = os.getenv("INFERENCE_HOST", "http://127.0.0.1:8336")
     inference_model: str = os.getenv("INFERENCE_MODEL", "gemma4")
 
     state_dir: Path = Path(os.getenv("SNAP_USER_COMMON", str(Path.home() / ".canonical-ai-lab-assistant")))
@@ -27,7 +30,7 @@ class Config:
     log_dir: Path = state_dir / "logs"
 
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    response_timeout: int = 300
+    response_timeout: int = int(os.getenv("INFERENCE_TIMEOUT_SEC", "120"))
     max_retries: int = 3
     enable_confirmation: bool = True
 
@@ -48,6 +51,9 @@ class Config:
         self.prep_host_script = self.scripts_dir / "prep_host.sh"
         self.install_inference_script = self.scripts_dir / "install_inference_snap.sh"
         self.deploy_microcloud_script = self.scripts_dir / "deploy_microcloud.sh"
+        self.cleanup_microcloud_script = self.scripts_dir / "cleanup_microcloud.sh"
+        self.list_environments_script = self.scripts_dir / "list_microcloud_environments.sh"
+        self.scale_microcloud_script = self.scripts_dir / "scale_microcloud.sh"
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)

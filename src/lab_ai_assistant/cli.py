@@ -46,8 +46,10 @@ def check():
             console.print(f"  Model: {config.inference_model}")
         else:
             console.print(f"[red]✗[/red] Inference engine not available at {config.inference_host}")
-            console.print(f"\nTo install, run:")
-            console.print(f"  sudo snap install {config.inference_engine}")
+            console.print("\nCheck that the snap service is running and INFERENCE_HOST is correct.")
+            console.print("Try:")
+            console.print(f"  snap services {config.inference_engine}")
+            console.print(f"  curl {config.inference_host}/health")
             sys.exit(1)
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")

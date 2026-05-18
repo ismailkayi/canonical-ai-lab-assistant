@@ -107,11 +107,21 @@ SCENARIOS: dict[str, MCScenario] = {
         storage_backend=StorageBackend.CEPH,
         default_sizing=SizingTier.SMALL,
         requires_dedicated_storage_disk=True,
-        required_params=["network_interface", "ovn_uplink_interface", "ceph_osd_disk"],
-        optional_params=["nodes", "ipv4_gateway", "ipv4_range", "ipv6_gateway", "ipv6_range", "preseed_file"],
+        required_params=["nodes"],
+        optional_params=[
+            "network_interface",
+            "ovn_uplink_interface",
+            "ceph_osd_disk",
+            "ipv4_gateway",
+            "ipv4_range",
+            "ipv6_gateway",
+            "ipv6_range",
+            "preseed_file",
+        ],
         notes=(
             "OVN is on by default. It may be disabled only when the user explicitly opts out. "
-            "Ceph OSD disks are always required."
+            "Ceph OSD disks are always required per node; in nested-LXD mode they are virtual block volumes "
+            "provisioned by Terraform rather than host physical disks."
         ),
     )
 }
