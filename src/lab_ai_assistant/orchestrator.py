@@ -2,18 +2,24 @@
 
 import json
 import logging
+import re
+import select
 import subprocess
+import textwrap
+import time
 from datetime import datetime
 from typing import Any
 
 from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.doc_fetcher import DocFetcher
-from lab_ai_assistant.scenarios import scenarios_summary
 from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
 from lab_ai_assistant.tools import validate_tool_parameters
+from lab_ai_assistant.ui import ChatUI
 
 logger = logging.getLogger(__name__)
+
+UI_WIDTH = 78
 
 
 class LabOrchestrator:
@@ -25,6 +31,7 @@ class LabOrchestrator:
         self.sizing_advisor = SizingAdvisor()
         self.doc_fetcher = DocFetcher(cache_dir=config.state_dir)
         self.deployment_history = []
+        self.ui = ChatUI()
         self._load_history()
 
     def bootstrap_host(self) -> str:
@@ -51,38 +58,40 @@ class LabOrchestrator:
         if not self.ai_engine.is_available():
             raise RuntimeError(
                 f"Inference engine not available at {self.config.inference_host}\n"
-                f"Please start it with: snap install {self.config.inference_engine}"
+                "Please verify the snap service is running and INFERENCE_HOST points to the correct endpoint."
             )
 
-        print("\n" + "=" * 60)
-        print("Canonical AI Lab Assistant — MicroCloud")
-        print("=" * 60)
-        print("Type 'help' for commands, 'quit' to exit\n")
+        self.ui.print_welcome()
 
         while True:
             try:
-                user_input = input("You: ").strip()
+                user_input = self.ui.get_user_input()
                 if not user_input:
                     continue
                 if user_input.lower() == "quit":
-                    print("Goodbye!")
+                    self.ui.print_ai_status("Session ended. Goodbye!")
                     break
                 if user_input.lower() == "help":
-                    self._print_help()
+                    self.ui.print_help()
                     continue
                 if user_input.lower().startswith("sizing"):
-                    print(self.sizing_advisor.describe_tiers())
+                    self.ui.print_ai_response(self.sizing_advisor.describe_tiers())
                     continue
 
-                response = self._process_user_input(user_input)
-                print(f"\nAssistant: {response}\n")
+                with self.ui.thinking_indicator(
+                    "AI is analyzing your request",
+                    timeout=self.config.response_timeout,
+                ):
+                    response = self._process_user_input(user_input)
+
+                self._print_assistant_response(response)
 
             except KeyboardInterrupt:
-                print("\n\nGoodbye!")
+                self.ui.print_ai_status("Session ended. Goodbye!")
                 break
             except Exception as exc:
                 logger.error(f"Error in chat loop: {exc}")
-                print(f"Error: {exc}\n")
+                self.ui.print_error(str(exc))
 
     def _process_user_input(self, user_message: str) -> str:
         """Process user input through the agentic loop.
@@ -104,17 +113,26 @@ class LabOrchestrator:
 
             # No tool call → this is the final user-facing answer
             if not action:
-                if reasoning:
-                    return f"[thinking: {reasoning}]\n\n{message}" if message else f"[thinking: {reasoning}]"
-                return message or ""
+                return self._compose_user_facing_response(message, reasoning)
+
+            # Show AI's intermediate plan/reasoning
+            if message or reasoning:
+                plan = self._compose_user_facing_response(message, reasoning)
+                if plan:
+                    self.ui.print_ai_plan(plan)
 
             parameters = ai_response.get("parameters", {})
 
             # Deployment requires explicit user confirmation before execution
             if ai_response.get("needs_confirmation"):
                 confirmation_prompt = ai_response.get("confirmation_prompt", "Shall I proceed?")
-                prefix = f"[thinking: {reasoning}]\n\n{message}" if reasoning else message
-                return f"{prefix}\n\n{confirmation_prompt}\n(Reply 'yes' to confirm)"
+                prefix = self._compose_user_facing_response(message, reasoning)
+                if prefix:
+                    return f"__CONFIRM__:{prefix}\n\n{confirmation_prompt}"
+                return f"__CONFIRM__:{confirmation_prompt}"
+
+            # Show tool execution in the UI
+            self.ui.print_tool_call(action)
 
             # Execute the tool
             tool_result = self._handle_local_tool(action, parameters)
@@ -126,11 +144,231 @@ class LabOrchestrator:
                 tool_result = self._execute_action(action, parameters)
                 self._record_deployment(action, parameters, tool_result)
 
+            tool_result_for_ai = self._prepare_tool_result_for_ai(action, tool_result)
+
             # Feed result back to AI for synthesis (closes the loop)
-            ai_response = self.ai_engine.feed_tool_result(action, tool_result)
+            self.ui.print_phase("analyzing", "Processing tool results...")
+            ai_response = self.ai_engine.feed_tool_result(action, tool_result_for_ai)
 
         # Fallback: return whatever the AI last said
-        return ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds.")
+        return self._compose_user_facing_response(
+            ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds."),
+            ai_response.get("reasoning", ""),
+        )
+
+    def _compose_user_facing_response(self, message: str, reasoning: str) -> str:
+        """Build a concise, readable assistant response for terminal UX."""
+        clean_message = self._normalize_assistant_text(message)
+        clean_reasoning = self._normalize_assistant_text(reasoning)
+
+        if clean_message:
+            return clean_message
+
+        if clean_reasoning:
+            # Keep reasoning as a short fallback when message is missing.
+            short_reasoning = self._truncate_text(clean_reasoning, 320)
+            return f"Plan: {short_reasoning}"
+
+        return (
+            "I received an empty response from the inference backend. "
+            "Please retry your request."
+        )
+
+    def _normalize_assistant_text(self, text: str) -> str:
+        """Remove noisy fragments and repeated blocks from model output."""
+        if not text:
+            return ""
+
+        cleaned = text.replace("\r\n", "\n").strip()
+        cleaned = re.sub(r"<tool_code>\s*\{.*?\}\s*</tool_code>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        cleaned = cleaned.replace("```", "")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+        # Remove immediate duplicate paragraphs that frequently appear with local models.
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", cleaned) if b.strip()]
+        deduped: list[str] = []
+        seen_recent: list[str] = []
+        for block in blocks:
+            key = re.sub(r"\s+", " ", block.lower()).strip()
+            if key in seen_recent:
+                continue
+            deduped.append(block)
+            seen_recent.append(key)
+            if len(seen_recent) > 12:
+                # Keep memory bounded and focus on near-duplicates.
+                seen_recent = seen_recent[-8:]
+
+        return "\n\n".join(deduped).strip()
+
+    def _format_for_terminal(self, text: str) -> str:
+        """Render readable terminal output with wrapped text and aligned tables."""
+        if not text:
+            return ""
+
+        rendered = self._render_markdown_tables(text)
+
+        output_lines: list[str] = []
+        in_table = False
+        for raw_line in rendered.splitlines():
+            line = self._strip_markdown_noise(raw_line.rstrip())
+            if line.startswith("+") and line.endswith("+"):
+                in_table = True
+                output_lines.append(line)
+                continue
+            if in_table and line.startswith("|") and line.endswith("|"):
+                output_lines.append(line)
+                continue
+            if in_table and line.strip() == "":
+                in_table = False
+                output_lines.append("")
+                continue
+            if in_table and not (line.startswith("|") and line.endswith("|")):
+                in_table = False
+
+            if not line:
+                output_lines.append("")
+                continue
+
+            if self._is_list_line(line):
+                output_lines.append(textwrap.fill(line, width=UI_WIDTH, subsequent_indent="  "))
+            else:
+                output_lines.append(textwrap.fill(line, width=UI_WIDTH))
+
+        compacted = self._compact_blank_lines(output_lines)
+        return "\n".join(compacted).strip()
+
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def _print_assistant_response(self, response: str) -> None:
+        """Print the final assistant response with the rich UI."""
+        if not response:
+            self.ui.print_ai_response("")
+            return
+
+        # Handle confirmation flow
+        if response.startswith("__CONFIRM__:"):
+            parts = response[len("__CONFIRM__:"):].rsplit("\n\n", 1)
+            message = parts[0] if len(parts) > 1 else ""
+            prompt = parts[-1] if parts else "Shall I proceed?"
+            self.ui.print_confirmation_prompt(message, prompt)
+            return
+
+        cleaned = self._normalize_assistant_text(response)
+        if not cleaned:
+            self.ui.print_ai_response("")
+            return
+
+        cleaned = self._truncate_for_display(cleaned)
+        formatted = self._format_for_terminal(cleaned)
+        self.ui.print_ai_response(formatted)
+
+    def _print_section_header(self, title: str) -> None:
+        """Legacy header — now delegates to UI phase display."""
+        self.ui.print_phase("executing", title)
+
+    def _print_section_footer(self) -> None:
+        pass
+
+    def _strip_markdown_noise(self, line: str) -> str:
+        """Remove visual markdown artifacts that hurt terminal readability."""
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)
+        line = line.replace("**", "")
+        line = line.replace("__", "")
+        line = line.replace("`", "")
+        return line
+
+    def _is_list_line(self, line: str) -> bool:
+        stripped = line.lstrip()
+        return bool(re.match(r"^(-|\*|\d+\.)\s+", stripped))
+
+    def _compact_blank_lines(self, lines: list[str]) -> list[str]:
+        compacted: list[str] = []
+        blank_streak = 0
+        for line in lines:
+            if line.strip() == "":
+                blank_streak += 1
+                if blank_streak > 1:
+                    continue
+            else:
+                blank_streak = 0
+            compacted.append(line)
+        return compacted
+
+    def _truncate_for_display(self, text: str) -> str:
+        """Keep terminal output scannable by trimming very long responses."""
+        max_lines = 36
+        lines = text.splitlines()
+        if len(lines) <= max_lines:
+            return text
+
+        kept = lines[:max_lines]
+        kept.append("")
+        kept.append("[Output shortened for readability. Ask: 'give me full details' if needed.]")
+        return "\n".join(kept)
+
+    def _render_markdown_tables(self, text: str) -> str:
+        """Convert markdown tables to aligned ASCII tables for terminal display."""
+        lines = text.splitlines()
+        rendered: list[str] = []
+        idx = 0
+
+        while idx < len(lines):
+            if "|" not in lines[idx]:
+                rendered.append(lines[idx])
+                idx += 1
+                continue
+
+            start = idx
+            while idx < len(lines) and "|" in lines[idx]:
+                idx += 1
+
+            block = lines[start:idx]
+            if self._looks_like_markdown_table(block):
+                rendered.append(self._render_markdown_table_block(block))
+            else:
+                rendered.extend(block)
+
+        return "\n".join(rendered)
+
+    def _looks_like_markdown_table(self, lines: list[str]) -> bool:
+        if len(lines) < 2:
+            return False
+        separator = lines[1].strip()
+        return bool(re.match(r"^\|?\s*[:\-\|\s]+\|?\s*$", separator))
+
+    def _render_markdown_table_block(self, lines: list[str]) -> str:
+        rows: list[list[str]] = []
+        for line in lines:
+            if re.match(r"^\|?\s*[:\-\|\s]+\|?\s*$", line.strip()):
+                continue
+            stripped = line.strip().strip("|")
+            cells = [self._strip_markdown_noise(cell.strip()) for cell in stripped.split("|")]
+            rows.append(cells)
+
+        if not rows:
+            return ""
+
+        col_count = max(len(r) for r in rows)
+        for row in rows:
+            if len(row) < col_count:
+                row.extend([""] * (col_count - len(row)))
+
+        widths = [max(len(row[col]) for row in rows) for col in range(col_count)]
+
+        def render_row(row: list[str]) -> str:
+            cols = [f" {row[i].ljust(widths[i]) } " for i in range(col_count)]
+            return "|" + "|".join(cols) + "|"
+
+        sep = "+" + "+".join(["-" * (w + 2) for w in widths]) + "+"
+        output = [sep, render_row(rows[0]), sep]
+        for row in rows[1:]:
+            output.append(render_row(row))
+        output.append(sep)
+        return "\n".join(output)
 
     def _handle_local_tool(self, action: str, parameters: dict[str, Any]) -> str | None:
         """Execute tools that do not require external scripts."""
@@ -229,6 +467,8 @@ class LabOrchestrator:
 
         return (
             "Host environment snapshot\n"
+            "  Deployment mode : nested-lxd-lab (OpenTofu creates MicroCloud VMs)\n"
+            "  Ceph disk model : per-node virtual block volumes are provisioned automatically\n"
             f"  CPU cores        : {results.get('cpu_cores', 'unknown')}\n"
             f"  RAM              : {results.get('ram_mb', 'unknown')} MB\n"
             f"  Disk devices     : {results.get('disks', 'unknown')}\n"
@@ -243,6 +483,9 @@ class LabOrchestrator:
                 "prep_host": self.config.prep_host_script,
                 "install_inference_snap": self.config.install_inference_script,
                 "deploy_microcloud": self.config.deploy_microcloud_script,
+                "delete_environment": self.config.cleanup_microcloud_script,
+                "list_environments": self.config.list_environments_script,
+                "scale_environment": self.config.scale_microcloud_script,
             }
 
             script_path = script_map.get(action)
@@ -254,12 +497,21 @@ class LabOrchestrator:
                 if value is not None:
                     cmd.append(f"--{key.replace('_', '-')}={value}")
 
-            if action == "deploy_microcloud":
+            if action in ("deploy_microcloud", "delete_environment", "scale_environment"):
                 cmd.append("--auto-approve")
 
             logger.info(f"Running: {' '.join(cmd)}")
-            # Stream output live so the user sees Terraform/Ansible progress
+            capture_only = (action in ("deploy_microcloud", "delete_environment", "scale_environment"))
             output_lines: list[str] = []
+            status_label = {
+                "deploy_microcloud": "Deployment",
+                "delete_environment": "Cleanup",
+                "scale_environment": "Scaling",
+            }.get(action, "Operation")
+
+            if capture_only:
+                self.ui.print_operation_progress(status_label, "Started — streaming checkpoints...")
+
             with subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -268,10 +520,49 @@ class LabOrchestrator:
                 cwd=self.config.repo_root,
             ) as proc:
                 assert proc.stdout is not None
-                for line in proc.stdout:
-                    print(line, end="", flush=True)
-                    output_lines.append(line)
+                if not capture_only:
+                    for line in proc.stdout:
+                        print(line, end="", flush=True)
+                        output_lines.append(line)
+                else:
+                    heartbeat_every_sec = 15
+                    start_ts = time.monotonic()
+                    last_heartbeat_ts = start_ts
+                    milestone_pattern = re.compile(
+                        r"\[INFO\]|\[WARN\]|\[ERROR\]|\[SUCCESS\]|"
+                        r"Apply complete|Destroy complete|PLAY RECAP|TASK \[",
+                        flags=re.IGNORECASE,
+                    )
+
+                    while True:
+                        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                        if ready:
+                            line = proc.stdout.readline()
+                            if line:
+                                output_lines.append(line)
+                                if milestone_pattern.search(line):
+                                    self.ui.print_operation_progress(
+                                        status_label, line.strip()
+                                    )
+
+                        now = time.monotonic()
+                        if proc.poll() is None and (now - last_heartbeat_ts) >= heartbeat_every_sec:
+                            elapsed = int(now - start_ts)
+                            self.ui.print_operation_progress(
+                                status_label, f"still running... {elapsed}s elapsed"
+                            )
+                            last_heartbeat_ts = now
+
+                        if proc.poll() is not None:
+                            break
+
+                    tail = proc.stdout.read()
+                    if tail:
+                        output_lines.append(tail)
+
                 proc.wait()
+            if capture_only:
+                self.ui.print_phase("done", f"{status_label} finished")
 
             output = "".join(output_lines)
             if proc.returncode != 0:
@@ -307,6 +598,31 @@ class LabOrchestrator:
         self.deployment_history.append(record)
         self._save_history()
 
+    def _prepare_tool_result_for_ai(self, action: str, tool_result: str) -> str:
+        """Trim very large tool outputs before feeding them back to the model."""
+        max_chars = 6000
+        deploy_tail_chars = 2000
+
+        if not tool_result:
+            return "(no output)"
+
+        if action in ("deploy_microcloud", "scale_environment") and len(tool_result) > deploy_tail_chars:
+            return (
+                "Operation finished. Full logs were streamed to the terminal and omitted for context safety.\n"
+                f"Tail ({deploy_tail_chars} chars):\n{tool_result[-deploy_tail_chars:]}"
+            )
+
+        if len(tool_result) > max_chars:
+            head_chars = max_chars // 2
+            tail_chars = max_chars - head_chars
+            return (
+                f"Tool output truncated for context safety (original length: {len(tool_result)} chars).\n"
+                f"Head ({head_chars} chars):\n{tool_result[:head_chars]}\n\n"
+                f"Tail ({tail_chars} chars):\n{tool_result[-tail_chars:]}"
+            )
+
+        return tool_result
+
     def _load_history(self):
         if self.config.history_file.exists():
             try:
@@ -324,16 +640,4 @@ class LabOrchestrator:
             logger.error(f"Error saving history: {exc}")
 
     def _print_help(self):
-        print(
-            """
-Commands:
-  sizing      - show sizing tiers
-  help        - show this help
-  quit        - exit
-
-Tips:
-  Ask naturally: "I need a staging cluster for 20 developers"
-  The assistant will inspect host resources, propose topology, explain trade-offs,
-  and ask confirmation before deployment.
-"""
-        )
+        self.ui.print_help()
