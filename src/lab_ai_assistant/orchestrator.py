@@ -476,6 +476,25 @@ class LabOrchestrator:
             f"  LXD storage pool : {results.get('lxd_storage_pools', 'unknown')}"
         )
 
+    # Whitelist of parameters each script actually accepts.
+    # Any parameter NOT in this map will be silently dropped to prevent
+    # the AI from hallucinating options and crashing the scripts.
+    _SCRIPT_ACCEPTED_PARAMS: dict[str, set[str]] = {
+        "prep_host": set(),
+        "install_inference_snap": {"engine"},
+        "deploy_microcloud": {
+            "scenario", "nodes", "sizing_tier", "node_cpu", "node_memory_mb",
+            "root_disk_gib", "ceph_disk_gib", "user_prefix", "ssh_key",
+            "network_interface", "ovn_uplink_interface", "ceph_osd_disk",
+        },
+        "delete_environment": {"workspace"},
+        "list_environments": set(),
+        "scale_environment": {
+            "workspace", "target_nodes", "sizing_tier", "node_cpu",
+            "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
+        },
+    }
+
     def _execute_action(self, action: str, parameters: dict[str, Any]) -> str:
         """Execute script-backed actions."""
         try:
@@ -492,9 +511,10 @@ class LabOrchestrator:
             if not script_path:
                 return f"No script mapped for action: {action}"
 
+            accepted = self._SCRIPT_ACCEPTED_PARAMS.get(action, set())
             cmd = ["bash", str(script_path)]
             for key, value in parameters.items():
-                if value is not None:
+                if value is not None and key in accepted:
                     cmd.append(f"--{key.replace('_', '-')}={value}")
 
             if action in ("deploy_microcloud", "delete_environment", "scale_environment"):

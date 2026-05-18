@@ -127,7 +127,11 @@ def get_tool_definitions() -> dict[str, Any]:
             {
                 "name": "deploy_microcloud",
                 "description": (
-                    "Deploy a cluster. Use after planning is complete and user explicitly confirms."
+                    "Deploy a full MicroCloud lab cluster (VMs + snaps + initialization). "
+                    "This ALWAYS performs a complete deployment: infrastructure (OpenTofu) AND "
+                    "software setup (Ansible installs snaps and runs microcloud init). "
+                    "There is NO option to skip snap installation or do infra-only. "
+                    "ONLY use parameters listed below — do NOT invent extra parameters."
                 ),
                 "parameters": {
                     "type": "object",
