@@ -153,6 +153,22 @@ def get_tool_definitions() -> dict[str, Any]:
                         "node_memory_mb": {"type": "integer"},
                         "root_disk_gib": {"type": "integer"},
                         "ceph_disk_gib": {"type": "integer"},
+                        "ceph_disks_per_node": {
+                            "type": "integer",
+                            "description": (
+                                "Number of Ceph OSD disks per node. Default: 1. "
+                                "Recommend 2 for higher storage throughput or larger clusters."
+                            ),
+                            "default": 1,
+                        },
+                        "local_disk_gib": {
+                            "type": "integer",
+                            "description": (
+                                "Size in GiB of a local ZFS disk per node. Default: 0 (disabled). "
+                                "Set >= 10 to add fast local storage alongside distributed Ceph."
+                            ),
+                            "default": 0,
+                        },
                         "network_interface": {
                             "type": "string",
                             "description": "Optional override for cluster NIC; auto-detected in nested-LXD mode.",
@@ -225,6 +241,65 @@ def get_tool_definitions() -> dict[str, Any]:
                         "ceph_disk_gib": {"type": "integer"},
                     },
                     "required": ["workspace", "target_nodes"],
+                },
+            },
+            {
+                "name": "add_cluster_node",
+                "description": (
+                    "Add one or more new nodes to an existing MicroCloud cluster. "
+                    "Provisions new VMs via OpenTofu, installs snaps, then uses 'microcloud add' "
+                    "to expand the live cluster. Use after user confirms the workspace to expand."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {
+                            "type": "string",
+                            "description": "Workspace/environment name to expand (e.g. lab_microcloud)",
+                        },
+                        "add_nodes": {
+                            "type": "integer",
+                            "description": "Number of nodes to add (default: 1)",
+                            "default": 1,
+                        },
+                        "ceph_disk_gib": {"type": "integer"},
+                        "ceph_disks_per_node": {
+                            "type": "integer",
+                            "description": "Number of Ceph OSD disks per new node. Should match existing nodes.",
+                            "default": 1,
+                        },
+                        "local_disk_gib": {
+                            "type": "integer",
+                            "description": "Local ZFS disk size in GiB for new nodes. 0 = disabled.",
+                            "default": 0,
+                        },
+                        "sizing_tier": {
+                            "type": "string",
+                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
+                        },
+                        "node_cpu": {"type": "integer"},
+                        "node_memory_mb": {"type": "integer"},
+                        "root_disk_gib": {"type": "integer"},
+                    },
+                    "required": ["workspace"],
+                },
+            },
+            {
+                "name": "verify_cluster_health",
+                "description": (
+                    "Verify the health of all services in a deployed MicroCloud cluster "
+                    "(MicroCloud, LXD, MicroCeph, MicroOVN). Use after deployment or when "
+                    "the user asks about cluster status or health."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {
+                            "type": "string",
+                            "description": "Workspace/environment name to check (e.g. lab_microcloud)",
+                        },
+                    },
+                    "required": ["workspace"],
                 },
             },
         ]

@@ -95,13 +95,35 @@ variable "microcloud_root_disk_size_gib" {
 }
 
 variable "microcloud_ceph_disk_size_gib" {
-  description = "Ceph data disk size in GiB per node"
+  description = "Ceph data disk size in GiB per OSD volume"
   type        = number
   default     = 50
 
   validation {
     condition     = var.microcloud_ceph_disk_size_gib >= 10
     error_message = "microcloud_ceph_disk_size_gib must be >= 10."
+  }
+}
+
+variable "ceph_disks_per_node" {
+  description = "Number of Ceph OSD volumes per node (1 = default, 2-4 for higher throughput)"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.ceph_disks_per_node >= 1 && var.ceph_disks_per_node <= 8
+    error_message = "ceph_disks_per_node must be between 1 and 8."
+  }
+}
+
+variable "local_disk_size_gib" {
+  description = "Size of local ZFS disk per node in GiB. Set to 0 to skip local storage (default: 0)."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.local_disk_size_gib == 0 || var.local_disk_size_gib >= 10
+    error_message = "local_disk_size_gib must be 0 (disabled) or >= 10 GiB."
   }
 }
 
@@ -161,15 +183,41 @@ resource "lxd_network" "ovn_uplink" {
 }
 
 # -----------------------------------------------------------------------
-# Ceph block volumes (one per node)
+# Ceph block volumes (ceph_disks_per_node per node)
+# Total count = node_count × ceph_disks_per_node
+# Volume naming: {prefix}-ceph-{node}-{osd}  (1-indexed both)
 # -----------------------------------------------------------------------
 
+locals {
+  ceph_volumes = [
+    for pair in setproduct(
+      range(var.microcloud_node_count),
+      range(var.ceph_disks_per_node)
+    ) : {
+      node = pair[0]  # 0-based node index
+      osd  = pair[1]  # 0-based OSD index within node
+    }
+  ]
+}
+
 resource "lxd_volume" "microcloud_ceph_disks" {
-  count        = var.microcloud_node_count
-  name         = "${local.lxd_prefix}-ceph-${count.index + 1}"
+  count        = length(local.ceph_volumes)
+  name         = "${local.lxd_prefix}-ceph-${local.ceph_volumes[count.index].node + 1}-${local.ceph_volumes[count.index].osd + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
   config       = { size = "${var.microcloud_ceph_disk_size_gib}GiB" }
+}
+
+# -----------------------------------------------------------------------
+# Local ZFS volumes (one per node, optional — skipped when local_disk_size_gib=0)
+# -----------------------------------------------------------------------
+
+resource "lxd_volume" "microcloud_local_disks" {
+  count        = var.local_disk_size_gib > 0 ? var.microcloud_node_count : 0
+  name         = "${local.lxd_prefix}-local-${count.index + 1}"
+  pool         = var.lxd_storage_pool
+  content_type = "block"
+  config       = { size = "${var.local_disk_size_gib}GiB" }
 }
 
 # -----------------------------------------------------------------------
@@ -197,13 +245,32 @@ resource "lxd_instance" "microcloud_nodes" {
     }
   }
 
-  # Extra block device for MicroCeph OSD
-  device {
-    name = "ceph-disk"
-    type = "disk"
-    properties = {
-      source = lxd_volume.microcloud_ceph_disks[count.index].name
-      pool   = var.lxd_storage_pool
+  # Ceph OSD block devices: one device per OSD attached to this node.
+  # Index math: OSD volumes for node N occupy positions
+  #   [N * ceph_disks_per_node .. (N+1) * ceph_disks_per_node - 1]
+  # in the flat lxd_volume.microcloud_ceph_disks list.
+  dynamic "device" {
+    for_each = range(var.ceph_disks_per_node)
+    content {
+      name = "ceph-disk-${device.value + 1}"
+      type = "disk"
+      properties = {
+        source = lxd_volume.microcloud_ceph_disks[count.index * var.ceph_disks_per_node + device.value].name
+        pool   = var.lxd_storage_pool
+      }
+    }
+  }
+
+  # Optional local ZFS disk (only when local_disk_size_gib > 0)
+  dynamic "device" {
+    for_each = var.local_disk_size_gib > 0 ? [1] : []
+    content {
+      name = "local-disk"
+      type = "disk"
+      properties = {
+        source = lxd_volume.microcloud_local_disks[count.index].name
+        pool   = var.lxd_storage_pool
+      }
     }
   }
 

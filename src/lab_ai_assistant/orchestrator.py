@@ -481,8 +481,8 @@ class LabOrchestrator:
         "install_inference_snap": {"engine"},
         "deploy_microcloud": {
             "scenario", "nodes", "sizing_tier", "node_cpu", "node_memory_mb",
-            "root_disk_gib", "ceph_disk_gib", "user_prefix", "ssh_key",
-            "network_interface", "ovn_uplink_interface", "ceph_osd_disk",
+            "root_disk_gib", "ceph_disk_gib", "ceph_disks_per_node", "local_disk_gib",
+            "user_prefix", "ssh_key", "network_interface", "ovn_uplink_interface", "ceph_osd_disk",
         },
         "delete_environment": {"workspace"},
         "list_environments": set(),
@@ -490,6 +490,12 @@ class LabOrchestrator:
             "workspace", "target_nodes", "sizing_tier", "node_cpu",
             "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
         },
+        "add_cluster_node": {
+            "workspace", "add_nodes", "sizing_tier", "node_cpu",
+            "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
+            "ceph_disks_per_node", "local_disk_gib",
+        },
+        "verify_cluster_health": {"workspace"},
     }
 
     def _execute_action(self, action: str, parameters: dict[str, Any]) -> str:
@@ -502,6 +508,8 @@ class LabOrchestrator:
                 "delete_environment": self.config.cleanup_microcloud_script,
                 "list_environments": self.config.list_environments_script,
                 "scale_environment": self.config.scale_microcloud_script,
+                "add_cluster_node": self.config.add_cluster_node_script,
+                "verify_cluster_health": self.config.verify_cluster_health_script,
             }
 
             script_path = script_map.get(action)
@@ -519,16 +527,18 @@ class LabOrchestrator:
                     value = value.removesuffix("_microcloud")
                 cmd.append(f"--{key.replace('_', '-')}={value}")
 
-            if action in ("deploy_microcloud", "delete_environment", "scale_environment"):
+            if action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node"):
                 cmd.append("--auto-approve")
 
             logger.info(f"Running: {' '.join(cmd)}")
-            capture_only = (action in ("deploy_microcloud", "delete_environment", "scale_environment"))
+            capture_only = (action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"))
             output_lines: list[str] = []
             status_label = {
                 "deploy_microcloud": "Deployment",
                 "delete_environment": "Cleanup",
                 "scale_environment": "Scaling",
+                "add_cluster_node": "Node Addition",
+                "verify_cluster_health": "Health Check",
             }.get(action, "Operation")
 
             if capture_only:

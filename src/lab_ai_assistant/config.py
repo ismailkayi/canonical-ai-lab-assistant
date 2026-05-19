@@ -19,6 +19,8 @@ class Config:
     cleanup_microcloud_script: Path = scripts_dir / "cleanup_microcloud.sh"
     list_environments_script: Path = scripts_dir / "list_microcloud_environments.sh"
     scale_microcloud_script: Path = scripts_dir / "scale_microcloud.sh"
+    verify_cluster_health_script: Path = scripts_dir / "verify_cluster_health.sh"
+    add_cluster_node_script: Path = scripts_dir / "add_cluster_node.sh"
 
     inference_engine: str = "gemma4"
     inference_host: str = os.getenv("INFERENCE_HOST", "http://127.0.0.1:8336")
@@ -54,6 +56,8 @@ class Config:
         self.cleanup_microcloud_script = self.scripts_dir / "cleanup_microcloud.sh"
         self.list_environments_script = self.scripts_dir / "list_microcloud_environments.sh"
         self.scale_microcloud_script = self.scripts_dir / "scale_microcloud.sh"
+        self.verify_cluster_health_script = self.scripts_dir / "verify_cluster_health.sh"
+        self.add_cluster_node_script = self.scripts_dir / "add_cluster_node.sh"
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)

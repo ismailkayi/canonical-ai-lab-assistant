@@ -73,6 +73,42 @@
       register: ceph_disk_detect
       changed_when: false
 
+    - name: Detect all available Ceph disks (non-root, unmounted)
+      # Collects ALL non-root unmounted disks for multi-OSD support.
+      # Result is a newline-separated list; Ansible join filter makes it a YAML list.
+      shell: |
+        root_src="$(findmnt -n -o SOURCE /)"
+        root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
+
+        for disk in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}'); do
+          [ "$disk" = "$root_disk" ] && continue
+          lsblk -nr -o MOUNTPOINT "/dev/$disk" | grep -q '[^[:space:]]' && continue
+          echo "/dev/$disk"
+        done
+      register: all_ceph_disks_detect
+      changed_when: false
+
+    - name: Detect local ZFS disk (last non-root unmounted disk, optional)
+      # Used when a separate local-disk was provisioned in Terraform.
+      # We pick the LAST disk in the list (Ceph OSD(s) take the first N).
+      shell: |
+        root_src="$(findmnt -n -o SOURCE /)"
+        root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
+
+        all_disks=()
+        for disk in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}'); do
+          [ "$disk" = "$root_disk" ] && continue
+          lsblk -nr -o MOUNTPOINT "/dev/$disk" | grep -q '[^[:space:]]' && continue
+          all_disks+=("/dev/$disk")
+        done
+
+        # If there is more than one extra disk, the last one is the local ZFS disk
+        if [ "${#all_disks[@]}" -gt 1 ]; then
+          echo "${all_disks[-1]}"
+        fi
+      register: local_disk_detect
+      changed_when: false
+
     - name: Fail if no IP-free uplink interface found
       fail:
         msg: >
@@ -92,9 +128,28 @@
       set_fact:
         ovn_uplink_iface: "{{ ovn_iface_detect.stdout | trim }}"
 
-    - name: Set Ceph disk path fact
+    - name: Set Ceph disk paths fact (list of all non-root unmounted disks)
       set_fact:
-        ceph_disk_path: "{{ ceph_disk_detect.stdout | trim }}"
+        # all_ceph_disks: [ "/dev/sdb", "/dev/sdc", ... ]
+        # If local_disk is present, exclude the last disk (reserved for ZFS).
+        all_ceph_disk_paths: "{{ all_ceph_disks_detect.stdout_lines | map('trim') | select | list }}"
+        local_disk_path: "{{ local_disk_detect.stdout | trim }}"
+
+    - name: Build Ceph OSD disk list (exclude local disk if present)
+      set_fact:
+        ceph_disk_paths: >-
+          {%- if local_disk_path != '' -%}
+            {{ all_ceph_disk_paths[:-1] }}
+          {%- else -%}
+            {{ all_ceph_disk_paths }}
+          {%- endif -%}
+
+    - name: Fail if no Ceph OSD disks remain after local disk reservation
+      fail:
+        msg: >
+          No Ceph OSD disks available on {{ inventory_hostname }} after reserving
+          the local ZFS disk. Ensure extra block volumes are attached.
+      when: ceph_disk_paths | length == 0
 
 # --- Bootstrap the MicroCloud cluster from the first node ---
 - name: Bootstrap MicroCloud Cluster (Node 1)
@@ -145,8 +200,15 @@
               ovn_uplink_interface: {{ hostvars[host].ovn_uplink_iface }}
               storage:
                 ceph:
-                  - path: {{ hostvars[host].ceph_disk_path }}
+          {% for disk in hostvars[host].ceph_disk_paths %}
+                  - path: {{ disk }}
                     wipe: true
+          {% endfor %}
+          {% if hostvars[host].local_disk_path != '' %}
+                local:
+                  - path: {{ hostvars[host].local_disk_path }}
+                    wipe: true
+          {% endif %}
           {% endfor %}
           ovn:
             ipv4_gateway: {{ ovn_ipv4_gateway }}

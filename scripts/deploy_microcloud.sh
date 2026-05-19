@@ -32,6 +32,8 @@ NODE_CPU=""
 NODE_MEMORY_MB=""
 ROOT_DISK_GIB=""
 CEPH_DISK_GIB=""
+CEPH_DISKS_PER_NODE=1
+LOCAL_DISK_GIB=0
 USER_PREFIX="lab"
 AUTO_APPROVE=false
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
@@ -51,6 +53,8 @@ for arg in "$@"; do
         --node-memory-mb=*) NODE_MEMORY_MB="${arg#*=}" ;;
         --root-disk-gib=*)  ROOT_DISK_GIB="${arg#*=}" ;;
         --ceph-disk-gib=*)  CEPH_DISK_GIB="${arg#*=}" ;;
+        --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
+        --local-disk-gib=*)  LOCAL_DISK_GIB="${arg#*=}" ;;
         --network-interface=*) NETWORK_INTERFACE="${arg#*=}" ;;
         --ovn-uplink-interface=*) OVN_UPLINK_INTERFACE="${arg#*=}" ;;
         --ceph-osd-disk=*) CEPH_OSD_DISK="${arg#*=}" ;;
@@ -279,6 +283,8 @@ print_kv "vCPU / node" "${NODE_CPU}"
 print_kv "RAM / node" "${NODE_MEMORY_GB} GB"
 print_kv "Root disk / node" "${ROOT_DISK_GIB} GiB"
 print_kv "Ceph disk / node" "${CEPH_DISK_GIB} GiB"
+print_kv "Ceph OSDs / node" "${CEPH_DISKS_PER_NODE}"
+print_kv "Local disk / node" "$([ "${LOCAL_DISK_GIB}" -gt 0 ] && echo "${LOCAL_DISK_GIB} GiB (ZFS)" || echo "disabled")"
 print_kv "Cluster NIC" "${NETWORK_INTERFACE:-auto-detect}"
 print_kv "OVN uplink NIC" "${OVN_UPLINK_INTERFACE:-auto-detect}"
 print_kv "Ceph OSD disk" "${CEPH_OSD_DISK:-auto-detect}"
@@ -305,7 +311,9 @@ tofu apply -auto-approve \
     -var="microcloud_node_cpu=${NODE_CPU}" \
     -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}" \
     -var="microcloud_root_disk_size_gib=${ROOT_DISK_GIB}" \
-    -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}"
+    -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}" \
+    -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}" \
+    -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
 
 log_success "LXD VMs provisioned"
 
