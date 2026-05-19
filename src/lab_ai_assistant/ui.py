@@ -109,10 +109,9 @@ class ChatUI:
     @contextmanager
     def thinking_indicator(self, label: str = "Thinking", timeout: Optional[int] = None):
         """Show an animated spinner while the AI is processing."""
-        suffix = f" (timeout: {timeout}s)" if timeout else ""
         spinner_text = Text()
         spinner_text.append(f" {PHASE_ICONS['thinking']} ", style="phase.active")
-        spinner_text.append(f"{label}{suffix}", style="phase.active")
+        spinner_text.append(label, style="phase.active")
 
         with Live(
             Spinner("dots", text=spinner_text, style="bright_magenta"),

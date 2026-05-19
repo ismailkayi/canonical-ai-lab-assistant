@@ -78,10 +78,7 @@ class LabOrchestrator:
                     self.ui.print_ai_response(self.sizing_advisor.describe_tiers())
                     continue
 
-                with self.ui.thinking_indicator(
-                    "AI is analyzing your request",
-                    timeout=self.config.response_timeout,
-                ):
+                with self.ui.thinking_indicator("AI is analyzing your request"):
                     response = self._process_user_input(user_input)
 
                 self._print_assistant_response(response)
@@ -514,8 +511,13 @@ class LabOrchestrator:
             accepted = self._SCRIPT_ACCEPTED_PARAMS.get(action, set())
             cmd = ["bash", str(script_path)]
             for key, value in parameters.items():
-                if value is not None and key in accepted:
-                    cmd.append(f"--{key.replace('_', '-')}={value}")
+                if value is None or key not in accepted:
+                    continue
+                # Guard: model sometimes passes full workspace name as user_prefix.
+                # deploy_microcloud.sh appends _microcloud itself, so strip it.
+                if key == "user_prefix" and isinstance(value, str):
+                    value = value.removesuffix("_microcloud")
+                cmd.append(f"--{key.replace('_', '-')}={value}")
 
             if action in ("deploy_microcloud", "delete_environment", "scale_environment"):
                 cmd.append("--auto-approve")

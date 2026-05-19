@@ -141,7 +141,7 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                         "user_prefix": {
                             "type": "string",
-                            "description": "Name prefix for workspace/resources (e.g. ismail)",
+                            "description": "Short word prefix for resource naming, e.g. 'lab' or 'alice'. Do NOT include 'microcloud' — the system appends that automatically. Default: 'lab'.",
                             "default": "lab",
                         },
                         "nodes": {"type": "integer", "default": 3},
