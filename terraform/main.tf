@@ -51,13 +51,13 @@ variable "lxd_storage_pool" {
 }
 
 variable "microcloud_node_count" {
-  description = "Number of MicroCloud nodes (must be odd, minimum 3)"
+  description = "Number of MicroCloud nodes (minimum 3 for this automation flow)"
   type        = number
   default     = 3
 
   validation {
-    condition     = var.microcloud_node_count >= 3 && var.microcloud_node_count % 2 == 1
-    error_message = "microcloud_node_count must be an odd number >= 3."
+    condition     = var.microcloud_node_count >= 3
+    error_message = "microcloud_node_count must be >= 3."
   }
 }
 

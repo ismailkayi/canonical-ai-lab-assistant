@@ -14,7 +14,7 @@ from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.doc_fetcher import DocFetcher
 from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
-from lab_ai_assistant.tools import validate_tool_parameters
+from lab_ai_assistant.tools import get_tool_definitions, validate_tool_parameters
 from lab_ai_assistant.ui import ChatUI
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ class LabOrchestrator:
                     self.ui.print_ai_plan(plan)
 
             parameters = ai_response.get("parameters", {})
+            action = self._resolve_tool_action(action, message, reasoning, parameters, user_message)
 
             # Deployment requires explicit user confirmation before execution
             if ai_response.get("needs_confirmation"):
@@ -127,6 +128,9 @@ class LabOrchestrator:
                 if prefix:
                     return f"__CONFIRM__:{prefix}\n\n{confirmation_prompt}"
                 return f"__CONFIRM__:{confirmation_prompt}"
+
+            if not action:
+                return self._compose_user_facing_response(message, reasoning)
 
             # Show tool execution in the UI
             self.ui.print_tool_call(action)
@@ -141,6 +145,9 @@ class LabOrchestrator:
                 tool_result = self._execute_action(action, parameters)
                 self._record_deployment(action, parameters, tool_result)
 
+            if self._is_failed_tool_result(tool_result):
+                return self._compose_failed_tool_response(action, tool_result)
+
             tool_result_for_ai = self._prepare_tool_result_for_ai(action, tool_result)
 
             # Feed result back to AI for synthesis (closes the loop)
@@ -152,6 +159,56 @@ class LabOrchestrator:
             ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds."),
             ai_response.get("reasoning", ""),
         )
+
+    def _is_failed_tool_result(self, tool_result: str) -> bool:
+        """Detect hard failures from script-backed tools."""
+        if not tool_result:
+            return False
+        return tool_result.startswith("Script failed") or tool_result.startswith("Error:") or "Traceback" in tool_result
+
+    def _compose_failed_tool_response(self, action: str, tool_result: str) -> str:
+        """Return a deterministic failure summary so we never imply background work continues."""
+        summary = self._truncate_text(tool_result.strip(), 1200)
+        if action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"):
+            return (
+                f"{action.replace('_', ' ').capitalize()} failed. No background work is running.\n\n"
+                f"Last error:\n{summary}"
+            )
+        return f"Operation failed.\n\nLast error:\n{summary}"
+
+    def _resolve_tool_action(
+        self,
+        action: str | None,
+        message: str,
+        reasoning: str,
+        parameters: dict[str, Any],
+        user_input: str,
+    ) -> str | None:
+        """Normalize generic tool labels back to a concrete tool name when possible."""
+        known_tools = {tool["name"] for tool in get_tool_definitions().get("tools", []) if tool.get("name")}
+        if action in known_tools:
+            return action
+
+        text = "\n".join(part for part in (user_input, message, reasoning) if part).lower()
+
+        if any(keyword in text for keyword in ("delete", "cleanup", "clean up", "destroy", "remove")):
+            return "delete_environment"
+        if any(keyword in text for keyword in ("list", "show", "enumerate")) and any(
+            keyword in text for keyword in ("lab", "environment", "environments", "labs")
+        ):
+            return "list_environments"
+        if any(keyword in text for keyword in ("health", "status", "check", "verify")):
+            return "verify_cluster_health"
+        if any(keyword in text for keyword in ("add node", "add nodes", "join node", "join nodes", "expand cluster")):
+            return "add_cluster_node"
+        if any(keyword in text for keyword in ("scale", "resize", "increase nodes", "more nodes", "re-deploy", "redeploy")):
+            return "scale_environment"
+
+        workspace_hint = parameters.get("workspace") if isinstance(parameters, dict) else None
+        if action == "tool_call" and isinstance(workspace_hint, str) and workspace_hint:
+            return "delete_environment"
+
+        return action if action in known_tools else None
 
     def _compose_user_facing_response(self, message: str, reasoning: str) -> str:
         """Build a concise, readable assistant response for terminal UX."""
@@ -489,6 +546,7 @@ class LabOrchestrator:
         "scale_environment": {
             "workspace", "target_nodes", "sizing_tier", "node_cpu",
             "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
+            "ceph_disks_per_node", "local_disk_gib",
         },
         "add_cluster_node": {
             "workspace", "add_nodes", "sizing_tier", "node_cpu",
@@ -557,9 +615,6 @@ class LabOrchestrator:
                         print(line, end="", flush=True)
                         output_lines.append(line)
                 else:
-                    heartbeat_every_sec = 15
-                    start_ts = time.monotonic()
-                    last_heartbeat_ts = start_ts
                     milestone_pattern = re.compile(
                         r"\[INFO\]|\[WARN\]|\[ERROR\]|\[SUCCESS\]|"
                         r"Apply complete|Destroy complete|PLAY RECAP|TASK \[",
@@ -576,14 +631,6 @@ class LabOrchestrator:
                                     self.ui.print_operation_progress(
                                         status_label, line.strip()
                                     )
-
-                        now = time.monotonic()
-                        if proc.poll() is None and (now - last_heartbeat_ts) >= heartbeat_every_sec:
-                            elapsed = int(now - start_ts)
-                            self.ui.print_operation_progress(
-                                status_label, f"still running... {elapsed}s elapsed"
-                            )
-                            last_heartbeat_ts = now
 
                         if proc.poll() is not None:
                             break
@@ -638,11 +685,18 @@ class LabOrchestrator:
         if not tool_result:
             return "(no output)"
 
-        if action in ("deploy_microcloud", "scale_environment") and len(tool_result) > deploy_tail_chars:
-            return (
-                "Operation finished. Full logs were streamed to the terminal and omitted for context safety.\n"
-                f"Tail ({deploy_tail_chars} chars):\n{tool_result[-deploy_tail_chars:]}"
-            )
+        if action in ("deploy_microcloud", "scale_environment"):
+            access_details = self._extract_deployment_access_details(tool_result)
+            if len(tool_result) > deploy_tail_chars:
+                compact = (
+                    "Operation finished. Full logs were streamed to the terminal and omitted for context safety.\n"
+                    f"Tail ({deploy_tail_chars} chars):\n{tool_result[-deploy_tail_chars:]}"
+                )
+                if access_details:
+                    return f"{access_details}\n\n{compact}"
+                return compact
+            if access_details:
+                return f"{access_details}\n\n{tool_result}"
 
         if len(tool_result) > max_chars:
             head_chars = max_chars // 2
@@ -654,6 +708,44 @@ class LabOrchestrator:
             )
 
         return tool_result
+
+    def _extract_deployment_access_details(self, tool_result: str) -> str:
+        """Extract deterministic access details (IPs/UI/commands) from deploy script output."""
+        if not tool_result:
+            return ""
+
+        env_match = re.search(r"^\s*Environment\s+(\S+)\s*$", tool_result, flags=re.MULTILINE)
+        workspace = env_match.group(1) if env_match else ""
+
+        node_rows = re.findall(
+            r"^\s*(\S+-node-\d+)\s+(\d+\.\d+\.\d+\.\d+|N/A)\s+(https?://\S+|-)\s*$",
+            tool_result,
+            flags=re.MULTILINE,
+        )
+
+        if not workspace and not node_rows:
+            return ""
+
+        lines = ["Deployment access details:"]
+        if workspace:
+            lines.append(f"- Workspace: {workspace}")
+
+        if node_rows:
+            lines.append("- Nodes:")
+            for node_name, ip, ui_url in node_rows:
+                node_bits = [f"{node_name}"]
+                node_bits.append(f"IP={ip}")
+                if ui_url != "-":
+                    node_bits.append(f"UI={ui_url}")
+                lines.append(f"  - {', '.join(node_bits)}")
+
+            first_node, first_ip, _ = node_rows[0]
+            lines.append("- Quick access:")
+            lines.append(f"  - LXD shell: lxc exec {first_node} -- bash")
+            if first_ip != "N/A":
+                lines.append(f"  - SSH: ssh ubuntu@{first_ip}")
+
+        return "\n".join(lines)
 
     def _load_history(self):
         if self.config.history_file.exists():

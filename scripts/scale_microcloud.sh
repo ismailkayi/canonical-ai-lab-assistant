@@ -9,6 +9,8 @@ NODE_CPU=""
 NODE_MEMORY_MB=""
 ROOT_DISK_GIB=""
 CEPH_DISK_GIB=""
+CEPH_DISKS_PER_NODE=""
+LOCAL_DISK_GIB=""
 AUTO_APPROVE=false
 
 for arg in "$@"; do
@@ -20,6 +22,8 @@ for arg in "$@"; do
         --node-memory-mb=*) NODE_MEMORY_MB="${arg#*=}" ;;
         --root-disk-gib=*) ROOT_DISK_GIB="${arg#*=}" ;;
         --ceph-disk-gib=*) CEPH_DISK_GIB="${arg#*=}" ;;
+        --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
+        --local-disk-gib=*) LOCAL_DISK_GIB="${arg#*=}" ;;
         --auto-approve) AUTO_APPROVE=true ;;
         *) echo "Unknown argument: ${arg}"; exit 1 ;;
     esac
@@ -37,8 +41,8 @@ if ! [[ "${TARGET_NODES}" =~ ^[0-9]+$ ]]; then
     echo "target-nodes must be an integer"
     exit 1
 fi
-if (( TARGET_NODES < 3 || TARGET_NODES % 2 == 0 )); then
-    echo "target-nodes must be an odd number >= 3"
+if (( TARGET_NODES < 3 )); then
+    echo "target-nodes must be >= 3"
     exit 1
 fi
 
@@ -74,6 +78,12 @@ if [[ -n "${ROOT_DISK_GIB}" ]]; then
 fi
 if [[ -n "${CEPH_DISK_GIB}" ]]; then
     CMD+=("--ceph-disk-gib=${CEPH_DISK_GIB}")
+fi
+if [[ -n "${CEPH_DISKS_PER_NODE}" ]]; then
+    CMD+=("--ceph-disks-per-node=${CEPH_DISKS_PER_NODE}")
+fi
+if [[ -n "${LOCAL_DISK_GIB}" ]]; then
+    CMD+=("--local-disk-gib=${LOCAL_DISK_GIB}")
 fi
 if [[ "${AUTO_APPROVE}" == "true" ]]; then
     CMD+=("--auto-approve")

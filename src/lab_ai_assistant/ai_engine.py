@@ -27,6 +27,7 @@ class AIEngine:
         self.conversation_history = []
         self._api_style: Optional[str] = None
         self._resolved_model: Optional[str] = None
+        self._supports_native_tools: bool = True  # optimistically assume support
 
     def is_available(self) -> bool:
         """Check if inference engine is running."""
@@ -56,17 +57,16 @@ class AIEngine:
         messages = [{"role": "system", "content": system_prompt}] + self.conversation_history
 
         try:
-            response = self._call_inference(messages)
-            # Store full raw JSON so AI remembers its own tool calls on next turn
+            response = self._call_inference(messages, include_tools=include_tools)
             self.conversation_history.append(
-                {"role": "assistant", "content": response.get("_raw", response.get("content", ""))}
+                {"role": "assistant", "content": self._summarize_response_for_history(response)}
             )
             return response
         except Exception as exc:
             logger.error(f"Error calling inference engine: {exc}")
             return {"content": f"Error: {str(exc)}", "error": True}
 
-    def _call_inference(self, messages: list) -> dict[str, Any]:
+    def _call_inference(self, messages: list, include_tools: bool = True) -> dict[str, Any]:
         api_style = self._detect_api_style()
         resolved_model = self._resolve_model_name()
 
@@ -76,6 +76,14 @@ class AIEngine:
                 "messages": messages,
                 "stream": False,
             }
+
+            # Pass tool definitions via the native API parameter when available.
+            # This is significantly more token-efficient than embedding in prompt.
+            if include_tools and self._supports_native_tools:
+                api_tools = self._build_openai_tools()
+                if api_tools:
+                    payload["tools"] = api_tools
+
             response = requests.post(
                 f"{self.base_url}/v1/chat/completions",
                 json=payload,
@@ -87,6 +95,25 @@ class AIEngine:
                     json=payload,
                     timeout=self.config.response_timeout,
                 )
+
+            # If backend rejects the tools parameter, retry without it and
+            # fall back to embedding tools in the system prompt from now on.
+            if response.status_code in (400, 422) and "tools" in payload:
+                logger.warning("Backend rejected tools parameter; falling back to prompt-embedded tools")
+                self._supports_native_tools = False
+                payload.pop("tools", None)
+                # Inject tool definitions into the system message for this request.
+                tools_text = f"\n\nAvailable tools:\n{json.dumps(get_tool_definitions(), indent=2)}"
+                payload["messages"] = [
+                    {"role": m["role"], "content": m["content"] + tools_text if m["role"] == "system" else m["content"]}
+                    for m in payload["messages"]
+                ]
+                response = requests.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    timeout=self.config.response_timeout,
+                )
+
             response.raise_for_status()
             result = response.json()
             message_payload = result.get("choices", [{}])[0].get("message", {})
@@ -226,6 +253,21 @@ class AIEngine:
 
         return []
 
+    def _build_openai_tools(self) -> list[dict[str, Any]]:
+        """Convert internal tool definitions to OpenAI-compatible tools format."""
+        tools_def = get_tool_definitions()
+        api_tools = []
+        for tool in tools_def.get("tools", []):
+            api_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+                },
+            })
+        return api_tools
+
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
         """System prompt focused on custom topology planning."""
         scenario_catalog = scenarios_summary()
@@ -251,7 +293,8 @@ WHEN INTRODUCING YOURSELF:
 CORE FACTS:
 - MicroCloud storage is MicroCeph (no LVM mode).
 - OVN is the default network; skip only if user explicitly opts out.
-- Node count should be odd (3/5/7) for quorum safety.
+- Cluster size is flexible (including even counts); this automation targets >=3 nodes.
+- For HA in production, at least 3 members are required, and 4 members are commonly recommended for critical deployments.
 - Each MicroCloud node needs at least one Ceph disk (default: 1 OSD per node).
 - In this tool's default flow, MicroCloud runs inside LXD VMs created by
   OpenTofu (nested-lxd-lab mode).
@@ -385,6 +428,7 @@ RESPONSE STYLE:
 - Avoid repeating the same paragraph.
 - Do not include markdown code fences or pseudo tool blocks in message.
 - If calling a tool, keep message to one short plan sentence.
+- Do not use a generic placeholder like "tool_call"; action must be one of the exact tool names or null.
 - Always include a non-empty "reasoning" field.
 - Use bullet points for comparisons and lists, not walls of text.
 
@@ -393,6 +437,11 @@ Never call deploy_microcloud until user says yes.
 Never invent network interface names or disk paths.
 Never pass parameters that are not defined in the tool definitions.
 In nested-lxd-lab mode, do not block waiting for host physical OSD disk paths or manual NIC names.
+
+EXECUTION SEMANTICS:
+- Script-backed tools are synchronous: once the orchestrator calls a tool, it has already finished when this model sees the result.
+- Never tell the user that a tool is "still running" or that work continues in the background unless a tool explicitly returned an asynchronous job handle.
+- If a tool result contains an error, summarize the failure plainly and do not imply progress or pending background work.
 
 CLEANUP:
 Users can request environment deletion at any time.
@@ -408,8 +457,13 @@ ENVIRONMENT MANAGEMENT:
 - Never claim success unless the tool execution confirms it.
 """
         if include_tools:
-            tools = get_tool_definitions()
-            prompt += f"\n\nAvailable tools:\n{json.dumps(tools, indent=2)}"
+            # Only embed tools as text for backends without native tool support.
+            # For OpenAI-compatible backends with native tools, they're passed via
+            # the `tools` parameter in _call_inference (much more token-efficient).
+            api_style = self._detect_api_style()
+            if api_style != "openai" or not self._supports_native_tools:
+                tools = get_tool_definitions()
+                prompt += f"\n\nAvailable tools:\n{json.dumps(tools, indent=2)}"
 
         return prompt
 
@@ -419,6 +473,19 @@ ENVIRONMENT MANAGEMENT:
     def get_conversation_history(self) -> list:
         return self.conversation_history.copy()
 
+    def _summarize_response_for_history(self, response: dict[str, Any]) -> str:
+        """Store a short natural-language summary instead of raw tool JSON."""
+        content = response.get("content", "") or response.get("message", "") or response.get("reasoning", "")
+        if content:
+            return content
+
+        action = response.get("action")
+        if action:
+            return f"Calling {action}"
+
+        raw = response.get("_raw", "")
+        return raw if isinstance(raw, str) else ""
+
     def feed_tool_result(self, tool_name: str, result: str) -> dict[str, Any]:
         """Inject a tool result into conversation history and get the AI's next step.
 
@@ -426,27 +493,56 @@ ENVIRONMENT MANAGEMENT:
         further before giving the user a final synthesised response.
         """
         lifecycle_tools = {"list_environments", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"}
+        is_failure = result.startswith("Script failed") or result.startswith("Error:") or "Traceback" in result
+
         if tool_name in lifecycle_tools:
-            followup = (
-                f"Tool '{tool_name}' completed. Result:\n\n{result}\n\n"
-                "Return a concise user-facing summary of this operation only. "
-                "Do not pivot to topology planning unless the user explicitly asks for design/deployment."
-            )
+            if is_failure:
+                followup = (
+                    f"Tool '{tool_name}' completed with a failure. Result:\n\n{result}\n\n"
+                    "Return a concise user-facing failure summary only. "
+                    "Do not say the tool is still running, do not imply background work continues, "
+                    "and do not pivot to topology planning unless the user explicitly asks for design/deployment."
+                )
+            else:
+                followup = (
+                    f"Tool '{tool_name}' completed successfully. Result:\n\n{result}\n\n"
+                    "Return a concise user-facing summary of this operation only. "
+                    "Do not say the tool is still running. Do not pivot to topology planning unless the user explicitly asks for design/deployment."
+                )
         else:
-            followup = (
-                f"Tool '{tool_name}' completed. Result:\n\n{result}\n\n"
-                "Analyze this result and continue your plan. "
-                "If you have enough information, give your final recommendation. "
-                "If you need another tool, call it."
-            )
+            if is_failure:
+                followup = (
+                    f"Tool '{tool_name}' completed with a failure. Result:\n\n{result}\n\n"
+                    "Return a concise user-facing failure summary only. "
+                    "Do not say the tool is still running. "
+                    "If the result is insufficient, ask for the missing information instead of assuming background work continues."
+                )
+            else:
+                followup = (
+                    f"Tool '{tool_name}' completed successfully. Result:\n\n{result}\n\n"
+                    "Analyze this result and continue your plan. "
+                    "If you have enough information, give your final recommendation. "
+                    "If you need another tool, call it."
+                )
 
         self.conversation_history.append({"role": "user", "content": followup})
         system_prompt = self._get_default_system_prompt()
         messages = [{"role": "system", "content": system_prompt}] + self.conversation_history
         try:
             response = self._call_inference(messages)
+
+            # If response is empty, retry with trimmed history to reduce context size.
+            content = response.get("content", "") or response.get("message", "")
+            action = response.get("action")
+            if not content and not action:
+                logger.warning("Empty response from model after tool result; retrying with trimmed context")
+                # Keep only the last 4 messages (recent context) to fit in context window.
+                trimmed_history = self.conversation_history[-4:]
+                short_messages = [{"role": "system", "content": system_prompt}] + trimmed_history
+                response = self._call_inference(short_messages, include_tools=False)
+
             self.conversation_history.append(
-                {"role": "assistant", "content": response.get("_raw", response.get("content", ""))}
+                {"role": "assistant", "content": self._summarize_response_for_history(response)}
             )
             return response
         except Exception as exc:

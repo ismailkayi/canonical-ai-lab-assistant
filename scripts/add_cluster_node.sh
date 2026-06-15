@@ -4,15 +4,15 @@
 # Flow:
 #   1. Determine current node count from Terraform state
 #   2. Provision new VMs via tofu apply (increment node count)
-#   3. Prepare new nodes (install snaps, detect resources)
-#   4. Run `microcloud add` on the existing initiator to expand the cluster
+#   3. Prepare new nodes (install snaps, detect resources) via Ansible
+#   4. Run `microcloud preseed` on joiners + initiator to expand the cluster
 #
 # Usage:
 #   add_cluster_node.sh --workspace=<name> --add-nodes=<N>
 #                       [--ceph-disk-gib=<gib>] [--ceph-disks-per-node=<n>]
 #                       [--local-disk-gib=<gib>] [--sizing-tier=<tier>]
 #                       [--node-cpu=<n>] [--node-memory-mb=<mb>]
-#                       [--root-disk-gib=<gib>]
+#                       [--root-disk-gib=<gib>] [--auto-approve]
 
 set -euo pipefail
 
@@ -57,6 +57,7 @@ for arg in "$@"; do
         --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
         --local-disk-gib=*)     LOCAL_DISK_GIB="${arg#*=}" ;;
         --ssh-key=*)            SSH_KEY_PATH="${arg#*=}" ;;
+        --auto-approve)         : ;;  # accepted but no-op (always auto)
         *) log_error "Unknown argument: ${arg}"; exit 1 ;;
     esac
 done
@@ -117,9 +118,9 @@ fi
 
 NEW_TOTAL=$(( CURRENT_NODES + ADD_NODES ))
 
-# MicroCloud requires odd cluster size for quorum — warn but don't block (user may know what they're doing)
+# Even cluster sizes are supported; odd voter counts are often preferred for quorum behavior.
 if (( NEW_TOTAL % 2 == 0 )); then
-    log_warn "Target cluster size ${NEW_TOTAL} is even — recommend odd count for MicroCloud quorum"
+    log_warn "Target cluster size ${NEW_TOTAL} is even — supported, but odd voter counts are often preferred for quorum behavior"
 fi
 
 log_info "Current nodes: ${CURRENT_NODES}  →  New total: ${NEW_TOTAL}"
@@ -177,7 +178,7 @@ echo ""
 # -----------------------------------------------------------------------
 log_info "[PHASE 1] Provisioning ${ADD_NODES} new VM(s) with OpenTofu..."
 
-tofu apply -auto-approve \
+tofu apply -auto-approve -parallelism=1 \
     -var="user_prefix=${USER_PREFIX}" \
     -var="microcloud_node_count=${NEW_TOTAL}" \
     -var="microcloud_node_cpu=${NODE_CPU}" \
@@ -200,68 +201,39 @@ if [[ ! -f "${INVENTORY_FILE}" ]]; then
     exit 1
 fi
 
-# Build a temporary inventory for only the new nodes
-NEW_NODES_INI="${REPO_ROOT}/.tmp_new_nodes_${WORKSPACE}.ini"
-{
-    echo "[new_microcloud_nodes]"
-    for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
-        echo "${LXD_PREFIX}-node-${i} ansible_connection=lxd"
-    done
-} > "${NEW_NODES_INI}"
-trap 'rm -f "${NEW_NODES_INI}"' EXIT
+# Build limit pattern for only the new nodes
+NEW_NODE_LIMIT=""
+for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
+    [[ -n "${NEW_NODE_LIMIT}" ]] && NEW_NODE_LIMIT+=","
+    NEW_NODE_LIMIT+="${LXD_PREFIX}-node-${i}"
+done
 
+# Run only Play 1 (Prepare MicroCloud Nodes) on the new nodes.
+# Play 2 (Bootstrap) is skipped because --limit excludes microcloud[0] unless
+# it happens to be a new node (which it won't be for add operations).
 ansible-playbook \
-    -i "${NEW_NODES_INI}" \
-    "${PLAYBOOKS_DIR}/prepare_nodes.yml" \
-    2>/dev/null \
-    || ansible-playbook \
-        -i "${NEW_NODES_INI}" \
-        --tags "wait_boot,install_snaps" \
-        "${PLAYBOOKS_DIR}/microcloud.yml"
+    -i "${INVENTORY_FILE}" \
+    --limit "${NEW_NODE_LIMIT}" \
+    "${PLAYBOOKS_DIR}/microcloud.yml"
 
 log_success "New nodes prepared"
 
 # -----------------------------------------------------------------------
-# Phase 3: Run `microcloud add` on the initiator to expand the cluster
+# Phase 3: Expand cluster via 'microcloud preseed' on initiator + joiners
 # -----------------------------------------------------------------------
-log_info "[PHASE 3] Expanding cluster via 'microcloud add'..."
+log_info "[PHASE 3] Expanding cluster via 'microcloud preseed'..."
 
-# Build the preseed for add operation
-# microcloud add uses a simpler preseed: just list new joiner nodes
-NEW_NODES_LIST=""
-for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
-    node_name="${LXD_PREFIX}-node-${i}"
-    NEW_NODES_LIST+="${node_name} "
+# Derive lookup subnet from the initiator's primary IP
+LOOKUP_SUBNET=$(lxc exec "${INITIATOR_NODE}" -- bash -c \
+    "ip -4 route get 1.1.1.1 | awk '/src/ {for(i=1;i<=NF;i++) if(\$i==\"src\") print \$(i+1)}'" \
+    2>/dev/null | head -1 | sed 's/\.[0-9]*$/.0\/24/')
 
-    # Detect OVN and Ceph disks on the new node
-    OVN_IFACE=$(lxc exec "${node_name}" -- bash -c "
-        primary=\$(ip -4 route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
-        for iface in \$(ip -o link show | awk -F': ' '!/lo/ {print \$2}' | cut -d'@' -f1); do
-            [ \"\$iface\" = \"\$primary\" ] && continue
-            ip -4 addr show \"\$iface\" | grep -q 'inet ' || { echo \"\$iface\"; break; }
-        done
-    " 2>/dev/null | tr -d '[:space:]')
-
-    CEPH_DISKS=$(lxc exec "${node_name}" -- bash -c "
-        root_src=\$(findmnt -n -o SOURCE /)
-        root_disk=\$(lsblk -no PKNAME \"\$root_src\" 2>/dev/null || true)
-        for disk in \$(lsblk -dn -o NAME,TYPE | awk '\$2==\"disk\" {print \$1}'); do
-            [ \"\$disk\" = \"\$root_disk\" ] && continue
-            lsblk -nr -o MOUNTPOINT \"/dev/\$disk\" | grep -q '[^[:space:]]' && continue
-            echo \"/dev/\$disk\"
-        done
-    " 2>/dev/null)
-
-    log_info "  ${node_name}: OVN=${OVN_IFACE:-?}  Ceph disks=$(echo "${CEPH_DISKS}" | tr '\n' ' ')"
-done
-
-# Write add preseed and pipe it into microcloud add on the initiator
-ADD_PRESEED=$(cat <<EOF
-lookup_subnet: $(lxc exec "${INITIATOR_NODE}" -- bash -c "ip -4 route get 1.1.1.1 | awk '/src/ {for(i=1;i<=NF;i++) if(\$i==\"src\") print \$(i+1)}'" 2>/dev/null | head -1 | sed 's/\.[0-9]*$/.0\/24/')
+# Build the preseed YAML for add operation.
+# Key: initiator is NOT in the systems list → isBootstrap()=false → add mode.
+ADD_PRESEED="initiator: ${INITIATOR_NODE}
+lookup_subnet: ${LOOKUP_SUBNET}
 session_passphrase: microcloud-lab-session-passphrase
-systems:
-EOF
-)
+systems:"
 
 for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
     node_name="${LXD_PREFIX}-node-${i}"
@@ -284,6 +256,14 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         done
     " 2>/dev/null)
 
+    # If local disk is enabled, last disk is ZFS — exclude from Ceph list
+    if [[ "${LOCAL_DISK_GIB}" -gt 0 && ${#CEPH_DISK_LIST[@]} -gt 1 ]]; then
+        LOCAL_DISK="${CEPH_DISK_LIST[-1]}"
+        unset 'CEPH_DISK_LIST[-1]'
+    else
+        LOCAL_DISK=""
+    fi
+
     ADD_PRESEED+="
   - name: ${node_name}
     ovn_uplink_interface: ${OVN_IFACE}"
@@ -296,12 +276,44 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         - path: ${disk}
           wipe: true"
         done
+        if [[ -n "${LOCAL_DISK}" ]]; then
+            ADD_PRESEED+="
+      local:
+        path: ${LOCAL_DISK}
+        wipe: true"
+        fi
+    fi
+
+    log_info "  ${node_name}: OVN=${OVN_IFACE:-?}  Ceph=${CEPH_DISK_LIST[*]:-none}  Local=${LOCAL_DISK:-none}"
+done
+
+# Start preseed on joiner nodes first (they enter joining session)
+JOINER_PIDS=()
+for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
+    node_name="${LXD_PREFIX}-node-${i}"
+    echo "${ADD_PRESEED}" | lxc exec "${node_name}" -- microcloud preseed &
+    JOINER_PIDS+=($!)
+done
+
+# Brief pause to let joiners start their session
+sleep 3
+
+# Run preseed on the initiator (enters initiating/add session)
+log_info "Running microcloud preseed on ${INITIATOR_NODE} (add mode)..."
+echo "${ADD_PRESEED}" | lxc exec "${INITIATOR_NODE}" -- microcloud preseed
+
+# Wait for all joiner processes to complete
+JOINER_FAILED=false
+for pid in "${JOINER_PIDS[@]}"; do
+    if ! wait "${pid}"; then
+        JOINER_FAILED=true
     fi
 done
 
-log_info "Running microcloud add on ${INITIATOR_NODE}..."
-echo "${ADD_PRESEED}" | lxc exec "${INITIATOR_NODE}" -- microcloud add < /dev/stdin || \
-    echo "${ADD_PRESEED}" | lxc exec "${INITIATOR_NODE}" -- bash -c "microcloud add < /dev/stdin"
+if [[ "${JOINER_FAILED}" == "true" ]]; then
+    log_error "One or more joiner preseed processes failed"
+    exit 1
+fi
 
 log_success "Cluster expanded to ${NEW_TOTAL} nodes"
 

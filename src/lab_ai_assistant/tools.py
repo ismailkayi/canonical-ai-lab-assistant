@@ -217,7 +217,7 @@ def get_tool_definitions() -> dict[str, Any]:
             {
                 "name": "scale_environment",
                 "description": (
-                    "Scale an existing MicroCloud environment to a target odd node count >= 3. "
+                    "Scale an existing MicroCloud environment to a target node count >= 3. "
                     "Use after explicit user confirmation."
                 ),
                 "parameters": {
@@ -229,7 +229,7 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                         "target_nodes": {
                             "type": "integer",
-                            "description": "Desired total node count after scaling (odd and >= 3)",
+                            "description": "Desired total node count after scaling (>= 3)",
                         },
                         "sizing_tier": {
                             "type": "string",

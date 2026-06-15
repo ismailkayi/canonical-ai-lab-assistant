@@ -47,6 +47,18 @@ DOC_SOURCES: dict[str, str] = {
     "gemma4": "https://documentation.ubuntu.com/inference-snaps/reference/snaps/",
 }
 
+# Fallback sources used when documentation.ubuntu.com returns anti-bot 403.
+DOC_FALLBACK_SOURCES: dict[str, list[str]] = {
+    "microcloud": ["https://raw.githubusercontent.com/canonical/microcloud/main/README.md"],
+    "microcloud-install": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/install.md"],
+    "microcloud-init": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"],
+    "microcloud-networking": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/networking.md"],
+    "microcloud-storage": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/storage.md"],
+    "microcloud-preseed": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"],
+    "microcloud-faq": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/faq.md"],
+    "microcloud-requirements": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/requirements.md"],
+}
+
 # Keyword → doc key mapping for fuzzy lookups
 _KEYWORD_MAP: list[tuple[list[str], str]] = [
     (["microcloud", "mc", "cluster"], "microcloud"),
@@ -84,8 +96,23 @@ class DocFetcher:
             url, title, content (plain text, trimmed to ~3 000 chars)
         """
         doc_key = self._resolve_topic(topic)
-        url = DOC_SOURCES.get(doc_key, DOC_SOURCES["microcloud"])
-        return self._fetch_url(url, doc_key)
+        primary_url = DOC_SOURCES.get(doc_key, DOC_SOURCES["microcloud"])
+        candidates = [primary_url, *DOC_FALLBACK_SOURCES.get(doc_key, [])]
+
+        last_result: dict[str, Any] | None = None
+        for url in candidates:
+            result = self._fetch_url(url, doc_key)
+            last_result = result
+            if not result.get("error"):
+                if url != primary_url:
+                    result["title"] = result.get("title") or f"{doc_key} (fallback source)"
+                    result["content"] = (
+                        "[Using fallback documentation source due to access restrictions on documentation.ubuntu.com]\n\n"
+                        + result.get("content", "")
+                    )
+                return result
+
+        return last_result or self._fetch_url(primary_url, doc_key)
 
     def fetch_by_url(self, url: str) -> dict[str, Any]:
         """Fetch a specific URL directly."""
@@ -140,28 +167,66 @@ class DocFetcher:
             resp = requests.get(
                 url,
                 timeout=15,
-                headers={"User-Agent": "canonical-ai-lab-assistant/0.1"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
             )
             resp.raise_for_status()
-            content = self._extract_text(resp.text)
+            body = resp.text
+            content = self._extract_text(body)
+            title = self._extract_title(body)
+            if not title:
+                title = self._extract_markdown_title(body)
             result = {
                 "url": url,
                 "key": key,
-                "title": self._extract_title(resp.text),
+                "title": title,
                 "content": content[:4000],  # keep context manageable
                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "error": None,
             }
         except requests.RequestException as exc:
             logger.warning(f"Failed to fetch {url}: {exc}")
-            result = {
-                "url": url,
-                "key": key,
-                "title": "",
-                "content": f"[Documentation unavailable: {exc}]",
-                "fetched_at": None,
-                "error": str(exc),
-            }
+            fallback_url = self._docs_url_to_github_raw(url)
+            if fallback_url and fallback_url != url:
+                logger.info(f"Trying fallback documentation source: {fallback_url}")
+                try:
+                    resp = requests.get(
+                        fallback_url,
+                        timeout=15,
+                        headers={"User-Agent": "canonical-ai-lab-assistant/0.1"},
+                    )
+                    resp.raise_for_status()
+                    body = resp.text
+                    title = self._extract_markdown_title(body) or self._extract_title(body)
+                    result = {
+                        "url": fallback_url,
+                        "key": key,
+                        "title": title,
+                        "content": self._extract_text(body)[:4000],
+                        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "error": None,
+                    }
+                except requests.RequestException:
+                    result = {
+                        "url": url,
+                        "key": key,
+                        "title": "",
+                        "content": f"[Documentation unavailable: {exc}]",
+                        "fetched_at": None,
+                        "error": str(exc),
+                    }
+            else:
+                result = {
+                    "url": url,
+                    "key": key,
+                    "title": "",
+                    "content": f"[Documentation unavailable: {exc}]",
+                    "fetched_at": None,
+                    "error": str(exc),
+                }
 
         try:
             with open(cache_path, "w") as f:
@@ -188,3 +253,35 @@ class DocFetcher:
         # Collapse runs of blank lines
         text = re.sub(r"(\n\s*){3,}", "\n\n", text)
         return text.strip()
+
+    @staticmethod
+    def _extract_markdown_title(text: str) -> str:
+        """Extract title from markdown content when HTML title tag is missing."""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                return stripped[2:].strip()
+        return ""
+
+    @staticmethod
+    def _docs_url_to_github_raw(url: str) -> str:
+        """Translate docs.ubuntu.com MicroCloud URLs to raw GitHub markdown URLs."""
+        parsed = urlparse(url)
+        if "documentation.ubuntu.com" not in parsed.netloc:
+            return ""
+
+        path = parsed.path.strip("/")
+        if not path.startswith("microcloud"):
+            return ""
+
+        suffix = path[len("microcloud"):].strip("/")
+        if not suffix:
+            return "https://raw.githubusercontent.com/canonical/microcloud/main/README.md"
+
+        if suffix.startswith("en/latest/"):
+            suffix = suffix[len("en/latest/"):]
+
+        if suffix.endswith(".md"):
+            return f"https://raw.githubusercontent.com/canonical/microcloud/main/doc/{suffix}"
+
+        return f"https://raw.githubusercontent.com/canonical/microcloud/main/doc/{suffix}.md"

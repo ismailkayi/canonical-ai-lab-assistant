@@ -146,23 +146,44 @@ detect_lxd_defaults() {
 # -----------------------------------------------------------------------
 pick_floor_tier() {
     local limit="$1"; shift; local selected="$1"
-    for tier in "$@"; do (( tier <= limit )) && selected="${tier}" || break; done
+    for tier in "$@"; do
+        if (( tier <= limit )); then
+            selected="${tier}"
+        else
+            break
+        fi
+    done
     echo "${selected}"
 }
 pick_previous_tier() {
     local current="$1"; shift; local previous="$1"
-    for tier in "$@"; do (( tier >= current )) && break; previous="${tier}"; done
+    for tier in "$@"; do
+        if (( tier >= current )); then
+            break
+        fi
+        previous="${tier}"
+    done
     echo "${previous}"
 }
 pick_next_tier() {
     local current="$1" limit="$2"; shift 2
-    for tier in "$@"; do (( tier > current && tier <= limit )) && { echo "${tier}"; return; }; done
+    for tier in "$@"; do
+        if (( tier > current && tier <= limit )); then
+            echo "${tier}"
+            return
+        fi
+    done
     echo "${current}"
 }
 round_down_even() {
     local v="$1" min="${2:-2}"
-    (( v < min )) && echo "${min}" && return
-    (( v % 2 != 0 )) && v=$(( v - 1 ))
+    if (( v < min )); then
+        echo "${min}"
+        return
+    fi
+    if (( v % 2 != 0 )); then
+        v=$(( v - 1 ))
+    fi
     echo "${v}"
 }
 
@@ -192,18 +213,24 @@ auto_size_nodes() {
     storage_gib=$(get_storage_available_gib)
     host_ram_gb=$(( (ram_mb + 1023) / 1024 ))
 
-    local reserve_cpu=$(( cpu_total / 5 )); (( reserve_cpu < 2 )) && reserve_cpu=2
-    local usable_cpu=$(( cpu_total - reserve_cpu )); (( usable_cpu < NODES )) && usable_cpu=${NODES}
+    local reserve_cpu=$(( cpu_total / 5 ))
+    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
+    local usable_cpu=$(( cpu_total - reserve_cpu ))
+    if (( usable_cpu < NODES )); then usable_cpu=${NODES}; fi
 
-    local reserve_mb=$(( ram_mb / 5 )); (( reserve_mb < 4096 )) && reserve_mb=4096
-    local usable_mb=$(( ram_mb - reserve_mb )); (( usable_mb < NODES * 4096 )) && usable_mb=$(( NODES * 4096 ))
+    local reserve_mb=$(( ram_mb / 5 ))
+    if (( reserve_mb < 4096 )); then reserve_mb=4096; fi
+    local usable_mb=$(( ram_mb - reserve_mb ))
+    if (( usable_mb < NODES * 4096 )); then usable_mb=$(( NODES * 4096 )); fi
     local usable_ram_gb=$(( usable_mb / 1024 ))
 
-    local usable_disk=$(( storage_gib - 20 )); (( usable_disk < 120 )) && usable_disk=120
+    local usable_disk=$(( storage_gib - 20 ))
+    if (( usable_disk < 120 )); then usable_disk=120; fi
 
     local bal_cpu; bal_cpu=$(round_down_even $(( usable_cpu / NODES )) 2)
     local bal_ram; bal_ram=$(pick_floor_tier $(( usable_ram_gb / NODES )) 8 12 16 24 32 48 64 96 128)
-    local raw_ceph=$(( (usable_disk / NODES) - 40 )); (( raw_ceph < 20 )) && raw_ceph=20
+    local raw_ceph=$(( (usable_disk / NODES) - 40 ))
+    if (( raw_ceph < 20 )); then raw_ceph=20; fi
     local bal_ceph; bal_ceph=$(pick_floor_tier "${raw_ceph}" 20 50 100 150 200 250 300 400 500)
 
     case "${SIZING_TIER:-balanced}" in
@@ -227,10 +254,10 @@ auto_size_nodes() {
             ;;
     esac
 
-    (( NODE_CPU < 1 )) && NODE_CPU=1
-    (( NODE_MEMORY_MB < 1024 )) && NODE_MEMORY_MB=1024
-    (( ROOT_DISK_GIB < 20 )) && ROOT_DISK_GIB=20
-    (( CEPH_DISK_GIB < 10 )) && CEPH_DISK_GIB=10
+    if (( NODE_CPU < 1 )); then NODE_CPU=1; fi
+    if (( NODE_MEMORY_MB < 1024 )); then NODE_MEMORY_MB=1024; fi
+    if (( ROOT_DISK_GIB < 20 )); then ROOT_DISK_GIB=20; fi
+    if (( CEPH_DISK_GIB < 10 )); then CEPH_DISK_GIB=10; fi
 }
 
 # -----------------------------------------------------------------------
@@ -305,7 +332,7 @@ tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}" \
 tofu workspace select "${WORKSPACE_NAME}" >/dev/null 2>&1
 
 log_info "Running tofu apply ..."
-tofu apply -auto-approve \
+tofu apply -auto-approve -parallelism=1 \
     -var="user_prefix=${USER_PREFIX}" \
     -var="microcloud_node_count=${NODES}" \
     -var="microcloud_node_cpu=${NODE_CPU}" \

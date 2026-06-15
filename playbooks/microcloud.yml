@@ -95,16 +95,18 @@
         root_src="$(findmnt -n -o SOURCE /)"
         root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
 
-        all_disks=()
+        last_disk=""
+        count=0
         for disk in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}'); do
           [ "$disk" = "$root_disk" ] && continue
           lsblk -nr -o MOUNTPOINT "/dev/$disk" | grep -q '[^[:space:]]' && continue
-          all_disks+=("/dev/$disk")
+          last_disk="/dev/$disk"
+          count=$((count + 1))
         done
 
         # If there is more than one extra disk, the last one is the local ZFS disk
-        if [ "${#all_disks[@]}" -gt 1 ]; then
-          echo "${all_disks[-1]}"
+        if [ "$count" -gt 1 ]; then
+          echo "$last_disk"
         fi
       register: local_disk_detect
       changed_when: false
@@ -137,12 +139,7 @@
 
     - name: Build Ceph OSD disk list (exclude local disk if present)
       set_fact:
-        ceph_disk_paths: >-
-          {%- if local_disk_path != '' -%}
-            {{ all_ceph_disk_paths[:-1] }}
-          {%- else -%}
-            {{ all_ceph_disk_paths }}
-          {%- endif -%}
+        ceph_disk_paths: "{{ all_ceph_disk_paths | reject('equalto', local_disk_path) | list if local_disk_path != '' else all_ceph_disk_paths }}"
 
     - name: Fail if no Ceph OSD disks remain after local disk reservation
       fail:
@@ -206,8 +203,8 @@
           {% endfor %}
           {% if hostvars[host].local_disk_path != '' %}
                 local:
-                  - path: {{ hostvars[host].local_disk_path }}
-                    wipe: true
+                  path: {{ hostvars[host].local_disk_path }}
+                  wipe: true
           {% endif %}
           {% endfor %}
           ovn:
