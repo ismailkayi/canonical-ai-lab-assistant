@@ -32,6 +32,10 @@ class LabOrchestrator:
         self.doc_fetcher = DocFetcher(cache_dir=config.state_dir)
         self.deployment_history = []
         self.ui = ChatUI()
+        # Cache for host-state grounding so we don't re-shell out every turn.
+        self._host_state_cache: dict[str, Any] | None = None
+        self._host_state_cache_ts: float = 0.0
+        self._host_state_ttl: float = 60.0
         self._load_history()
 
     def bootstrap_host(self) -> str:
@@ -98,6 +102,10 @@ class LabOrchestrator:
         """
         MAX_TOOL_ROUNDS = 5
 
+        # Ground the model in real host capacity + active environments before it
+        # reasons. Cached for a short TTL so this is cheap on every turn.
+        self._refresh_ai_environment_context()
+
         ai_response = self.ai_engine.chat(user_message)
 
         for _round in range(MAX_TOOL_ROUNDS):
@@ -159,6 +167,17 @@ class LabOrchestrator:
             ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds."),
             ai_response.get("reasoning", ""),
         )
+
+    def _refresh_ai_environment_context(self) -> None:
+        """Push a fresh host-grounded context snapshot into the AI engine.
+
+        Failures here must never block the chat, so we degrade silently.
+        """
+        try:
+            state = self._collect_host_state()
+            self.ai_engine.set_environment_context(self._format_host_state_for_prompt(state))
+        except Exception as exc:
+            logger.debug(f"Could not refresh environment context: {exc}")
 
     def _is_failed_tool_result(self, tool_result: str) -> bool:
         """Detect hard failures from script-backed tools."""
@@ -471,6 +490,19 @@ class LabOrchestrator:
             workload = parameters.get("workload_description", "")
             tier_str = parameters.get("tier")
             tier = SizingTier(tier_str) if tier_str else None
+
+            # Prefer host-aware sizing: it mirrors deploy_microcloud.sh exactly, so
+            # the numbers shown to the user are what will actually be provisioned.
+            host_state = self._collect_host_state()
+            if host_state.get("cpu_cores"):
+                profile = self._tier_to_profile(tier_str, workload)
+                host_sizing = self.sizing_advisor.host_aware_size(
+                    host_state=host_state,
+                    nodes=int(nodes) if nodes else 3,
+                    profile=profile,
+                )
+                return host_sizing.summary()
+
             rec = self.sizing_advisor.recommend(
                 scenario_name=scenario_name,
                 nodes=nodes,
@@ -496,38 +528,240 @@ class LabOrchestrator:
 
     def _inspect_host_environment(self) -> str:
         """Collect host facts for grounded planning decisions."""
-        commands = {
-            "cpu_cores": "nproc 2>/dev/null || echo unknown",
-            "ram_mb": "awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo unknown",
-            "disks": "lsblk -dn -o NAME,SIZE,TYPE | awk '$3==\"disk\" {print $1\":\"$2}' | paste -sd ', ' -",
-            "lxd_networks": "lxc network list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -",
-            "lxd_storage_pools": "lxc storage list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -",
+        state = self._collect_host_state(force=True)
+        return self._format_host_state_report(state)
+
+    def _run_host_cmd(self, cmd: str, timeout: int = 10) -> str:
+        """Run a read-only host probe and return trimmed stdout (or '' on failure)."""
+        try:
+            res = subprocess.run(
+                ["bash", "-lc", cmd],
+                capture_output=True,
+                text=True,
+                cwd=self.config.repo_root,
+                timeout=timeout,
+            )
+            return (res.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def _collect_host_state(self, force: bool = False) -> dict[str, Any]:
+        """Collect rich, structured host facts used for AI grounding.
+
+        Cached for a short TTL so we can inject it into the prompt every turn
+        without repeatedly shelling out. Set force=True for an explicit refresh
+        (e.g. the inspect_host_environment tool).
+        """
+        now = time.time()
+        if (
+            not force
+            and self._host_state_cache is not None
+            and (now - self._host_state_cache_ts) < self._host_state_ttl
+        ):
+            return self._host_state_cache
+
+        cpu_cores = self._parse_int(self._run_host_cmd("nproc 2>/dev/null"), default=0)
+        ram_total_mb = self._parse_int(
+            self._run_host_cmd("awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null"),
+            default=0,
+        )
+        ram_available_mb = self._parse_int(
+            self._run_host_cmd("awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null"),
+            default=0,
+        )
+        disks = self._run_host_cmd(
+            "lsblk -dn -o NAME,SIZE,TYPE | awk '$3==\"disk\" {print $1\":\"$2}' | paste -sd ', ' -"
+        )
+        networks_raw = self._run_host_cmd(
+            "lxc network list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -"
+        )
+        pools_raw = self._run_host_cmd(
+            "lxc storage list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -"
+        )
+        lxd_version = self._run_host_cmd(
+            "lxc version 2>/dev/null | awk '/Server version:/ {print $3; exit}'"
+        )
+
+        pools = [p.strip() for p in pools_raw.split(",") if p.strip()] if pools_raw else []
+        primary_pool = pools[0] if pools else "default"
+        storage_available_gib = self._get_pool_available_gib(primary_pool)
+        environments = self._collect_environment_usage()
+
+        consumed_cpu = sum(env.get("total_cpu", 0) for env in environments)
+        consumed_ram_gb = sum(env.get("total_ram_gb", 0) for env in environments)
+
+        state: dict[str, Any] = {
+            "cpu_cores": cpu_cores,
+            "ram_total_mb": ram_total_mb,
+            "ram_available_mb": ram_available_mb,
+            "disks": disks or "unknown",
+            "lxd_networks": networks_raw or "unknown",
+            "lxd_storage_pools": pools_raw or "unknown",
+            "primary_pool": primary_pool,
+            "storage_available_gib": storage_available_gib,
+            "lxd_version": lxd_version or "unknown",
+            "environments": environments,
+            "consumed_cpu": consumed_cpu,
+            "consumed_ram_gb": consumed_ram_gb,
         }
 
-        results: dict[str, str] = {}
-        for key, cmd in commands.items():
-            try:
-                res = subprocess.run(
-                    ["bash", "-lc", cmd],
-                    capture_output=True,
-                    text=True,
-                    cwd=self.config.repo_root,
-                    timeout=10,
-                )
-                out = (res.stdout or "").strip()
-                results[key] = out if out else "unknown"
-            except Exception:
-                results[key] = "unknown"
+        self._host_state_cache = state
+        self._host_state_cache_ts = now
+        return state
 
+    def _get_pool_available_gib(self, pool: str) -> int:
+        """Best-effort free space (GiB) in an LXD storage pool, with df fallback."""
+        info = self._run_host_cmd(f"lxc storage info {pool} 2>/dev/null")
+        line = ""
+        for raw in info.splitlines():
+            if "Space available:" in raw:
+                line = raw.split("Space available:", 1)[1].strip()
+                break
+        if line:
+            num_match = re.search(r"[0-9]+(?:\.[0-9]+)?", line)
+            unit_match = re.search(r"[A-Za-z]+", line)
+            if num_match:
+                num = float(num_match.group(0))
+                unit = (unit_match.group(0) if unit_match else "GiB").upper()
+                if unit.startswith("T"):
+                    return int(num * 1024)
+                if unit.startswith("G"):
+                    return int(num)
+                if unit.startswith("M"):
+                    return int(num / 1024)
+        df_out = self._run_host_cmd("df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'")
+        return self._parse_int(df_out, default=0)
+
+    def _collect_environment_usage(self) -> list[dict[str, Any]]:
+        """List active lab environments and their resource footprint via lxc.
+
+        Lab VMs follow the naming pattern '<prefix>-node-<n>'. We group by prefix,
+        count nodes, and sum CPU/RAM limits so the AI knows real free headroom.
+        """
+        csv_out = self._run_host_cmd(
+            "lxc list --format csv -c n,s,config:limits.cpu,config:limits.memory 2>/dev/null"
+        )
+        if not csv_out:
+            return []
+
+        groups: dict[str, dict[str, Any]] = {}
+        for row in csv_out.splitlines():
+            cols = [c.strip() for c in row.split(",")]
+            if not cols or not cols[0]:
+                continue
+            name = cols[0]
+            match = re.match(r"^(?P<prefix>.+)-node-\d+$", name)
+            if not match:
+                continue
+            prefix = match.group("prefix")
+            cpu = self._parse_int(cols[2] if len(cols) > 2 else "", default=0)
+            ram_gb = self._parse_memory_gb(cols[3] if len(cols) > 3 else "")
+
+            env = groups.setdefault(
+                prefix,
+                {"name": prefix, "nodes": 0, "node_cpu": cpu, "node_ram_gb": ram_gb,
+                 "total_cpu": 0, "total_ram_gb": 0},
+            )
+            env["nodes"] += 1
+            env["total_cpu"] += cpu
+            env["total_ram_gb"] += ram_gb
+
+        return list(groups.values())
+
+    @staticmethod
+    def _parse_int(value: str, default: int = 0) -> int:
+        match = re.search(r"-?\d+", value or "")
+        return int(match.group(0)) if match else default
+
+    @staticmethod
+    def _parse_memory_gb(value: str) -> int:
+        """Parse an LXD memory limit like '8GiB' / '8192MiB' into whole GB."""
+        if not value:
+            return 0
+        num_match = re.search(r"[0-9]+(?:\.[0-9]+)?", value)
+        if not num_match:
+            return 0
+        num = float(num_match.group(0))
+        unit = (re.search(r"[A-Za-z]+", value).group(0) if re.search(r"[A-Za-z]+", value) else "GiB").upper()
+        if unit.startswith("T"):
+            return int(num * 1024)
+        if unit.startswith("M"):
+            return int(num / 1024)
+        if unit.startswith("K"):
+            return int(num / (1024 * 1024))
+        return int(num)
+
+    @staticmethod
+    def _tier_to_profile(tier_str: str | None, workload: str = "") -> str:
+        """Map a requested tier/workload to a host-aware sizing profile."""
+        text = f"{tier_str or ''} {workload or ''}".lower()
+        if any(k in text for k in ("minimal", "poc", "proof of concept", "dev", "sandbox", "conservative")):
+            return "conservative"
+        if any(k in text for k in ("large", "production", "prod", "performance", "ha", "high availability", "enterprise")):
+            return "performance"
+        return "balanced"
+
+    def _format_host_state_report(self, state: dict[str, Any]) -> str:
+        """Human-readable host snapshot returned by inspect_host_environment."""
+        envs = state.get("environments", [])
+        if envs:
+            env_lines = "\n".join(
+                f"    - {e['name']}: {e['nodes']} nodes "
+                f"({e['node_cpu']} vCPU / {e['node_ram_gb']} GB each, "
+                f"total {e['total_cpu']} vCPU / {e['total_ram_gb']} GB)"
+                for e in envs
+            )
+        else:
+            env_lines = "    (none)"
+
+        ram_total_gb = round(state.get("ram_total_mb", 0) / 1024, 1)
+        ram_avail_gb = round(state.get("ram_available_mb", 0) / 1024, 1)
         return (
             "Host environment snapshot\n"
             "  Deployment mode : nested-lxd-lab (OpenTofu creates MicroCloud VMs)\n"
             "  Ceph disk model : per-node virtual block volumes are provisioned automatically\n"
-            f"  CPU cores        : {results.get('cpu_cores', 'unknown')}\n"
-            f"  RAM              : {results.get('ram_mb', 'unknown')} MB\n"
-            f"  Disk devices     : {results.get('disks', 'unknown')}\n"
-            f"  LXD networks     : {results.get('lxd_networks', 'unknown')}\n"
-            f"  LXD storage pool : {results.get('lxd_storage_pools', 'unknown')}"
+            f"  CPU cores        : {state.get('cpu_cores', 'unknown')}\n"
+            f"  RAM              : {ram_total_gb} GB total ({ram_avail_gb} GB available)\n"
+            f"  Disk devices     : {state.get('disks', 'unknown')}\n"
+            f"  LXD version      : {state.get('lxd_version', 'unknown')}\n"
+            f"  LXD networks     : {state.get('lxd_networks', 'unknown')}\n"
+            f"  LXD storage pool : {state.get('lxd_storage_pools', 'unknown')} "
+            f"(~{state.get('storage_available_gib', 0)} GiB free in '{state.get('primary_pool', 'default')}')\n"
+            "  Active lab environments:\n"
+            f"{env_lines}"
+        )
+
+    def _format_host_state_for_prompt(self, state: dict[str, Any]) -> str:
+        """Compact, capacity-focused context injected into the AI system prompt."""
+        cpu = state.get("cpu_cores", 0)
+        ram_total_gb = round(state.get("ram_total_mb", 0) / 1024)
+        ram_avail_gb = round(state.get("ram_available_mb", 0) / 1024)
+        pool = state.get("primary_pool", "default")
+        free_storage = state.get("storage_available_gib", 0)
+        consumed_cpu = state.get("consumed_cpu", 0)
+        consumed_ram = state.get("consumed_ram_gb", 0)
+        free_cpu = max(cpu - consumed_cpu, 0)
+        free_ram = max(ram_avail_gb, 0)
+
+        envs = state.get("environments", [])
+        if envs:
+            env_lines = "\n".join(
+                f"    - {e['name']}: {e['nodes']} nodes "
+                f"(~{e['total_cpu']} vCPU / {e['total_ram_gb']} GB)"
+                for e in envs
+            )
+        else:
+            env_lines = "    (none)"
+
+        return (
+            f"  Host capacity : {cpu} vCPU | {ram_total_gb} GB RAM total "
+            f"({ram_avail_gb} GB available) | {free_storage} GiB free in pool '{pool}'\n"
+            f"  LXD version   : {state.get('lxd_version', 'unknown')}\n"
+            f"  LXD networks  : {state.get('lxd_networks', 'unknown')}\n"
+            f"  Active lab environments (already consuming resources):\n"
+            f"{env_lines}\n"
+            f"  Approx free headroom for new labs: ~{free_cpu} vCPU / ~{free_ram} GB RAM / "
+            f"~{free_storage} GiB storage"
         )
 
     # Whitelist of parameters each script actually accepts.

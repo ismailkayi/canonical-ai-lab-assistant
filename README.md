@@ -1,187 +1,171 @@
 # Canonical AI Lab Assistant
 
-AI-powered MicroCloud deployment assistant for Canonical lab environments.
+AI-powered MicroCloud lifecycle assistant for local lab and demo environments.
 
----
+It translates plain-language requests into real infrastructure actions on your host:
 
-## What does this do?
+- Host inspection and sizing recommendations
+- Cluster deployment (OpenTofu + Ansible)
+- Environment listing, scaling, node addition, health checks, and cleanup
+- Documentation lookups with resilient fallback sources
 
-You type what you want in plain language. The assistant figures out the details, asks follow-up questions if something is missing, and then creates a real MicroCloud cluster for you — automatically.
+## What It Does
 
-```
-You: I need a small 3-node test cluster
-Assistant: Got it. Based on your host (32 CPU / 128 GB RAM), I propose a
-           3-node custom topology with 4 vCPU / 16 GB RAM per node.
-           What user prefix should I use? (e.g. "alice")
+You can ask for operations naturally, for example:
 
-You: alice
-Assistant: Here's the plan:
-           - 3 LXD virtual machines (alice-node-1, alice-node-2, alice-node-3)
-           - MicroCloud with OVN networking and Ceph storage
-           - ~12 vCPU / 48 GB RAM / 150 GB Ceph total
-           Shall I proceed? [yes/no]
+- "List deployed environments"
+- "Deploy a 3-node setup with 2 OSDs per node and 20GB local disk"
+- "Add 1 node to lab_microcloud"
+- "Check cluster health"
+- "Delete lab_microcloud"
 
-You: yes
-Assistant: Provisioning... done. Cluster is healthy.
-           alice-node-1  10.88.0.11  https://10.88.0.11:8443
-           alice-node-2  10.88.0.12  https://10.88.0.12:8443
-           alice-node-3  10.88.0.13  https://10.88.0.13:8443
-```
+The assistant executes tools synchronously and reports the final outcome. It does not rely on hidden background jobs for script-backed operations.
 
-No need to know Terraform, Ansible, or MicroCloud internals.
+## Architecture
 
----
-
-## Architecture overview
-
-```
-Your terminal
-    │
-    ▼
-lab-ai chat  (Python CLI)
-    │
-    ▼
-AI engine  ←─── local LLM (gemma4 snap)
-    │             understands plain language,
-    │             inspects host capacity,
-    │             designs topology with trade-offs
-    ▼
-Orchestrator
-    │
-    ├── inspect_host_environment    (CPU / RAM / disks / LXD facts)
-    ├── propose_custom_topology     (AI designs from scratch)
-    ├── get_sizing_recommendation   (CPU / RAM / disk per node)
-    ├── get_documentation           (official docs when needed)
-    │
-    └── deploy_microcloud.sh
-            │
-            ├── OpenTofu (terraform/)
-            │     └── Creates LXD virtual machines on your host
-            │           - 3–7 Ubuntu 24.04 VMs
-            │           - OVN uplink bridge (second NIC per VM)
-            │           - Ceph block volume per VM
-            │
-            └── Ansible (playbooks/microcloud.yml)
-                  └── Inside those VMs:
-                        - Installs microcloud, microceph, microovn, lxd snaps
-                        - Auto-detects NIC and disk on each node
-                        - Runs microcloud preseed to bootstrap the cluster
+```text
+Terminal (lab-ai chat)
+        |
+        v
+AI Engine (local inference endpoint)
+        |
+        v
+Orchestrator (tool loop + safety gates)
+        |
+        +--> scripts/deploy_microcloud.sh
+        |        |- OpenTofu (terraform/main.tf)
+        |        '- Ansible (playbooks/microcloud.yml)
+        |
+        +--> scripts/add_cluster_node.sh
+        +--> scripts/scale_microcloud.sh
+        +--> scripts/list_microcloud_environments.sh
+        +--> scripts/verify_cluster_health.sh
+        '--> scripts/cleanup_microcloud.sh
 ```
 
-Everything runs locally. No cloud provider is required.
-
----
-
-## Planning model
-
-There are no fixed baseline scenarios in the decision flow.
-The assistant always plans topology from scratch based on:
-
-- workload intent
-- host capacity (CPU/RAM/disk/LXD facts)
-- availability target
-- cost/performance trade-offs
-
-MicroCloud facts remain fixed:
-
-- storage is always **MicroCeph**
-- OVN is default unless explicitly disabled by user request
-- Ceph needs dedicated, unformatted OSD disks per node
-
----
+Everything runs on your host through LXD-based VMs. No public cloud account is required.
 
 ## Prerequisites
 
-- Ubuntu 24.04 host
-- At least 24 CPU cores and 48 GB RAM (for a 3-node standard cluster)
+- Ubuntu host (24.04 recommended)
+- LXD-capable machine with enough CPU, RAM, and storage for your intended topology
+- Python 3.10+
 
-`lab-ai bootstrap` installs host runtime dependencies automatically
-(snapd, LXD, OpenTofu, Ansible, SSH key setup).
-It is intentionally focused on runtime host requirements, not Python dev tooling.
+The bootstrap flow installs runtime dependencies such as snapd, LXD, OpenTofu, and Ansible.
 
----
-
-## Quick start
+## Quick Start
 
 ```bash
 git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
 cd canonical-ai-lab-assistant
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
-# Prepare host: installs OpenTofu, Ansible, SSH key, initialises Terraform
+# Optional: prepare host dependencies
 lab-ai bootstrap
 
-# Start the assistant
+# Start chat
 lab-ai chat
 ```
 
----
+If you use the helper script:
 
-## CLI commands
+```bash
+./dev.sh --chat
+```
 
-| Command | What it does |
+## CLI Commands
+
+| Command | Description |
 |---|---|
-| `lab-ai chat` | Start the interactive assistant |
-| `lab-ai bootstrap` | Prepare the host (LXD, OpenTofu, Ansible, SSH key) |
-| `lab-ai check` | Check that the local LLM is running |
-| `lab-ai setup` | Show config and script paths |
-| `lab-ai version` | Print version |
-
----
+| `lab-ai chat` | Start interactive assistant mode |
+| `lab-ai bootstrap` | Install and prepare host tooling |
+| `lab-ai check` | Validate inference endpoint availability |
+| `lab-ai setup` | Print key script/config locations |
+| `lab-ai version` | Show installed version |
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust if needed:
+Set environment variables via `.env` (or shell):
 
 ```env
 INFERENCE_HOST=http://127.0.0.1:8336
 INFERENCE_MODEL=gemma4
+INFERENCE_TIMEOUT_SEC=120
 LOG_LEVEL=INFO
 ```
 
-The default engine is the **Canonical gemma4 inference snap** — a local,
-offline LLM that runs entirely on your machine.
+## Deployment Behavior
 
----
+When you confirm a deployment, the assistant:
 
-## Repository layout
+1. Detects LXD defaults (bridge and storage pool)
+2. Calculates or applies requested sizing
+3. Runs `tofu apply` (serialized for provider stability)
+4. Runs `ansible-playbook playbooks/microcloud.yml`
+5. Prints cluster access details (node names, IPs, UI URLs)
 
-```
+Supported node counts in this automation are `>= 3`.
+
+Note on quorum guidance:
+
+- Even and odd cluster sizes are supported.
+- For HA characteristics and failure tolerance, topology choices still matter and should match your operational goals.
+
+## Lifecycle Operations
+
+The assistant can manage existing environments end-to-end:
+
+- List environments with running node counts
+- Scale an environment to a new target size (`>= 3`)
+- Add one or more nodes to a live cluster
+- Verify MicroCloud/LXD/MicroCeph/MicroOVN health
+- Destroy an environment and remove Terraform workspace artifacts
+
+## Documentation Fetching
+
+The documentation tool first tries official Ubuntu documentation URLs.
+If access is blocked (for example by Cloudflare 403 challenge), it falls back to canonical upstream documentation sources (GitHub raw docs) so guidance remains available.
+
+## Repository Layout
+
+```text
 canonical-ai-lab-assistant/
-│
-├── terraform/
-│   └── main.tf                  # LXD VMs, OVN bridge, Ceph volumes
-│
-├── playbooks/
-│   └── microcloud.yml           # MicroCloud bootstrap via Ansible
-│
 ├── scripts/
-│   ├── prep_host.sh             # Install LXD, OpenTofu, Ansible, SSH key
-│   ├── deploy_microcloud.sh     # Full deploy: sizing → tofu apply → ansible
-│   └── install_inference_snap.sh
-│
+│   ├── deploy_microcloud.sh
+│   ├── add_cluster_node.sh
+│   ├── scale_microcloud.sh
+│   ├── cleanup_microcloud.sh
+│   ├── verify_cluster_health.sh
+│   └── list_microcloud_environments.sh
+├── playbooks/
+│   └── microcloud.yml
+├── terraform/
+│   └── main.tf
 └── src/lab_ai_assistant/
-    ├── cli.py                   # lab-ai commands (chat, bootstrap, check…)
-    ├── ai_engine.py             # Nemotron API + system prompt
-    ├── orchestrator.py          # Connects AI decisions to script execution
-    ├── scenarios.py             # Planning primitives (custom-topology mode)
-    ├── sizing.py                # Resource sizing advisor
-    ├── doc_fetcher.py           # Fetches official Ubuntu docs on demand
-    └── tools.py                 # Tool definitions the LLM can call
+    ├── ai_engine.py
+    ├── orchestrator.py
+    ├── doc_fetcher.py
+    ├── tools.py
+    └── cli.py
 ```
 
----
+## Troubleshooting
 
-## How deployment planning works
+### 1) `Missing Resource State After Create`
 
-1. You describe what you need in plain language.
-2. The AI inspects the host with inspect_host_environment.
-3. The AI may fetch docs with get_documentation if requirements are unclear.
-4. The AI proposes a custom topology (node count, sizing, OVN mode).
-5. The AI explains reasoning, trade-offs, and one alternative.
-6. If required deployment parameters are missing, it asks follow-up questions.
-7. After explicit confirmation, deploy_microcloud.sh runs:
-   - Detects your LXD bridge and storage pool automatically
-   - Runs `tofu apply` → creates LXD VMs
-   - Runs `ansible-playbook microcloud.yml` → installs snaps inside VMs and bootstraps the cluster
-8. You get a summary with node IPs and LXD UI links
+This is a known provider-side race behavior with some LXD/OpenTofu resource creations.
+The current deployment flow uses serialized apply execution to reduce this risk.
+
+### 2) Docs fetch returns 403
+
+If `documentation.ubuntu.com` blocks the request, the assistant automatically switches to fallback sources.
+
+### 3) Tool said it would do something, but nothing ran
+
+Script-backed tools are synchronous. If a script fails, the assistant now reports failure explicitly rather than implying background execution.
+
+## License
+
+GPL-3.0-or-later

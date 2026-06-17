@@ -26,19 +26,19 @@ logger = logging.getLogger(__name__)
 
 DOC_SOURCES: dict[str, str] = {
     # MicroCloud
-    "microcloud": "https://documentation.ubuntu.com/microcloud/",
-    "microcloud-install": "https://documentation.ubuntu.com/microcloud/en/latest/how-to/install/",
-    "microcloud-init": "https://documentation.ubuntu.com/microcloud/en/latest/how-to/initialise/",
-    "microcloud-networking": "https://documentation.ubuntu.com/microcloud/en/latest/explanation/networking/",
-    "microcloud-storage": "https://documentation.ubuntu.com/microcloud/en/latest/explanation/storage/",
-    "microcloud-preseed": "https://documentation.ubuntu.com/microcloud/en/latest/how-to/preseed/",
-    "microcloud-faq": "https://documentation.ubuntu.com/microcloud/en/latest/reference/faq/",
-    "microcloud-requirements": "https://documentation.ubuntu.com/microcloud/en/latest/reference/requirements/",
+    "microcloud": "https://documentation.ubuntu.com/microcloud/latest/",
+    "microcloud-install": "https://documentation.ubuntu.com/microcloud/latest/how-to/install/",
+    "microcloud-init": "https://documentation.ubuntu.com/microcloud/latest/how-to/initialise/",
+    "microcloud-networking": "https://documentation.ubuntu.com/microcloud/latest/explanation/networking/",
+    "microcloud-storage": "https://documentation.ubuntu.com/microcloud/latest/explanation/storage/",
+    "microcloud-preseed": "https://documentation.ubuntu.com/microcloud/latest/how-to/preseed/",
+    "microcloud-faq": "https://documentation.ubuntu.com/microcloud/latest/reference/faq/",
+    "microcloud-requirements": "https://documentation.ubuntu.com/microcloud/latest/reference/requirements/",
     # LXD
-    "lxd": "https://documentation.ubuntu.com/lxd/en/latest/",
-    "lxd-install": "https://documentation.ubuntu.com/lxd/en/latest/installing/",
-    "lxd-networks": "https://documentation.ubuntu.com/lxd/en/latest/explanation/networks/",
-    "lxd-storage": "https://documentation.ubuntu.com/lxd/en/latest/explanation/storage/",
+    "lxd": "https://documentation.ubuntu.com/lxd/latest/",
+    "lxd-install": "https://documentation.ubuntu.com/lxd/latest/installing/",
+    "lxd-networks": "https://documentation.ubuntu.com/lxd/latest/explanation/networks/",
+    "lxd-storage": "https://documentation.ubuntu.com/lxd/latest/explanation/storage/",
     # MicroCeph
     "microceph": "https://canonical-microceph.readthedocs.io/en/latest/",
     "microceph-install": "https://canonical-microceph.readthedocs.io/en/latest/how-to/install/",
@@ -47,7 +47,9 @@ DOC_SOURCES: dict[str, str] = {
     "gemma4": "https://documentation.ubuntu.com/inference-snaps/reference/snaps/",
 }
 
-# Fallback sources used when documentation.ubuntu.com returns anti-bot 403.
+# Last-resort fallback sources. The primary docs site is normally reachable
+# (returns 200); these GitHub-raw mirrors are only tried if the live page is
+# entirely unavailable (network error or non-2xx).
 DOC_FALLBACK_SOURCES: dict[str, list[str]] = {
     "microcloud": ["https://raw.githubusercontent.com/canonical/microcloud/main/README.md"],
     "microcloud-install": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/install.md"],
@@ -183,7 +185,7 @@ class DocFetcher:
                 "url": url,
                 "key": key,
                 "title": title,
-                "content": content[:4000],  # keep context manageable
+                "content": content[:6000],  # keep context manageable
                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "error": None,
             }
@@ -205,7 +207,7 @@ class DocFetcher:
                         "url": fallback_url,
                         "key": key,
                         "title": title,
-                        "content": self._extract_text(body)[:4000],
+                        "content": self._extract_text(body)[:6000],
                         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         "error": None,
                     }
@@ -243,16 +245,40 @@ class DocFetcher:
 
     @staticmethod
     def _extract_text(html: str) -> str:
-        """Very lightweight HTML → plain text conversion."""
+        """Lightweight HTML → plain text conversion.
+
+        Isolates the primary content region first (Sphinx/Furo themes wrap the
+        real documentation in <article role="main">). This strips the sidebar,
+        header, and footer navigation that otherwise drowns out the signal.
+        """
+        main = DocFetcher._extract_main_content(html)
         # Remove scripts and styles
-        html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+        main = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", main, flags=re.S | re.I)
         # Remove all tags
-        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"<[^>]+>", " ", main)
         # Normalise whitespace
         text = re.sub(r"\s+", " ", text)
         # Collapse runs of blank lines
         text = re.sub(r"(\n\s*){3,}", "\n\n", text)
         return text.strip()
+
+    @staticmethod
+    def _extract_main_content(html: str) -> str:
+        """Return the primary content region of a doc page, if identifiable.
+
+        Tries the most specific markers first and falls back to the full
+        document so non-Sphinx pages (e.g. raw markdown) still work.
+        """
+        patterns = (
+            r'<article[^>]*\brole=["\']main["\'][^>]*>(.*?)</article>',
+            r"<main[^>]*>(.*?)</main>",
+            r'<div[^>]*\brole=["\']main["\'][^>]*>(.*?)</div>',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, html, re.S | re.I)
+            if match and match.group(1).strip():
+                return match.group(1)
+        return html
 
     @staticmethod
     def _extract_markdown_title(text: str) -> str:

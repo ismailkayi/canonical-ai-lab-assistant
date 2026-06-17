@@ -28,6 +28,10 @@ class AIEngine:
         self._api_style: Optional[str] = None
         self._resolved_model: Optional[str] = None
         self._supports_native_tools: bool = True  # optimistically assume support
+        # Live, host-grounded context injected into the system prompt every turn.
+        # The orchestrator refreshes this so the model always plans against the
+        # REAL host capacity and existing environments, never guesses.
+        self.environment_context: str = ""
 
     def is_available(self) -> bool:
         """Check if inference engine is running."""
@@ -41,6 +45,14 @@ class AIEngine:
                 continue
         logger.error(f"Inference engine not available at {self.base_url}")
         return False
+
+    def set_environment_context(self, context: str) -> None:
+        """Refresh the live host-grounded context injected into the system prompt.
+
+        Called by the orchestrator before each turn so the model always reasons
+        against real host capacity and existing environments instead of guessing.
+        """
+        self.environment_context = (context or "").strip()
 
     def chat(
         self,
@@ -456,6 +468,16 @@ ENVIRONMENT MANAGEMENT:
 - For scale/delete/add requests, gather or confirm the target workspace first.
 - Never claim success unless the tool execution confirms it.
 """
+        if self.environment_context:
+            prompt += (
+                "\n\nLIVE ENVIRONMENT STATE (auto-collected from THIS host, authoritative):\n"
+                f"{self.environment_context}\n"
+                "Treat the numbers above as ground truth. Size every proposal to fit the\n"
+                "available capacity and account for resources already consumed by active\n"
+                "environments. Never propose more than the host can provide. You do not\n"
+                "need to call inspect_host_environment again unless the user asks to re-check."
+            )
+
         if include_tools:
             # Only embed tools as text for backends without native tool support.
             # For OpenAI-compatible backends with native tools, they're passed via

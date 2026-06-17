@@ -228,3 +228,181 @@ class SizingAdvisor:
         for tier, sizing in SIZING_TIERS.items():
             lines.append(f"  {tier.value:10s} — {sizing.summary()}")
         return "\n".join(lines)
+
+    def host_aware_size(
+        self,
+        host_state: dict[str, Any],
+        nodes: int,
+        profile: str = "balanced",
+    ) -> "HostAwareSizing":
+        """Compute per-node resources from REAL host capacity.
+
+        This mirrors the auto-sizing algorithm in deploy_microcloud.sh exactly,
+        so the topology the AI proposes equals what the deploy script provisions.
+        Removing this split-brain is the whole point: the AI plans against truth.
+        """
+        nodes = max(int(nodes or 3), 3)
+        cpu_total = max(int(host_state.get("cpu_cores", 0) or 0), 1)
+        ram_mb = max(int(host_state.get("ram_total_mb", 0) or 0), 1024)
+        storage_gib = max(int(host_state.get("storage_available_gib", 0) or 0), 0)
+        host_ram_gb = (ram_mb + 1023) // 1024
+
+        reserve_cpu = max(cpu_total // 5, 2)
+        usable_cpu = max(cpu_total - reserve_cpu, nodes)
+
+        reserve_mb = max(ram_mb // 5, 4096)
+        usable_mb = max(ram_mb - reserve_mb, nodes * 4096)
+        usable_ram_gb = usable_mb // 1024
+
+        usable_disk = max(storage_gib - 20, 120)
+
+        ram_tiers = [8, 12, 16, 24, 32, 48, 64, 96, 128]
+        ram_tiers_low = [4, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+        ceph_tiers = [20, 50, 100, 150, 200, 250, 300, 400, 500]
+
+        bal_cpu = _round_down_even(usable_cpu // nodes, 2)
+        bal_ram = _pick_floor_tier(usable_ram_gb // nodes, ram_tiers)
+        raw_ceph = max((usable_disk // nodes) - 40, 20)
+        bal_ceph = _pick_floor_tier(raw_ceph, ceph_tiers)
+
+        profile = (profile or "balanced").lower()
+        if profile in ("minimal", "conservative"):
+            node_cpu = _round_down_even(bal_cpu - 2, 2)
+            node_ram_gb = _pick_previous_tier(bal_ram, ram_tiers_low)
+            root_disk_gb = 30
+            ceph_disk_gb = _pick_previous_tier(bal_ceph, ceph_tiers)
+        elif profile == "performance":
+            node_cpu = bal_cpu + 2
+            ram_limit = _pick_floor_tier(host_ram_gb // nodes, ram_tiers)
+            node_ram_gb = _pick_next_tier(bal_ram, ram_limit, ram_tiers)
+            root_disk_gb = 50
+            ceph_limit = _pick_floor_tier((storage_gib // nodes) - 50, ceph_tiers)
+            ceph_disk_gb = _pick_next_tier(bal_ceph, ceph_limit, ceph_tiers)
+        else:  # balanced / small / medium / large
+            node_cpu = bal_cpu
+            node_ram_gb = bal_ram
+            root_disk_gb = 40
+            ceph_disk_gb = bal_ceph
+
+        node_cpu = max(node_cpu, 1)
+        node_ram_gb = max(node_ram_gb, 1)
+        root_disk_gb = max(root_disk_gb, 20)
+        ceph_disk_gb = max(ceph_disk_gb, 10)
+
+        return HostAwareSizing(
+            nodes=nodes,
+            profile=profile,
+            node_cpu=node_cpu,
+            node_ram_gb=node_ram_gb,
+            node_memory_mb=node_ram_gb * 1024,
+            root_disk_gb=root_disk_gb,
+            ceph_disk_gb=ceph_disk_gb,
+            host_cpu=cpu_total,
+            host_ram_gb=host_ram_gb,
+            host_storage_gib=storage_gib,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Host-aware auto-sizing (ported 1:1 from deploy_microcloud.sh)
+# ---------------------------------------------------------------------------
+
+def _round_down_even(value: int, minimum: int = 2) -> int:
+    if value < minimum:
+        return minimum
+    if value % 2 != 0:
+        value -= 1
+    return value
+
+
+def _pick_floor_tier(limit: int, tiers: list[int]) -> int:
+    selected = tiers[0]
+    for tier in tiers:
+        if tier <= limit:
+            selected = tier
+        else:
+            break
+    return selected
+
+
+def _pick_previous_tier(current: int, tiers: list[int]) -> int:
+    previous = tiers[0]
+    for tier in tiers:
+        if tier >= current:
+            break
+        previous = tier
+    return previous
+
+
+def _pick_next_tier(current: int, limit: int, tiers: list[int]) -> int:
+    for tier in tiers:
+        if current < tier <= limit:
+            return tier
+    return current
+
+
+@dataclass
+class HostAwareSizing:
+    nodes: int
+    profile: str
+    node_cpu: int
+    node_ram_gb: int
+    node_memory_mb: int
+    root_disk_gb: int
+    ceph_disk_gb: int
+    host_cpu: int
+    host_ram_gb: int
+    host_storage_gib: int
+
+    def total_cpu(self) -> int:
+        return self.node_cpu * self.nodes
+
+    def total_ram_gb(self) -> int:
+        return self.node_ram_gb * self.nodes
+
+    def total_ceph_gb(self) -> int:
+        return self.ceph_disk_gb * self.nodes
+
+    def fits_host(self) -> bool:
+        return (
+            self.total_cpu() <= self.host_cpu
+            and self.total_ram_gb() <= self.host_ram_gb
+            and self.total_ceph_gb() <= self.host_storage_gib
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "nodes": self.nodes,
+            "profile": self.profile,
+            "per_node": {
+                "cpu": self.node_cpu,
+                "ram_gb": self.node_ram_gb,
+                "root_disk_gb": self.root_disk_gb,
+                "ceph_disk_gb": self.ceph_disk_gb,
+            },
+            "totals": {
+                "cpu": self.total_cpu(),
+                "ram_gb": self.total_ram_gb(),
+                "ceph_gb": self.total_ceph_gb(),
+            },
+            "host": {
+                "cpu": self.host_cpu,
+                "ram_gb": self.host_ram_gb,
+                "storage_gib": self.host_storage_gib,
+            },
+            "fits_host": self.fits_host(),
+        }
+
+    def summary(self) -> str:
+        fit = "fits host capacity" if self.fits_host() else "EXCEEDS host capacity"
+        return (
+            f"Host-aware sizing ({self.profile} profile) — matches what deploy provisions\n"
+            f"  Nodes    : {self.nodes}\n"
+            f"  Per node : {self.node_cpu} vCPU / {self.node_ram_gb} GB RAM / "
+            f"{self.root_disk_gb} GB root / {self.ceph_disk_gb} GB Ceph disk\n"
+            f"  Totals   : {self.total_cpu()} vCPU / {self.total_ram_gb()} GB RAM / "
+            f"{self.total_ceph_gb()} GB Ceph storage\n"
+            f"  Host     : {self.host_cpu} vCPU / {self.host_ram_gb} GB RAM / "
+            f"{self.host_storage_gib} GiB free storage  ->  {fit}"
+        )
+
