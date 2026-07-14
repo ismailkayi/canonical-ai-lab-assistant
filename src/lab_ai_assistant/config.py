@@ -1,8 +1,8 @@
 """Configuration management for the MicroCloud-first assistant."""
 
-from dataclasses import dataclass
-from pathlib import Path
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -23,18 +23,34 @@ class Config:
     add_cluster_node_script: Path = scripts_dir / "add_cluster_node.sh"
 
     inference_engine: str = "gemma4"
-    inference_host: str = os.getenv("INFERENCE_HOST", "http://127.0.0.1:8336")
-    inference_model: str = os.getenv("INFERENCE_MODEL", "gemma4")
+    inference_host: str = field(
+        default_factory=lambda: os.getenv("INFERENCE_HOST", "http://127.0.0.1:8336")
+    )
+    inference_model: str = field(default_factory=lambda: os.getenv("INFERENCE_MODEL", "gemma4"))
 
-    state_dir: Path = Path(os.getenv("SNAP_USER_COMMON", str(Path.home() / ".canonical-ai-lab-assistant")))
-    history_file: Path = state_dir / "deployment_history.json"
-    context_file: Path = state_dir / "conversation_context.json"
-    log_dir: Path = state_dir / "logs"
+    state_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv(
+                "SNAP_USER_COMMON",
+                str(Path.home() / ".canonical-ai-lab-assistant"),
+            )
+        )
+    )
+    history_file: Path = field(init=False)
+    context_file: Path = field(init=False)
+    log_dir: Path = field(init=False)
 
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    response_timeout: int = int(os.getenv("INFERENCE_TIMEOUT_SEC", "120"))
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+    response_timeout: int = field(
+        default_factory=lambda: int(os.getenv("INFERENCE_TIMEOUT_SEC", "120"))
+    )
+    inference_restart_timeout: float = field(
+        default_factory=lambda: float(os.getenv("INFERENCE_RESTART_TIMEOUT_SEC", "15"))
+    )
+    operation_timeout: int = field(
+        default_factory=lambda: int(os.getenv("OPERATION_TIMEOUT_SEC", "3600"))
+    )
     max_retries: int = 3
-    enable_confirmation: bool = True
 
     def __post_init__(self):
         # Resolve script root robustly for both source checkout and snap runtime.
@@ -58,6 +74,10 @@ class Config:
         self.scale_microcloud_script = self.scripts_dir / "scale_microcloud.sh"
         self.verify_cluster_health_script = self.scripts_dir / "verify_cluster_health.sh"
         self.add_cluster_node_script = self.scripts_dir / "add_cluster_node.sh"
+
+        self.history_file = self.state_dir / "deployment_history.json"
+        self.context_file = self.state_dir / "conversation_context.json"
+        self.log_dir = self.state_dir / "logs"
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)

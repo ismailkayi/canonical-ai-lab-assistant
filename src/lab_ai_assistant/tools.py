@@ -4,6 +4,7 @@ Tool definitions for the MicroCloud AI agent.
 These tools are what the LLM can call. The orchestrator executes them.
 """
 
+import re
 from typing import Any
 
 
@@ -85,13 +86,11 @@ def get_tool_definitions() -> dict[str, Any]:
                             "enum": ["custom"],
                             "default": "custom",
                         },
-                        "node_count": {"type": "integer"},
-                        "node_cpu": {"type": "integer"},
-                        "node_ram_gb": {"type": "integer"},
-                        "root_disk_gb": {"type": "integer"},
-                        "ceph_disk_gb": {"type": "integer"},
-                        "use_ovn": {"type": "boolean", "default": True},
-                        "ceph_replication_factor": {"type": "integer", "default": 3},
+                        "node_count": {"type": "integer", "minimum": 3, "maximum": 50},
+                        "node_cpu": {"type": "integer", "minimum": 1},
+                        "node_ram_gb": {"type": "integer", "minimum": 1},
+                        "root_disk_gb": {"type": "integer", "minimum": 20},
+                        "ceph_disk_gb": {"type": "integer", "minimum": 10},
                         "reasoning": {"type": "string"},
                         "trade_offs": {"type": "string"},
                         "alternative": {"type": "string"},
@@ -114,7 +113,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "scenario": {"type": "string", "enum": ["custom"], "default": "custom"},
-                        "nodes": {"type": "integer"},
+                        "nodes": {"type": "integer", "minimum": 3, "maximum": 50},
                         "workload_description": {"type": "string"},
                         "tier": {
                             "type": "string",
@@ -141,20 +140,35 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                         "user_prefix": {
                             "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,31}$",
                             "description": "Short word prefix for resource naming, e.g. 'lab' or 'alice'. Do NOT include 'microcloud' — the system appends that automatically. Default: 'lab'.",
                             "default": "lab",
                         },
-                        "nodes": {"type": "integer", "default": 3},
+                        "nodes": {
+                            "type": "integer",
+                            "minimum": 3,
+                            "maximum": 50,
+                            "default": 3,
+                        },
                         "sizing_tier": {
                             "type": "string",
-                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
+                            "enum": [
+                                "minimal",
+                                "small",
+                                "medium",
+                                "large",
+                                "conservative",
+                                "performance",
+                            ],
                         },
-                        "node_cpu": {"type": "integer"},
-                        "node_memory_mb": {"type": "integer"},
-                        "root_disk_gib": {"type": "integer"},
-                        "ceph_disk_gib": {"type": "integer"},
+                        "node_cpu": {"type": "integer", "minimum": 1},
+                        "node_memory_mb": {"type": "integer", "minimum": 1024},
+                        "root_disk_gib": {"type": "integer", "minimum": 20},
+                        "ceph_disk_gib": {"type": "integer", "minimum": 10},
                         "ceph_disks_per_node": {
                             "type": "integer",
+                            "minimum": 1,
+                            "maximum": 8,
                             "description": (
                                 "Number of Ceph OSD disks per node. Default: 1. "
                                 "Recommend 2 for higher storage throughput or larger clusters."
@@ -163,23 +177,12 @@ def get_tool_definitions() -> dict[str, Any]:
                         },
                         "local_disk_gib": {
                             "type": "integer",
+                            "minimum": 0,
                             "description": (
                                 "Size in GiB of a local ZFS disk per node. Default: 0 (disabled). "
                                 "Set >= 10 to add fast local storage alongside distributed Ceph."
                             ),
                             "default": 0,
-                        },
-                        "network_interface": {
-                            "type": "string",
-                            "description": "Optional override for cluster NIC; auto-detected in nested-LXD mode.",
-                        },
-                        "ovn_uplink_interface": {
-                            "type": "string",
-                            "description": "Optional override for OVN uplink NIC; auto-detected in nested-LXD mode.",
-                        },
-                        "ceph_osd_disk": {
-                            "type": "string",
-                            "description": "Optional bare-metal OSD disk override; nested-LXD mode provisions per-node virtual disks automatically.",
                         },
                     },
                     "required": ["nodes"],
@@ -196,6 +199,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "workspace": {
                             "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                             "description": "Name of the workspace/environment to delete (e.g. lab_microcloud)",
                         },
                     },
@@ -217,28 +221,24 @@ def get_tool_definitions() -> dict[str, Any]:
             {
                 "name": "scale_environment",
                 "description": (
-                    "Scale an existing MicroCloud environment to a target node count >= 3. "
-                    "Use after explicit user confirmation."
+                    "Safely expand an existing MicroCloud environment to a larger target "
+                    "node count by delegating to the live add-member workflow. Existing "
+                    "node and disk geometry is preserved. Downscale is not supported."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "workspace": {
                             "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                             "description": "Workspace/environment name to scale (e.g. lab_microcloud)",
                         },
                         "target_nodes": {
                             "type": "integer",
-                            "description": "Desired total node count after scaling (>= 3)",
+                            "minimum": 3,
+                            "maximum": 50,
+                            "description": "Desired larger total node count (3-50)",
                         },
-                        "sizing_tier": {
-                            "type": "string",
-                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
-                        },
-                        "node_cpu": {"type": "integer"},
-                        "node_memory_mb": {"type": "integer"},
-                        "root_disk_gib": {"type": "integer"},
-                        "ceph_disk_gib": {"type": "integer"},
                     },
                     "required": ["workspace", "target_nodes"],
                 },
@@ -248,38 +248,24 @@ def get_tool_definitions() -> dict[str, Any]:
                 "description": (
                     "Add one or more new nodes to an existing MicroCloud cluster. "
                     "Provisions new VMs via OpenTofu, installs snaps, then uses 'microcloud add' "
-                    "to expand the live cluster. Use after user confirms the workspace to expand."
+                    "to expand the live cluster. New nodes inherit the exact CPU, RAM, disk, "
+                    "image, network, and storage-pool geometry stored by the deployment."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "workspace": {
                             "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                             "description": "Workspace/environment name to expand (e.g. lab_microcloud)",
                         },
                         "add_nodes": {
                             "type": "integer",
+                            "minimum": 1,
+                            "maximum": 47,
                             "description": "Number of nodes to add (default: 1)",
                             "default": 1,
                         },
-                        "ceph_disk_gib": {"type": "integer"},
-                        "ceph_disks_per_node": {
-                            "type": "integer",
-                            "description": "Number of Ceph OSD disks per new node. Should match existing nodes.",
-                            "default": 1,
-                        },
-                        "local_disk_gib": {
-                            "type": "integer",
-                            "description": "Local ZFS disk size in GiB for new nodes. 0 = disabled.",
-                            "default": 0,
-                        },
-                        "sizing_tier": {
-                            "type": "string",
-                            "enum": ["minimal", "small", "medium", "large", "conservative", "performance"],
-                        },
-                        "node_cpu": {"type": "integer"},
-                        "node_memory_mb": {"type": "integer"},
-                        "root_disk_gib": {"type": "integer"},
                     },
                     "required": ["workspace"],
                 },
@@ -296,6 +282,7 @@ def get_tool_definitions() -> dict[str, Any]:
                     "properties": {
                         "workspace": {
                             "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
                             "description": "Workspace/environment name to check (e.g. lab_microcloud)",
                         },
                     },
@@ -309,20 +296,53 @@ def get_tool_definitions() -> dict[str, Any]:
 def get_tool_by_name(name: str) -> dict[str, Any] | None:
     """Return a tool definition by name, or None if not found."""
     for tool in get_tool_definitions()["tools"]:
-        if tool["name"] == name:
+        if isinstance(tool, dict) and tool.get("name") == name:
             return tool
     return None
 
 
 def validate_tool_parameters(tool_name: str, parameters: dict[str, Any]) -> tuple[bool, str]:
-    """Validate that all required parameters for a tool are present."""
+    """Validate required fields, types, enums, ranges, and unknown properties."""
     tool = get_tool_by_name(tool_name)
     if not tool:
         return False, f"Unknown tool: '{tool_name}'"
 
-    required = tool["parameters"].get("required", [])
+    if not isinstance(parameters, dict):
+        return False, "Tool parameters must be an object"
+
+    schema = tool["parameters"]
+    properties = schema.get("properties", {})
+    unknown = sorted(set(parameters) - set(properties))
+    if unknown:
+        return False, f"Unsupported parameter(s): {', '.join(unknown)}"
+
+    required = schema.get("required", [])
     for param in required:
         if param not in parameters:
             return False, f"Missing required parameter: '{param}'"
+
+    for name, value in parameters.items():
+        field = properties[name]
+        expected_type = field.get("type")
+        if expected_type == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+            return False, f"Parameter '{name}' must be an integer"
+        if expected_type == "string" and not isinstance(value, str):
+            return False, f"Parameter '{name}' must be a string"
+        if expected_type == "boolean" and not isinstance(value, bool):
+            return False, f"Parameter '{name}' must be a boolean"
+
+        if "enum" in field and value not in field["enum"]:
+            allowed = ", ".join(str(item) for item in field["enum"])
+            return False, f"Parameter '{name}' must be one of: {allowed}"
+        if "minimum" in field and value < field["minimum"]:
+            return False, f"Parameter '{name}' must be >= {field['minimum']}"
+        if "maximum" in field and value > field["maximum"]:
+            return False, f"Parameter '{name}' must be <= {field['maximum']}"
+        if "pattern" in field and not re.fullmatch(field["pattern"], value):
+            return False, f"Parameter '{name}' has an invalid format"
+
+    local_disk = parameters.get("local_disk_gib")
+    if isinstance(local_disk, int) and 0 < local_disk < 10:
+        return False, "Parameter 'local_disk_gib' must be 0 or >= 10"
 
     return True, ""

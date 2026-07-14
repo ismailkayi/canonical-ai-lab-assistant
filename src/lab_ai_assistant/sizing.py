@@ -9,13 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from lab_ai_assistant.scenarios import (
+    SIZING_TIERS,
     MCScenario,
     NodeSizing,
     SizingTier,
-    SIZING_TIERS,
     get_scenario,
 )
-
 
 # ---------------------------------------------------------------------------
 # Workload profiles → sizing tier mapping
@@ -164,9 +163,7 @@ class SizingAdvisor:
         # Fall back to scenario default
         return scenario.default_sizing
 
-    def _build_rationale(
-        self, tier: SizingTier, scenario: MCScenario, description: str
-    ) -> str:
+    def _build_rationale(self, tier: SizingTier, scenario: MCScenario, description: str) -> str:
         reasons = {
             SizingTier.MINIMAL: (
                 "Minimal resources selected for a proof-of-concept or developer "
@@ -195,22 +192,18 @@ class SizingAdvisor:
             )
         return base
 
-    def _build_warnings(
-        self, tier: SizingTier, scenario: MCScenario, node_count: int
-    ) -> list[str]:
+    def _build_warnings(self, tier: SizingTier, scenario: MCScenario, node_count: int) -> list[str]:
         warnings = []
         sizing = SIZING_TIERS[tier]
 
         if tier == SizingTier.MINIMAL:
             warnings.append(
-                "Minimal sizing may cause "
-                "instability. Consider upgrading to the 'small' tier."
+                "Minimal sizing may cause instability. Consider upgrading to the 'small' tier."
             )
 
         if scenario.storage_backend.value == "ceph" and node_count < 3:
             warnings.append(
-                "Ceph requires a minimum of 3 OSD nodes. "
-                "Increase the node count to at least 3."
+                "Ceph requires a minimum of 3 OSD nodes. Increase the node count to at least 3."
             )
 
         total_storage = sizing.storage_disk_gb * node_count
@@ -234,6 +227,7 @@ class SizingAdvisor:
         host_state: dict[str, Any],
         nodes: int,
         profile: str = "balanced",
+        residual_capacity: bool = False,
     ) -> "HostAwareSizing":
         """Compute per-node resources from REAL host capacity.
 
@@ -242,19 +236,25 @@ class SizingAdvisor:
         Removing this split-brain is the whole point: the AI plans against truth.
         """
         nodes = max(int(nodes or 3), 3)
-        cpu_total = max(int(host_state.get("cpu_cores", 0) or 0), 1)
-        ram_mb = max(int(host_state.get("ram_total_mb", 0) or 0), 1024)
+        cpu_floor = 0 if residual_capacity else 1
+        ram_floor = 0 if residual_capacity else 1024
+        cpu_total = max(int(host_state.get("cpu_cores", 0) or 0), cpu_floor)
+        ram_mb = max(int(host_state.get("ram_total_mb", 0) or 0), ram_floor)
         storage_gib = max(int(host_state.get("storage_available_gib", 0) or 0), 0)
         host_ram_gb = (ram_mb + 1023) // 1024
 
-        reserve_cpu = max(cpu_total // 5, 2)
-        usable_cpu = max(cpu_total - reserve_cpu, nodes)
+        if residual_capacity:
+            usable_cpu = cpu_total
+            usable_mb = ram_mb
+            usable_disk = storage_gib
+        else:
+            reserve_cpu = max(cpu_total // 5, 2)
+            usable_cpu = max(cpu_total - reserve_cpu, nodes)
 
-        reserve_mb = max(ram_mb // 5, 4096)
-        usable_mb = max(ram_mb - reserve_mb, nodes * 4096)
+            reserve_mb = max(ram_mb // 5, 4096)
+            usable_mb = max(ram_mb - reserve_mb, nodes * 4096)
+            usable_disk = max(storage_gib - 20, 120)
         usable_ram_gb = usable_mb // 1024
-
-        usable_disk = max(storage_gib - 20, 120)
 
         ram_tiers = [8, 12, 16, 24, 32, 48, 64, 96, 128]
         ram_tiers_low = [4, 8, 12, 16, 24, 32, 48, 64, 96, 128]
@@ -272,7 +272,7 @@ class SizingAdvisor:
             root_disk_gb = 30
             ceph_disk_gb = _pick_previous_tier(bal_ceph, ceph_tiers)
         elif profile == "performance":
-            node_cpu = bal_cpu + 2
+            node_cpu = min(bal_cpu + 2, max(usable_cpu // nodes, 1))
             ram_limit = _pick_floor_tier(host_ram_gb // nodes, ram_tiers)
             node_ram_gb = _pick_next_tier(bal_ram, ram_limit, ram_tiers)
             root_disk_gb = 50
@@ -306,6 +306,7 @@ class SizingAdvisor:
 # ---------------------------------------------------------------------------
 # Host-aware auto-sizing (ported 1:1 from deploy_microcloud.sh)
 # ---------------------------------------------------------------------------
+
 
 def _round_down_even(value: int, minimum: int = 2) -> int:
     if value < minimum:
@@ -363,11 +364,14 @@ class HostAwareSizing:
     def total_ceph_gb(self) -> int:
         return self.ceph_disk_gb * self.nodes
 
+    def total_storage_gb(self) -> int:
+        return (self.root_disk_gb + self.ceph_disk_gb) * self.nodes
+
     def fits_host(self) -> bool:
         return (
             self.total_cpu() <= self.host_cpu
             and self.total_ram_gb() <= self.host_ram_gb
-            and self.total_ceph_gb() <= self.host_storage_gib
+            and self.total_storage_gb() <= self.host_storage_gib
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -384,6 +388,7 @@ class HostAwareSizing:
                 "cpu": self.total_cpu(),
                 "ram_gb": self.total_ram_gb(),
                 "ceph_gb": self.total_ceph_gb(),
+                "storage_gib": self.total_storage_gb(),
             },
             "host": {
                 "cpu": self.host_cpu,
@@ -401,8 +406,7 @@ class HostAwareSizing:
             f"  Per node : {self.node_cpu} vCPU / {self.node_ram_gb} GB RAM / "
             f"{self.root_disk_gb} GB root / {self.ceph_disk_gb} GB Ceph disk\n"
             f"  Totals   : {self.total_cpu()} vCPU / {self.total_ram_gb()} GB RAM / "
-            f"{self.total_ceph_gb()} GB Ceph storage\n"
-            f"  Host     : {self.host_cpu} vCPU / {self.host_ram_gb} GB RAM / "
+            f"{self.total_storage_gb()} GB storage ({self.total_ceph_gb()} GB Ceph)\n"
+            f"  Available: {self.host_cpu} vCPU / {self.host_ram_gb} GB RAM / "
             f"{self.host_storage_gib} GiB free storage  ->  {fit}"
         )
-

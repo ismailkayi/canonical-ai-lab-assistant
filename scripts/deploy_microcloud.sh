@@ -78,12 +78,24 @@ PLAYBOOKS_DIR="${REPO_ROOT}/playbooks"
 # -----------------------------------------------------------------------
 # Tool checks
 # -----------------------------------------------------------------------
-for tool in tofu ansible; do
+for tool in tofu ansible flock; do
     if ! command -v "${tool}" &>/dev/null; then
         log_error "${tool} not found. Run: lab-ai bootstrap"
         exit 1
     fi
 done
+
+LOCK_ROOT="${SNAP_USER_COMMON:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
+mkdir -p "${LOCK_ROOT}"
+TERRAFORM_LOCK_FILE="${LOCK_ROOT}/canonical-ai-lab-assistant-terraform-${UID}.lock"
+if [[ -n "${LAB_AI_TERRAFORM_LOCK_FD:-}" \
+      && -e "/proc/$$/fd/${LAB_AI_TERRAFORM_LOCK_FD}" ]]; then
+    log_info "Using inherited infrastructure operation lock"
+else
+    exec 9>"${TERRAFORM_LOCK_FILE}"
+    log_info "Waiting for exclusive infrastructure operation lock..."
+    flock -x 9
+fi
 
 # -----------------------------------------------------------------------
 # SSH key
@@ -327,20 +339,48 @@ fi
 cd "${TERRAFORM_DIR}"
 tofu init -input=false >/dev/null 2>&1
 
-tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}" \
-    || tofu workspace new "${WORKSPACE_NAME}" >/dev/null 2>&1
+if tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}"; then
+    log_error "Workspace '${WORKSPACE_NAME}' already exists. Refusing a fresh deploy that could resize or destroy existing members."
+    log_error "Use the supported add/scale workflow, or delete the environment before redeploying."
+    exit 1
+fi
+tofu workspace new "${WORKSPACE_NAME}" >/dev/null 2>&1
 tofu workspace select "${WORKSPACE_NAME}" >/dev/null 2>&1
 
 log_info "Running tofu apply ..."
-tofu apply -auto-approve -parallelism=1 \
-    -var="user_prefix=${USER_PREFIX}" \
-    -var="microcloud_node_count=${NODES}" \
-    -var="microcloud_node_cpu=${NODE_CPU}" \
-    -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}" \
-    -var="microcloud_root_disk_size_gib=${ROOT_DISK_GIB}" \
-    -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}" \
-    -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}" \
+APPLY_ARGS=(
+    -auto-approve
+    -parallelism=1
+    -var="user_prefix=${USER_PREFIX}"
+    -var="microcloud_node_count=${NODES}"
+    -var="microcloud_node_cpu=${NODE_CPU}"
+    -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}"
+    -var="microcloud_root_disk_size_gib=${ROOT_DISK_GIB}"
+    -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}"
+    -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}"
     -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
+)
+
+run_tofu_apply() {
+    local log_file="$1"
+    set +e
+    tofu apply "${APPLY_ARGS[@]}" 2>&1 | tee "${log_file}"
+    local apply_rc=${PIPESTATUS[0]}
+    set -e
+    return "${apply_rc}"
+}
+
+APPLY_LOG=$(mktemp)
+trap 'rm -f "${APPLY_LOG}"' EXIT
+if ! run_tofu_apply "${APPLY_LOG}"; then
+    if grep -q "Missing Resource State After Create" "${APPLY_LOG}"; then
+        log_warn "LXD provider returned transient missing state; reconciling with one retry..."
+        : > "${APPLY_LOG}"
+        run_tofu_apply "${APPLY_LOG}"
+    else
+        exit 1
+    fi
+fi
 
 log_success "LXD VMs provisioned"
 

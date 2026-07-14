@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from typing import Any, Optional
 
 import requests
@@ -24,10 +25,12 @@ class AIEngine:
         self.config = config
         self.base_url = config.inference_host
         self.model = config.inference_model
-        self.conversation_history = []
+        self.conversation_history: list[dict[str, Any]] = []
         self._api_style: Optional[str] = None
         self._resolved_model: Optional[str] = None
         self._supports_native_tools: bool = True  # optimistically assume support
+        self._pending_tool_call_id: Optional[str] = None
+        self.max_history_messages: int = 20
         # Live, host-grounded context injected into the system prompt every turn.
         # The orchestrator refreshes this so the model always plans against the
         # REAL host capacity and existing environments, never guesses.
@@ -70,20 +73,22 @@ class AIEngine:
 
         try:
             response = self._call_inference(messages, include_tools=include_tools)
-            self.conversation_history.append(
-                {"role": "assistant", "content": self._summarize_response_for_history(response)}
-            )
+            self._record_assistant_response(response)
             return response
         except Exception as exc:
             logger.error(f"Error calling inference engine: {exc}")
             return {"content": f"Error: {str(exc)}", "error": True}
 
-    def _call_inference(self, messages: list, include_tools: bool = True) -> dict[str, Any]:
+    def _call_inference(
+        self,
+        messages: list[dict[str, Any]],
+        include_tools: bool = True,
+    ) -> dict[str, Any]:
         api_style = self._detect_api_style()
         resolved_model = self._resolve_model_name()
 
         if api_style == "openai":
-            payload = {
+            payload: dict[str, Any] = {
                 "model": resolved_model,
                 "messages": messages,
                 "stream": False,
@@ -96,35 +101,30 @@ class AIEngine:
                 if api_tools:
                     payload["tools"] = api_tools
 
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-                timeout=self.config.response_timeout,
-            )
+            response = self._post_inference("/v1/chat/completions", payload)
             if response.status_code == 404:
-                response = requests.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    timeout=self.config.response_timeout,
-                )
+                response = self._post_inference("/chat/completions", payload)
 
             # If backend rejects the tools parameter, retry without it and
             # fall back to embedding tools in the system prompt from now on.
             if response.status_code in (400, 422) and "tools" in payload:
-                logger.warning("Backend rejected tools parameter; falling back to prompt-embedded tools")
+                logger.warning(
+                    "Backend rejected tools parameter; falling back to prompt-embedded tools"
+                )
                 self._supports_native_tools = False
                 payload.pop("tools", None)
                 # Inject tool definitions into the system message for this request.
                 tools_text = f"\n\nAvailable tools:\n{json.dumps(get_tool_definitions(), indent=2)}"
                 payload["messages"] = [
-                    {"role": m["role"], "content": m["content"] + tools_text if m["role"] == "system" else m["content"]}
-                    for m in payload["messages"]
+                    {
+                        **message,
+                        "content": str(message.get("content", "")) + tools_text
+                        if message.get("role") == "system"
+                        else message.get("content"),
+                    }
+                    for message in messages
                 ]
-                response = requests.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    json=payload,
-                    timeout=self.config.response_timeout,
-                )
+                response = self._post_inference("/v1/chat/completions", payload)
 
             response.raise_for_status()
             result = response.json()
@@ -134,6 +134,7 @@ class AIEngine:
             if isinstance(tool_calls, list) and tool_calls:
                 first_call = tool_calls[0]
                 fn = first_call.get("function", {}) if isinstance(first_call, dict) else {}
+                tool_call_id = first_call.get("id", "") if isinstance(first_call, dict) else ""
                 tool_name = fn.get("name")
                 tool_args_raw = fn.get("arguments", "{}")
                 tool_params: dict[str, Any] = {}
@@ -149,11 +150,18 @@ class AIEngine:
 
                 content = message_payload.get("content", "")
                 reasoning_content = message_payload.get("reasoning_content", "")
+                assistant_message = dict(message_payload)
+                # The orchestrator executes one tool at a time. Keep only that call
+                # in history so the protocol never waits for unhandled parallel IDs.
+                assistant_message["tool_calls"] = [first_call]
+                assistant_message.setdefault("role", "assistant")
                 return {
                     "action": tool_name,
                     "parameters": tool_params,
-                    "message": content or reasoning_content or f"Calling {tool_name}",
+                    "message": content or f"Preparing {tool_name}",
                     "_raw": json.dumps(message_payload),
+                    "_assistant_message": assistant_message,
+                    "_tool_call_id": tool_call_id,
                 }
 
             content = message_payload.get("content", "")
@@ -169,16 +177,58 @@ class AIEngine:
                 "stream": False,
                 "format": "json",
             }
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                timeout=self.config.response_timeout,
-            )
+            response = self._post_inference("/api/chat", payload)
             response.raise_for_status()
             result = response.json()
             raw_content = result.get("message", {}).get("content", "")
 
         return _extract_structured_response(raw_content)
+
+    def _post_inference(self, path: str, payload: dict[str, Any]) -> requests.Response:
+        """Retry transient disconnects after the local inference service is ready."""
+        last_error: requests.RequestException | None = None
+        for attempt in range(self.config.max_retries):
+            try:
+                return requests.post(
+                    f"{self.base_url}{path}",
+                    json=payload,
+                    timeout=self.config.response_timeout,
+                )
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
+                if attempt + 1 < self.config.max_retries:
+                    logger.warning(
+                        "Inference request disconnected; waiting for backend readiness "
+                        "before retry %s/%s",
+                        attempt + 2,
+                        self.config.max_retries,
+                    )
+                    self._wait_for_inference_ready(self.config.inference_restart_timeout)
+        assert last_error is not None
+        raise last_error
+
+    def _wait_for_inference_ready(self, timeout: float) -> bool:
+        """Wait for a restarted local inference backend to expose a healthy endpoint."""
+        deadline = time.monotonic() + max(timeout, 0.0)
+        health_paths = ("/health", "/v1/models", "/models", "/api/tags")
+
+        while time.monotonic() < deadline:
+            for path in health_paths:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    response = requests.get(
+                        f"{self.base_url}{path}",
+                        timeout=min(2.0, remaining),
+                    )
+                    if response.status_code == 200:
+                        return True
+                except requests.RequestException:
+                    continue
+            time.sleep(0.5)
+
+        return False
 
     def _detect_api_style(self) -> str:
         """Detect server API shape and cache the result."""
@@ -270,14 +320,16 @@ class AIEngine:
         tools_def = get_tool_definitions()
         api_tools = []
         for tool in tools_def.get("tools", []):
-            api_tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
-                },
-            })
+            api_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                }
+            )
         return api_tools
 
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
@@ -304,7 +356,7 @@ WHEN INTRODUCING YOURSELF:
 
 CORE FACTS:
 - MicroCloud storage is MicroCeph (no LVM mode).
-- OVN is the default network; skip only if user explicitly opts out.
+- This automation currently configures MicroOVN for every deployed lab.
 - Cluster size is flexible (including even counts); this automation targets >=3 nodes.
 - For HA in production, at least 3 members are required, and 4 members are commonly recommended for critical deployments.
 - Each MicroCloud node needs at least one Ceph disk (default: 1 OSD per node).
@@ -390,9 +442,11 @@ WHAT THIS MEANS FOR USER REQUESTS:
   hardcoded in playbooks/microcloud.yml. Mention user can edit the playbook.
 - "Custom preseed" → NOT exposed via CLI. Preseed is auto-generated by Ansible.
 - "Change network after deploy" → NOT an automated operation. Guide manually.
-- "Add nodes to existing cluster" → Use add_cluster_node tool, NOT scale_environment.
-  add_cluster_node provisions VMs AND joins them to the live cluster via `microcloud add`.
-  scale_environment re-runs the full deploy script and may not work on live clusters.
+- "Add nodes to existing cluster" → Use add_cluster_node. It preserves the persisted
+    deployment geometry, provisions new VMs, and joins them via `microcloud add`.
+- "Scale to a larger node count" → scale_environment safely delegates to the same
+    add-member workflow. Downscale is not implemented because members and Ceph OSDs
+    must be drained before VM destruction.
 - "Check if cluster is healthy" → Use verify_cluster_health tool.
 - "More Ceph disks per node" → Use ceph_disks_per_node parameter in deploy_microcloud.
 - "Add local fast storage" → Use local_disk_gib >= 10 in deploy_microcloud.
@@ -418,9 +472,11 @@ NEVER say just "small tier" without showing the resource numbers.
 PLANNING FLOW:
 0. If user asks for lifecycle actions (list/delete/scale/add-nodes/health-check), execute those tools directly.
 1. Understand user intent (PoC, lab, demo, teaching, etc.).
-2. Call inspect_host_environment to check available resources.
+2. Use LIVE ENVIRONMENT STATE for host capacity. Call inspect_host_environment only
+    when the user requests a refresh or the state is missing.
 3. Propose topology WITH full sizing details shown to the user.
-4. Only call deploy_microcloud after explicit user confirmation.
+4. Request deploy_microcloud when the plan is complete. The orchestrator validates
+    and displays the exact resolved plan, then enforces user confirmation before execution.
 
 PLANNING MODE SUMMARY:
 {scenario_catalog}
@@ -431,8 +487,6 @@ Always return valid JSON with keys:
 - parameters: object (ONLY use parameters that exist in the tool definition)
 - message: user-visible explanation
 - reasoning: concise reasoning
-- needs_confirmation: boolean
-- confirmation_prompt: text when confirmation needed
 - missing_params: list
 
 RESPONSE STYLE:
@@ -445,10 +499,23 @@ RESPONSE STYLE:
 - Use bullet points for comparisons and lists, not walls of text.
 
 DEPLOYMENT SAFETY:
-Never call deploy_microcloud until user says yes.
+Do not ask for an informal confirmation before requesting a mutating tool. The
+orchestrator owns confirmation and binds approval to the exact validated plan.
 Never invent network interface names or disk paths.
 Never pass parameters that are not defined in the tool definitions.
 In nested-lxd-lab mode, do not block waiting for host physical OSD disk paths or manual NIC names.
+
+KNOWLEDGE AND DOCUMENTATION POLICY:
+- Treat live tool observations as authoritative for this host and current clusters.
+- Fetch official documentation before making current/version-sensitive claims about
+    requirements, supported topology, CLI semantics, snap channels, networking, storage,
+    upgrade behavior, or destructive lifecycle procedures.
+- Also fetch documentation when the user asks for the latest behavior, an official
+    source, or when your confidence in a technical fact is low.
+- You may reason without a documentation call for explanations and trade-offs that
+    follow directly from verified host facts and deterministic plan calculations.
+- If sources disagree, prefer live observations for local state and current official
+    documentation for product behavior. Include the source URL in the answer.
 
 EXECUTION SEMANTICS:
 - Script-backed tools are synchronous: once the orchestrator calls a tool, it has already finished when this model sees the result.
@@ -463,7 +530,8 @@ Confirm workspace name with user before deletion if not explicitly stated.
 ENVIRONMENT MANAGEMENT:
 - If user asks to list deployed labs/environments, call list_environments.
 - If user asks to add nodes to a running cluster, call add_cluster_node.
-- If user asks to scale (re-deploy with more nodes), call scale_environment.
+- If user asks to scale up to a larger total, call scale_environment.
+- Explain that downscale is unsupported rather than attempting it.
 - If user asks to check cluster health/status, call verify_cluster_health.
 - For scale/delete/add requests, gather or confirm the target workspace first.
 - Never claim success unless the tool execution confirms it.
@@ -491,22 +559,72 @@ ENVIRONMENT MANAGEMENT:
 
     def reset_conversation(self):
         self.conversation_history = []
+        self._pending_tool_call_id = None
 
-    def get_conversation_history(self) -> list:
+    def get_conversation_history(self) -> list[dict[str, Any]]:
         return self.conversation_history.copy()
 
     def _summarize_response_for_history(self, response: dict[str, Any]) -> str:
         """Store a short natural-language summary instead of raw tool JSON."""
-        content = response.get("content", "") or response.get("message", "") or response.get("reasoning", "")
-        if content:
-            return content
-
+        content = (
+            response.get("content", "")
+            or response.get("message", "")
+            or response.get("reasoning", "")
+        )
         action = response.get("action")
         if action:
-            return f"Calling {action}"
+            summary = {
+                "action": action,
+                "parameters": response.get("parameters", {}),
+                "message": content,
+            }
+            return json.dumps(summary, sort_keys=True)
+
+        if content:
+            return str(content)
 
         raw = response.get("_raw", "")
         return raw if isinstance(raw, str) else ""
+
+    def _record_assistant_response(self, response: dict[str, Any]) -> None:
+        """Preserve native protocol messages, with structured text for fallbacks."""
+        assistant_message = response.get("_assistant_message")
+        tool_call_id = response.get("_tool_call_id")
+        if isinstance(assistant_message, dict) and tool_call_id:
+            self.conversation_history.append(assistant_message)
+            self._pending_tool_call_id = str(tool_call_id)
+        else:
+            self.conversation_history.append(
+                {"role": "assistant", "content": self._summarize_response_for_history(response)}
+            )
+            self._pending_tool_call_id = None
+        self._trim_conversation_history()
+
+    def _trim_conversation_history(self) -> None:
+        if len(self.conversation_history) <= self.max_history_messages:
+            return
+        self.conversation_history = self.conversation_history[-self.max_history_messages :]
+        while self.conversation_history and self.conversation_history[0].get("role") == "tool":
+            self.conversation_history.pop(0)
+
+    def cancel_pending_tool_call(self, tool_name: str, reason: str) -> None:
+        """Close a native tool call that policy blocked before execution."""
+        self.record_tool_observation(tool_name, f"Tool call was not executed: {reason}")
+
+    def record_tool_observation(self, tool_name: str, result: str) -> None:
+        """Close a native tool call without requesting another model response."""
+        if not self._pending_tool_call_id:
+            return
+        self.conversation_history.append(
+            {
+                "role": "tool",
+                "tool_call_id": self._pending_tool_call_id,
+                "name": tool_name,
+                "content": result,
+            }
+        )
+        self._pending_tool_call_id = None
+        self._trim_conversation_history()
 
     def feed_tool_result(self, tool_name: str, result: str) -> dict[str, Any]:
         """Inject a tool result into conversation history and get the AI's next step.
@@ -514,10 +632,32 @@ ENVIRONMENT MANAGEMENT:
         This closes the agentic loop: the AI sees the tool output and reasons
         further before giving the user a final synthesised response.
         """
-        lifecycle_tools = {"list_environments", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"}
-        is_failure = result.startswith("Script failed") or result.startswith("Error:") or "Traceback" in result
+        lifecycle_tools = {
+            "deploy_microcloud",
+            "list_environments",
+            "delete_environment",
+            "scale_environment",
+            "add_cluster_node",
+            "verify_cluster_health",
+        }
+        is_failure = (
+            result.startswith("Script failed")
+            or result.startswith("Error:")
+            or "Traceback" in result
+        )
+        has_failed_postconditions = (
+            "POSTCONDITION STATUS: partial" in result or "POSTCONDITION STATUS: unhealthy" in result
+        )
 
-        if tool_name in lifecycle_tools:
+        if has_failed_postconditions:
+            followup = (
+                f"Tool '{tool_name}' finished, but deterministic postcondition verification "
+                f"did not pass. Evidence:\n\n{result}\n\n"
+                "Do not claim success. Explain which expected conditions were not met, "
+                "distinguish script completion from cluster health, and propose the safest "
+                "next diagnostic or remediation step."
+            )
+        elif tool_name in lifecycle_tools:
             if is_failure:
                 followup = (
                     f"Tool '{tool_name}' completed with a failure. Result:\n\n{result}\n\n"
@@ -547,7 +687,19 @@ ENVIRONMENT MANAGEMENT:
                     "If you need another tool, call it."
                 )
 
-        self.conversation_history.append({"role": "user", "content": followup})
+        if self._pending_tool_call_id:
+            self.conversation_history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": self._pending_tool_call_id,
+                    "name": tool_name,
+                    "content": followup,
+                }
+            )
+            self._pending_tool_call_id = None
+        else:
+            self.conversation_history.append({"role": "user", "content": followup})
+        self._trim_conversation_history()
         system_prompt = self._get_default_system_prompt()
         messages = [{"role": "system", "content": system_prompt}] + self.conversation_history
         try:
@@ -557,15 +709,15 @@ ENVIRONMENT MANAGEMENT:
             content = response.get("content", "") or response.get("message", "")
             action = response.get("action")
             if not content and not action:
-                logger.warning("Empty response from model after tool result; retrying with trimmed context")
+                logger.warning(
+                    "Empty response from model after tool result; retrying with trimmed context"
+                )
                 # Keep only the last 4 messages (recent context) to fit in context window.
                 trimmed_history = self.conversation_history[-4:]
                 short_messages = [{"role": "system", "content": system_prompt}] + trimmed_history
                 response = self._call_inference(short_messages, include_tools=False)
 
-            self.conversation_history.append(
-                {"role": "assistant", "content": self._summarize_response_for_history(response)}
-            )
+            self._record_assistant_response(response)
             return response
         except Exception as exc:
             logger.error(f"Error in tool result synthesis: {exc}")
@@ -620,7 +772,7 @@ def _extract_first_json_object(content: str) -> str | None:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return content[start:idx + 1].strip()
+                    return content[start : idx + 1].strip()
 
         start = content.find("{", start + 1)
 
@@ -648,14 +800,22 @@ def _extract_structured_response(raw_content: str) -> dict[str, Any]:
         pass
 
     # Fallback path: <tool_code> ... </tool_code> blocks used by some models.
-    tool_block_match = re.search(r"<tool_code>\s*(\{.*?\})\s*</tool_code>", raw_content, flags=re.DOTALL)
+    tool_block_match = re.search(
+        r"<tool_code>\s*(\{.*?\})\s*</tool_code>", raw_content, flags=re.DOTALL
+    )
     if tool_block_match:
         block = tool_block_match.group(1)
         try:
             tool_payload = json.loads(block)
-            action = tool_payload.get("tool_name") or tool_payload.get("tool") or tool_payload.get("action")
+            action = (
+                tool_payload.get("tool_name")
+                or tool_payload.get("tool")
+                or tool_payload.get("action")
+            )
             parameters = tool_payload.get("parameters", {})
-            prose = re.sub(r"<tool_code>\s*\{.*?\}\s*</tool_code>", "", raw_content, flags=re.DOTALL).strip()
+            prose = re.sub(
+                r"<tool_code>\s*\{.*?\}\s*</tool_code>", "", raw_content, flags=re.DOTALL
+            ).strip()
             result = {
                 "action": action,
                 "parameters": parameters if isinstance(parameters, dict) else {},
@@ -668,7 +828,9 @@ def _extract_structured_response(raw_content: str) -> dict[str, Any]:
             pass
 
     # Fallback path: prose that includes a JSON object with tool fields.
-    json_object_match = re.search(r"(\{\s*\"(?:tool_name|tool|action)\".*\})", raw_content, flags=re.DOTALL)
+    json_object_match = re.search(
+        r"(\{\s*\"(?:tool_name|tool|action)\".*\})", raw_content, flags=re.DOTALL
+    )
     if json_object_match:
         snippet = json_object_match.group(1)
         try:
@@ -687,7 +849,11 @@ def _extract_structured_response(raw_content: str) -> dict[str, Any]:
 
     # Fallback path: plain text tool intent, e.g. "Calling inspect_host_environment".
     # Only match if the extracted tool name is one of the known tools.
-    calling_match = re.search(r"\b(?:calling|run(?:ning)?|execute|use)[:\s]+([a-z_][a-z0-9_]*)\b", raw_content, flags=re.IGNORECASE)
+    calling_match = re.search(
+        r"\b(?:calling|run(?:ning)?|execute|use)[:\s]+([a-z_][a-z0-9_]*)\b",
+        raw_content,
+        flags=re.IGNORECASE,
+    )
     if calling_match:
         extracted_tool = calling_match.group(1)
         # Validate against known tools to avoid false positives.

@@ -133,7 +133,7 @@ variable "local_disk_size_gib" {
 
 locals {
   # env_id follows the workspace name (e.g. alice_microcloud)
-  env_id     = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
+  env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
   # LXD names must not contain underscores
   lxd_prefix = replace(local.env_id, "_", "-")
 }
@@ -193,9 +193,9 @@ locals {
     for pair in setproduct(
       range(var.microcloud_node_count),
       range(var.ceph_disks_per_node)
-    ) : {
-      node = pair[0]  # 0-based node index
-      osd  = pair[1]  # 0-based OSD index within node
+      ) : {
+      node = pair[0] # 0-based node index
+      osd  = pair[1] # 0-based OSD index within node
     }
   ]
 }
@@ -294,7 +294,11 @@ resource "local_file" "ansible_inventory" {
         microcloud = {
           hosts = {
             for name in lxd_instance.microcloud_nodes[*].name :
-            name => { ansible_connection = "lxd" }
+            name => {
+              ansible_connection  = "lxd"
+              expected_ceph_disks = var.ceph_disks_per_node
+              local_disk_enabled  = var.local_disk_size_gib > 0
+            }
           }
         }
       }
@@ -326,4 +330,23 @@ output "ovn_uplink_network" {
 output "inventory_file" {
   value       = local_file.ansible_inventory.filename
   description = "Path to the generated Ansible inventory file"
+}
+
+output "deployment_spec" {
+  description = "Resolved environment geometry reused by safe lifecycle operations"
+  value = {
+    version             = 1
+    user_prefix         = var.user_prefix
+    ubuntu_image        = var.ubuntu_image
+    lxd_network_name    = var.lxd_network_name
+    lxd_storage_pool    = var.lxd_storage_pool
+    ssh_public_key      = var.ssh_public_key
+    node_count          = var.microcloud_node_count
+    node_cpu            = var.microcloud_node_cpu
+    node_memory_mb      = var.microcloud_node_memory_mb
+    root_disk_gib       = var.microcloud_root_disk_size_gib
+    ceph_disk_gib       = var.microcloud_ceph_disk_size_gib
+    ceph_disks_per_node = var.ceph_disks_per_node
+    local_disk_gib      = var.local_disk_size_gib
+  }
 }

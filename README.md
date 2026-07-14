@@ -123,6 +123,11 @@ The assistant can manage existing environments end-to-end:
 - Verify MicroCloud/LXD/MicroCeph/MicroOVN health
 - Destroy an environment and remove Terraform workspace artifacts
 
+Fresh deploys never reuse an existing OpenTofu workspace. This prevents an
+accidental deploy request from resizing or destroying members of a running lab.
+Environments created before versioned deployment specifications were introduced
+must be deleted and created fresh once before add/scale operations are available.
+
 ## Documentation Fetching
 
 The documentation tool first tries official Ubuntu documentation URLs.

@@ -14,7 +14,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import requests
 
@@ -26,14 +26,14 @@ logger = logging.getLogger(__name__)
 
 DOC_SOURCES: dict[str, str] = {
     # MicroCloud
-    "microcloud": "https://documentation.ubuntu.com/microcloud/latest/",
-    "microcloud-install": "https://documentation.ubuntu.com/microcloud/latest/how-to/install/",
-    "microcloud-init": "https://documentation.ubuntu.com/microcloud/latest/how-to/initialise/",
-    "microcloud-networking": "https://documentation.ubuntu.com/microcloud/latest/explanation/networking/",
-    "microcloud-storage": "https://documentation.ubuntu.com/microcloud/latest/explanation/storage/",
-    "microcloud-preseed": "https://documentation.ubuntu.com/microcloud/latest/how-to/preseed/",
-    "microcloud-faq": "https://documentation.ubuntu.com/microcloud/latest/reference/faq/",
-    "microcloud-requirements": "https://documentation.ubuntu.com/microcloud/latest/reference/requirements/",
+    "microcloud": "https://canonical.com/microcloud/docs/latest/",
+    "microcloud-install": "https://canonical.com/microcloud/docs/latest/how-to/install/",
+    "microcloud-init": "https://canonical.com/microcloud/docs/latest/how-to/initialise/",
+    "microcloud-networking": "https://canonical.com/microcloud/docs/latest/explanation/networking/",
+    "microcloud-storage": "https://canonical.com/microcloud/docs/latest/explanation/storage/",
+    "microcloud-preseed": "https://canonical.com/microcloud/docs/latest/how-to/preseed/",
+    "microcloud-faq": "https://canonical.com/microcloud/docs/latest/reference/faq/",
+    "microcloud-requirements": "https://canonical.com/microcloud/docs/latest/reference/requirements/",
     # LXD
     "lxd": "https://documentation.ubuntu.com/lxd/latest/",
     "lxd-install": "https://documentation.ubuntu.com/lxd/latest/installing/",
@@ -52,18 +52,31 @@ DOC_SOURCES: dict[str, str] = {
 # entirely unavailable (network error or non-2xx).
 DOC_FALLBACK_SOURCES: dict[str, list[str]] = {
     "microcloud": ["https://raw.githubusercontent.com/canonical/microcloud/main/README.md"],
-    "microcloud-install": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/install.md"],
-    "microcloud-init": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"],
-    "microcloud-networking": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/networking.md"],
-    "microcloud-storage": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/storage.md"],
-    "microcloud-preseed": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"],
-    "microcloud-faq": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/faq.md"],
-    "microcloud-requirements": ["https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/requirements.md"],
+    "microcloud-install": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/install.md"
+    ],
+    "microcloud-init": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"
+    ],
+    "microcloud-networking": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/networking.md"
+    ],
+    "microcloud-storage": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/explanation/storage.md"
+    ],
+    "microcloud-preseed": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/how-to/initialize.md"
+    ],
+    "microcloud-faq": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/faq.md"
+    ],
+    "microcloud-requirements": [
+        "https://raw.githubusercontent.com/canonical/microcloud/main/doc/reference/requirements.md"
+    ],
 }
 
 # Keyword → doc key mapping for fuzzy lookups
 _KEYWORD_MAP: list[tuple[list[str], str]] = [
-    (["microcloud", "mc", "cluster"], "microcloud"),
     (["install", "initialise", "initialize", "setup", "set up"], "microcloud-install"),
     (["init", "bootstrap", "microcloud init"], "microcloud-init"),
     (["network", "ovn", "uplink", "vlan"], "microcloud-networking"),
@@ -74,7 +87,16 @@ _KEYWORD_MAP: list[tuple[list[str], str]] = [
     (["lxd", "container", "vm", "instance"], "lxd"),
     (["microceph", "distributed storage", "ceph"], "microceph"),
     (["inference", "snap", "gemma4", "llm", "model"], "gemma4"),
+    (["microcloud", "mc", "cluster"], "microcloud"),
 ]
+
+_GENERIC_KEYWORDS = {"microcloud", "mc", "cluster", "auto", "question", "common"}
+_ALLOWED_DOC_HOSTS = {
+    "canonical.com",
+    "documentation.ubuntu.com",
+    "canonical-microceph.readthedocs.io",
+    "raw.githubusercontent.com",
+}
 
 
 class DocFetcher:
@@ -118,6 +140,15 @@ class DocFetcher:
 
     def fetch_by_url(self, url: str) -> dict[str, Any]:
         """Fetch a specific URL directly."""
+        if not self._is_allowed_url(url):
+            return {
+                "url": url,
+                "key": urlparse(url).path,
+                "title": "",
+                "content": "[Documentation URL rejected by source policy]",
+                "fetched_at": None,
+                "error": "Only HTTPS URLs from approved Canonical documentation hosts are allowed",
+            }
         return self._fetch_url(url, key=urlparse(url).path)
 
     def list_sources(self) -> list[dict[str, str]]:
@@ -136,10 +167,18 @@ class DocFetcher:
         if topic_lower in DOC_SOURCES:
             return topic_lower
 
-        # Keyword-based match (first hit wins)
+        # Score all keyword groups so a specific phrase such as "MicroCloud
+        # networking" wins over the generic product name.
+        scores: dict[str, int] = {}
         for keywords, key in _KEYWORD_MAP:
-            if any(kw in topic_lower for kw in keywords):
-                return key
+            for keyword in keywords:
+                if not self._keyword_matches(topic_lower, keyword):
+                    continue
+                score = 1 if keyword in _GENERIC_KEYWORDS else len(keyword) + 10
+                scores[key] = scores.get(key, 0) + score
+
+        if scores:
+            return max(scores, key=lambda candidate: scores[candidate])
 
         return "microcloud"
 
@@ -160,7 +199,9 @@ class DocFetcher:
             try:
                 with open(cache_path) as f:
                     logger.debug(f"Doc cache hit: {url}")
-                    return json.load(f)
+                    cached = json.load(f)
+                    if isinstance(cached, dict):
+                        return cached
             except Exception:
                 pass
 
@@ -176,13 +217,17 @@ class DocFetcher:
                 },
             )
             resp.raise_for_status()
+            if not self._is_allowed_url(resp.url):
+                raise requests.RequestException(
+                    f"Documentation redirect left the approved host set: {resp.url}"
+                )
             body = resp.text
             content = self._extract_text(body)
             title = self._extract_title(body)
             if not title:
                 title = self._extract_markdown_title(body)
             result = {
-                "url": url,
+                "url": resp.url,
                 "key": key,
                 "title": title,
                 "content": content[:6000],  # keep context manageable
@@ -230,11 +275,12 @@ class DocFetcher:
                     "error": str(exc),
                 }
 
-        try:
-            with open(cache_path, "w") as f:
-                json.dump(result, f)
-        except Exception:
-            pass
+        if not result.get("error"):
+            try:
+                with open(cache_path, "w") as f:
+                    json.dump(result, f)
+            except Exception:
+                pass
 
         return result
 
@@ -290,6 +336,17 @@ class DocFetcher:
         return ""
 
     @staticmethod
+    def _keyword_matches(text: str, keyword: str) -> bool:
+        if " " in keyword:
+            return keyword in text
+        return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
+
+    @staticmethod
+    def _is_allowed_url(url: str) -> bool:
+        parsed = urlparse(url)
+        return parsed.scheme == "https" and (parsed.hostname or "") in _ALLOWED_DOC_HOSTS
+
+    @staticmethod
     def _docs_url_to_github_raw(url: str) -> str:
         """Translate docs.ubuntu.com MicroCloud URLs to raw GitHub markdown URLs."""
         parsed = urlparse(url)
@@ -300,12 +357,14 @@ class DocFetcher:
         if not path.startswith("microcloud"):
             return ""
 
-        suffix = path[len("microcloud"):].strip("/")
+        suffix = path[len("microcloud") :].strip("/")
         if not suffix:
             return "https://raw.githubusercontent.com/canonical/microcloud/main/README.md"
 
-        if suffix.startswith("en/latest/"):
-            suffix = suffix[len("en/latest/"):]
+        for prefix in ("en/latest/", "latest/"):
+            if suffix.startswith(prefix):
+                suffix = suffix[len(prefix) :]
+                break
 
         if suffix.endswith(".md"):
             return f"https://raw.githubusercontent.com/canonical/microcloud/main/doc/{suffix}"

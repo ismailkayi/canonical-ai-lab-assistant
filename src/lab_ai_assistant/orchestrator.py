@@ -1,21 +1,39 @@
 """Lab orchestration and execution layer for custom-topology MicroCloud workflows."""
 
+import fcntl
 import json
 import logging
+import os
 import re
 import select
+import signal
 import subprocess
 import textwrap
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.doc_fetcher import DocFetcher
+from lab_ai_assistant.planning import (
+    MUTATING_ACTIONS,
+    ApprovalManager,
+    CapacitySnapshot,
+    EnvironmentSnapshot,
+    ExecutionPlan,
+    PlanValidation,
+    PlanValidator,
+    TopologySpec,
+    classify_confirmation,
+)
 from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
 from lab_ai_assistant.tools import get_tool_definitions, validate_tool_parameters
 from lab_ai_assistant.ui import ChatUI
+from lab_ai_assistant.verification import ClusterVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +48,16 @@ class LabOrchestrator:
         self.ai_engine = AIEngine(config)
         self.sizing_advisor = SizingAdvisor()
         self.doc_fetcher = DocFetcher(cache_dir=config.state_dir)
-        self.deployment_history = []
+        self.deployment_history: list[dict[str, Any]] = []
         self.ui = ChatUI()
+        self.plan_validator = PlanValidator()
+        self.approval_manager = ApprovalManager()
+        self.cluster_verifier = ClusterVerifier(config.repo_root / "terraform")
         # Cache for host-state grounding so we don't re-shell out every turn.
         self._host_state_cache: dict[str, Any] | None = None
         self._host_state_cache_ts: float = 0.0
         self._host_state_ttl: float = 60.0
+        self._infrastructure_lock_fd: int | None = None
         self._load_history()
 
     def bootstrap_host(self) -> str:
@@ -100,17 +122,24 @@ class LabOrchestrator:
         The loop runs until the AI returns no tool call (final answer) or
         the maximum number of tool rounds is reached.
         """
-        MAX_TOOL_ROUNDS = 5
+        pending_response = self._handle_pending_confirmation(user_message)
+        if pending_response is not None:
+            return pending_response
 
         # Ground the model in real host capacity + active environments before it
         # reasons. Cached for a short TTL so this is cheap on every turn.
         self._refresh_ai_environment_context()
 
         ai_response = self.ai_engine.chat(user_message)
+        return self._run_agent_loop(user_message, ai_response)
 
-        for _round in range(MAX_TOOL_ROUNDS):
+    def _run_agent_loop(self, user_message: str, ai_response: dict[str, Any]) -> str:
+        """Run bounded AI/tool iterations, requiring a validated plan for mutations."""
+        max_tool_rounds = 5
+
+        for _round in range(max_tool_rounds):
             if ai_response.get("error"):
-                return ai_response.get("content", "An error occurred")
+                return str(ai_response.get("content", "An error occurred"))
 
             action = ai_response.get("action")
             message = ai_response.get("message") or ai_response.get("content", "")
@@ -118,27 +147,51 @@ class LabOrchestrator:
 
             # No tool call → this is the final user-facing answer
             if not action:
+                self.ai_engine.cancel_pending_tool_call(
+                    "unknown",
+                    "Native tool call did not include a valid action name",
+                )
                 return self._compose_user_facing_response(message, reasoning)
 
             # Show AI's intermediate plan/reasoning
             if message or reasoning:
-                plan = self._compose_user_facing_response(message, reasoning)
-                if plan:
-                    self.ui.print_ai_plan(plan)
+                rendered_plan = self._compose_user_facing_response(message, reasoning)
+                if rendered_plan:
+                    self.ui.print_ai_plan(rendered_plan)
 
             parameters = ai_response.get("parameters", {})
+            requested_action = str(action)
             action = self._resolve_tool_action(action, message, reasoning, parameters, user_message)
 
-            # Deployment requires explicit user confirmation before execution
-            if ai_response.get("needs_confirmation"):
-                confirmation_prompt = ai_response.get("confirmation_prompt", "Shall I proceed?")
-                prefix = self._compose_user_facing_response(message, reasoning)
-                if prefix:
-                    return f"__CONFIRM__:{prefix}\n\n{confirmation_prompt}"
-                return f"__CONFIRM__:{confirmation_prompt}"
-
             if not action:
+                self.ai_engine.cancel_pending_tool_call(
+                    requested_action,
+                    "Unknown or unsupported tool action",
+                )
                 return self._compose_user_facing_response(message, reasoning)
+
+            is_valid, error_msg = validate_tool_parameters(action, parameters)
+            if not is_valid:
+                feedback = f"Error: tool request rejected by schema validation: {error_msg}"
+                ai_response = self.ai_engine.feed_tool_result(action, feedback)
+                continue
+
+            if action in MUTATING_ACTIONS:
+                try:
+                    plan = self._build_execution_plan(action, parameters, message, reasoning)
+                except (TypeError, ValueError) as exc:
+                    feedback = f"Error: execution plan could not be built: {exc}"
+                    ai_response = self.ai_engine.feed_tool_result(action, feedback)
+                    continue
+
+                validation = self.plan_validator.validate(plan)
+                if not validation.valid:
+                    feedback = self._format_plan_validation_failure(validation.errors)
+                    ai_response = self.ai_engine.feed_tool_result(action, feedback)
+                    continue
+
+                self.approval_manager.request(plan)
+                return f"__CONFIRM__:{self._format_plan_for_confirmation(plan)}"
 
             # Show tool execution in the UI
             self.ui.print_tool_call(action)
@@ -146,14 +199,12 @@ class LabOrchestrator:
             # Execute the tool
             tool_result = self._handle_local_tool(action, parameters)
             if tool_result is None:
-                is_valid, error_msg = validate_tool_parameters(action, parameters)
-                if not is_valid:
-                    return f"I still need more information: {error_msg}"
                 logger.info(f"Executing action: {action} params={parameters}")
                 tool_result = self._execute_action(action, parameters)
                 self._record_deployment(action, parameters, tool_result)
 
             if self._is_failed_tool_result(tool_result):
+                self.ai_engine.record_tool_observation(action, tool_result)
                 return self._compose_failed_tool_response(action, tool_result)
 
             tool_result_for_ai = self._prepare_tool_result_for_ai(action, tool_result)
@@ -162,10 +213,480 @@ class LabOrchestrator:
             self.ui.print_phase("analyzing", "Processing tool results...")
             ai_response = self.ai_engine.feed_tool_result(action, tool_result_for_ai)
 
-        # Fallback: return whatever the AI last said
+        # Close a final native tool call before returning at the bounded loop limit.
+        final_action = str(ai_response.get("action") or "tool")
+        self.ai_engine.cancel_pending_tool_call(
+            final_action,
+            "Maximum tool reasoning rounds reached before execution",
+        )
         return self._compose_user_facing_response(
-            ai_response.get("message") or ai_response.get("content", "Reached maximum reasoning rounds."),
+            ai_response.get("message")
+            or ai_response.get("content", "Reached maximum reasoning rounds."),
             ai_response.get("reasoning", ""),
+        )
+
+    def _handle_pending_confirmation(self, user_message: str) -> str | None:
+        """Handle approval replies before allowing the model to see the next turn."""
+        pending = self.approval_manager.pending
+        if pending is None:
+            return None
+
+        decision = classify_confirmation(user_message)
+        if decision == "reject":
+            cancelled = self.approval_manager.cancel()
+            action = cancelled.action if cancelled else pending.action
+            self.ai_engine.cancel_pending_tool_call(action, "User rejected the pending plan")
+            return f"Cancelled the pending {action.replace('_', ' ')} plan. Nothing was changed."
+
+        if decision != "approve":
+            return (
+                "__CONFIRM__:A plan is already awaiting approval.\n\n"
+                f"{self._format_plan_for_confirmation(pending)}"
+            )
+
+        approved = self.approval_manager.consume(expected_digest=pending.digest)
+        with self._infrastructure_lock():
+            current_validation = self._revalidate_approved_plan(approved)
+            if not current_validation.valid:
+                reason = self._format_plan_validation_failure(current_validation.errors)
+                self.ai_engine.cancel_pending_tool_call(approved.action, reason)
+                return (
+                    "The host changed after this plan was prepared, so execution was blocked.\n\n"
+                    f"{reason}"
+                )
+
+            return self._execute_approved_plan(approved)
+
+    @contextmanager
+    def _infrastructure_lock(self) -> Iterator[None]:
+        """Serialize live revalidation and execution under the scripts' shared lock."""
+        lock_root = Path(
+            os.getenv("SNAP_USER_COMMON")
+            or os.getenv("XDG_RUNTIME_DIR")
+            or os.getenv("TMPDIR")
+            or "/tmp"
+        )
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"canonical-ai-lab-assistant-terraform-{os.getuid()}.lock"
+        with lock_path.open("a+b") as lock_file:
+            self.ui.print_ai_status("Waiting for the infrastructure operation lock...")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            self._infrastructure_lock_fd = lock_file.fileno()
+            try:
+                yield
+            finally:
+                self._infrastructure_lock_fd = None
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _execute_approved_plan(self, plan: ExecutionPlan) -> str:
+        """Execute one exact approved plan, then return the observation to the AI."""
+        self.ui.print_tool_call(plan.action)
+        logger.info(
+            "Executing approved plan: action=%s plan_id=%s params=%s",
+            plan.action,
+            plan.short_id,
+            plan.parameters,
+        )
+        tool_result = self._handle_local_tool(plan.action, plan.parameters)
+        if tool_result is None:
+            tool_result = self._execute_action(plan.action, plan.parameters)
+            self._record_deployment(plan.action, plan.parameters, tool_result)
+
+        self._invalidate_host_state()
+
+        if self._is_failed_tool_result(tool_result):
+            self.ai_engine.record_tool_observation(plan.action, tool_result)
+            return self._compose_failed_tool_response(plan.action, tool_result)
+
+        verification_result = self._verify_mutation_postconditions(plan)
+        tool_result_for_ai = self._prepare_tool_result_for_ai(plan.action, tool_result)
+        if verification_result:
+            tool_result_for_ai = f"{verification_result}\n\n{tool_result_for_ai}"
+        self.ui.print_phase("analyzing", "Verifying and explaining the result...")
+        ai_response = self.ai_engine.feed_tool_result(plan.action, tool_result_for_ai)
+        return self._run_agent_loop(
+            f"Approved plan {plan.short_id} completed for {plan.action}",
+            ai_response,
+        )
+
+    def _build_execution_plan(
+        self,
+        action: str,
+        parameters: dict[str, Any],
+        message: str,
+        reasoning: str,
+    ) -> ExecutionPlan:
+        """Normalize an AI tool call into the exact plan shown and later executed."""
+        resolved = dict(parameters)
+        topology: TopologySpec | None = None
+        capacity: CapacitySnapshot | None = None
+        environment: EnvironmentSnapshot | None = None
+
+        if action == "deploy_microcloud":
+            state = self._collect_host_state(force=True)
+            capacity = self._capacity_snapshot(state)
+            resolved, topology = self._resolve_deployment_parameters(resolved, capacity)
+        elif action in {"add_cluster_node", "scale_environment"}:
+            topology, environment = self._resolve_expansion_plan(action, resolved)
+            state = self._collect_host_state(force=True)
+            capacity = self._capacity_snapshot(state, environment.storage_pool)
+            self._bind_state_guards(resolved, environment)
+        elif action == "delete_environment":
+            workspace = str(resolved.get("workspace", ""))
+            environment = self._workspace_snapshot(workspace, target_nodes=0)
+            self._bind_state_guards(resolved, environment)
+
+        summary = self._compose_user_facing_response(message, reasoning)
+        if not summary:
+            summary = f"Execute {action.replace('_', ' ')}"
+
+        return ExecutionPlan(
+            action=action,
+            parameters=resolved,
+            summary=summary,
+            topology=topology,
+            capacity=capacity,
+            environment=environment,
+        )
+
+    def _resolve_deployment_parameters(
+        self,
+        parameters: dict[str, Any],
+        capacity: CapacitySnapshot,
+    ) -> tuple[dict[str, Any], TopologySpec]:
+        """Resolve every deployment resource field before validation and approval."""
+        resolved = dict(parameters)
+        prefix = str(resolved.get("user_prefix", "lab")).removesuffix("_microcloud")
+        workspace = f"{prefix}_microcloud"
+        if self.cluster_verifier.workspace_exists(workspace):
+            raise ValueError(
+                f"Workspace '{workspace}' already exists. Use add/scale for a supported "
+                "expansion, or delete it before creating a fresh deployment."
+            )
+
+        nodes = int(resolved.get("nodes", 3))
+        sizing_tier = str(resolved.get("sizing_tier", "balanced"))
+        profile = self._tier_to_profile(sizing_tier)
+        sizing_state = {
+            "cpu_cores": capacity.cpu_available,
+            "ram_total_mb": capacity.ram_available_mb,
+            "storage_available_gib": capacity.storage_available_gib,
+        }
+        recommendation = self.sizing_advisor.host_aware_size(
+            host_state=sizing_state,
+            nodes=nodes,
+            profile=profile,
+            residual_capacity=True,
+        )
+
+        resolved.setdefault("scenario", "custom")
+        resolved.setdefault("user_prefix", "lab")
+        resolved["nodes"] = nodes
+        resolved.setdefault("sizing_tier", sizing_tier)
+        resolved.setdefault("node_cpu", recommendation.node_cpu)
+        resolved.setdefault("node_memory_mb", recommendation.node_memory_mb)
+        resolved.setdefault("root_disk_gib", recommendation.root_disk_gb)
+        resolved.setdefault("ceph_disk_gib", recommendation.ceph_disk_gb)
+        resolved.setdefault("ceph_disks_per_node", 1)
+        resolved.setdefault("local_disk_gib", 0)
+
+        topology = TopologySpec(
+            nodes=resolved["nodes"],
+            node_cpu=resolved["node_cpu"],
+            node_memory_mb=resolved["node_memory_mb"],
+            root_disk_gib=resolved["root_disk_gib"],
+            ceph_disk_gib=resolved["ceph_disk_gib"],
+            ceph_disks_per_node=resolved["ceph_disks_per_node"],
+            local_disk_gib=resolved["local_disk_gib"],
+        )
+        return resolved, topology
+
+    def _resolve_expansion_topology(
+        self,
+        action: str,
+        parameters: dict[str, Any],
+    ) -> TopologySpec:
+        """Return only the resource delta for callers that do not need state identity."""
+        topology, _environment = self._resolve_expansion_plan(action, parameters)
+        return topology
+
+    def _resolve_expansion_plan(
+        self,
+        action: str,
+        parameters: dict[str, Any],
+    ) -> tuple[TopologySpec, EnvironmentSnapshot]:
+        """Resolve resource delta and exact current-to-target workspace transition."""
+        workspace = str(parameters.get("workspace", ""))
+        spec = self.cluster_verifier.deployment_spec(workspace)
+        if not spec:
+            raise ValueError(
+                f"Workspace '{workspace}' predates versioned deployment specs. "
+                "Back up anything needed, delete that environment, then create it fresh "
+                "with this version before using add/scale."
+            )
+
+        state = self.cluster_verifier.workspace_state(workspace)
+        if not state:
+            raise ValueError(f"Workspace '{workspace}' has no readable Terraform state identity")
+
+        current_nodes = int(state.get("current_nodes", 0) or 0)
+        spec_nodes = int(spec.get("node_count", 0) or 0)
+        if current_nodes != spec_nodes:
+            raise ValueError(
+                f"Workspace '{workspace}' state is inconsistent: "
+                f"node_names={current_nodes}, deployment_spec.node_count={spec_nodes}"
+            )
+        if action == "add_cluster_node":
+            added_nodes = int(parameters.get("add_nodes", 1))
+            target_nodes = current_nodes + added_nodes
+        else:
+            target_nodes = int(parameters.get("target_nodes", 0))
+            added_nodes = target_nodes - current_nodes
+            if added_nodes <= 0:
+                raise ValueError(
+                    f"Scale target must be greater than the current {current_nodes} nodes; "
+                    "safe downscale is not implemented"
+                )
+
+        if current_nodes + added_nodes > 50:
+            raise ValueError(
+                f"Expansion would create {current_nodes + added_nodes} nodes; "
+                "the supported maximum is 50"
+            )
+
+        topology = TopologySpec(
+            nodes=added_nodes,
+            node_cpu=spec["node_cpu"],
+            node_memory_mb=spec["node_memory_mb"],
+            root_disk_gib=spec["root_disk_gib"],
+            ceph_disk_gib=spec["ceph_disk_gib"],
+            ceph_disks_per_node=spec["ceph_disks_per_node"],
+            local_disk_gib=spec["local_disk_gib"],
+        )
+        environment = EnvironmentSnapshot(
+            workspace=workspace,
+            state_lineage=str(state["state_lineage"]),
+            state_serial=int(state["state_serial"]),
+            current_nodes=current_nodes,
+            target_nodes=target_nodes,
+            storage_pool=str(spec["lxd_storage_pool"]),
+        )
+        return topology, environment
+
+    def _workspace_snapshot(self, workspace: str, target_nodes: int) -> EnvironmentSnapshot:
+        """Read exact workspace identity for a destructive lifecycle plan."""
+        if not self.cluster_verifier.workspace_exists(workspace):
+            raise ValueError(f"Workspace '{workspace}' does not exist")
+        state = self.cluster_verifier.workspace_state(workspace)
+        if not state or not state.get("state_lineage"):
+            raise ValueError(f"Workspace '{workspace}' has no readable Terraform state identity")
+        return EnvironmentSnapshot(
+            workspace=workspace,
+            state_lineage=str(state["state_lineage"]),
+            state_serial=int(state["state_serial"]),
+            current_nodes=int(state["current_nodes"]),
+            target_nodes=target_nodes,
+            storage_pool=str(state.get("storage_pool", "unknown")),
+        )
+
+    @staticmethod
+    def _bind_state_guards(
+        parameters: dict[str, Any],
+        environment: EnvironmentSnapshot,
+    ) -> None:
+        """Pass approval-bound state identity into the executing script."""
+        parameters.update(
+            {
+                "expected_state_lineage": environment.state_lineage,
+                "expected_state_serial": environment.state_serial,
+                "expected_current_nodes": environment.current_nodes,
+                "expected_target_nodes": environment.target_nodes,
+            }
+        )
+
+    def _capacity_snapshot(
+        self,
+        state: dict[str, Any],
+        storage_pool: str | None = None,
+    ) -> CapacitySnapshot:
+        """Calculate conservative residual capacity after active labs and host reserve."""
+        cpu_total = int(state.get("cpu_cores", 0) or 0)
+        cpu_reserved = max(cpu_total // 5, 2) if cpu_total else 0
+        consumed_cpu = int(state.get("consumed_cpu", 0) or 0)
+        cpu_available = max(cpu_total - consumed_cpu - cpu_reserved, 0)
+
+        ram_total_mb = int(state.get("ram_total_mb", 0) or 0)
+        runtime_available_mb = int(state.get("ram_available_mb", 0) or 0)
+        ram_reserved_mb = max(ram_total_mb // 5, 4096) if ram_total_mb else 0
+        consumed_ram_mb = int(state.get("consumed_ram_gb", 0) or 0) * 1024
+        allocation_available_mb = max(ram_total_mb - consumed_ram_mb - ram_reserved_mb, 0)
+        ram_available_mb = min(
+            max(runtime_available_mb - ram_reserved_mb, 0),
+            allocation_available_mb,
+        )
+
+        state_pool = state.get("primary_pool")
+        selected_pool = storage_pool or str(state_pool or "default")
+        if state_pool is None or selected_pool == state_pool:
+            storage_free = int(state.get("storage_available_gib", 0) or 0)
+        else:
+            storage_free = self._get_pool_available_gib(selected_pool)
+        storage_available = max(storage_free - 20, 0)
+
+        return CapacitySnapshot(
+            cpu_available=cpu_available,
+            ram_available_mb=ram_available_mb,
+            storage_available_gib=storage_available,
+            storage_pool=selected_pool,
+        )
+
+    def _revalidate_approved_plan(self, plan: ExecutionPlan):
+        """Re-check identity, geometry, and live capacity immediately before execution."""
+        if plan.environment is not None:
+            try:
+                current_environment = self._workspace_snapshot(
+                    plan.environment.workspace,
+                    target_nodes=plan.environment.target_nodes,
+                )
+            except ValueError as exc:
+                return PlanValidation(valid=False, errors=(str(exc),))
+            if current_environment != plan.environment:
+                return PlanValidation(
+                    valid=False,
+                    errors=(
+                        "The target workspace state identity or node count changed after "
+                        "this plan was prepared; prepare and approve a new plan.",
+                    ),
+                )
+
+        if plan.topology is None:
+            return self.plan_validator.validate(plan)
+
+        if plan.action == "deploy_microcloud":
+            prefix = str(plan.parameters.get("user_prefix", "lab")).removesuffix("_microcloud")
+            workspace = f"{prefix}_microcloud"
+            if self.cluster_verifier.workspace_exists(workspace):
+                return PlanValidation(
+                    valid=False,
+                    errors=(f"Workspace '{workspace}' was created after this plan was prepared.",),
+                )
+
+        if plan.action in {"add_cluster_node", "scale_environment"}:
+            try:
+                current_topology, current_environment = self._resolve_expansion_plan(
+                    plan.action,
+                    plan.parameters,
+                )
+            except ValueError as exc:
+                return PlanValidation(valid=False, errors=(str(exc),))
+            if current_topology != plan.topology or current_environment != plan.environment:
+                return PlanValidation(
+                    valid=False,
+                    errors=(
+                        "The target workspace geometry changed after this plan was prepared; "
+                        "prepare and approve a new plan.",
+                    ),
+                )
+
+        current_state = self._collect_host_state(force=True)
+        storage_pool = plan.capacity.storage_pool if plan.capacity else None
+        current_plan = plan.model_copy(
+            update={"capacity": self._capacity_snapshot(current_state, storage_pool)}
+        )
+        return self.plan_validator.validate(current_plan)
+
+    def _format_plan_for_confirmation(self, plan: ExecutionPlan) -> str:
+        """Render the exact immutable plan the user is being asked to approve."""
+        lines = [plan.summary, "", f"Plan ID: {plan.short_id}", f"Action: {plan.action}"]
+        workspace = str(plan.parameters.get("workspace", "")).strip()
+        if plan.action == "deploy_microcloud":
+            prefix = str(plan.parameters.get("user_prefix", "lab")).removesuffix("_microcloud")
+            workspace = f"{prefix}_microcloud"
+        if workspace:
+            lines.append(f"Environment: {workspace}")
+        if plan.environment is not None:
+            environment = plan.environment
+            lines.extend(
+                [
+                    "State identity: "
+                    f"lineage={environment.state_lineage[:12]}... / "
+                    f"serial={environment.state_serial}",
+                    f"Node transition: {environment.current_nodes} -> {environment.target_nodes}",
+                    f"Storage pool: {environment.storage_pool}",
+                ]
+            )
+
+        if plan.topology is not None:
+            topology = plan.topology
+            node_label = "Nodes"
+            if plan.action in {"add_cluster_node", "scale_environment"}:
+                node_label = "New nodes (resource delta)"
+            lines.extend(
+                [
+                    f"{node_label}: {topology.nodes}",
+                    "Per node: "
+                    f"{topology.node_cpu} vCPU / {topology.node_memory_mb // 1024} GiB RAM / "
+                    f"{topology.root_disk_gib} GiB root",
+                    "Storage per node: "
+                    f"{topology.ceph_disks_per_node} x {topology.ceph_disk_gib} GiB Ceph / "
+                    f"{topology.local_disk_gib} GiB local",
+                    "Totals: "
+                    f"{topology.total_cpu} vCPU / {topology.total_ram_mb // 1024} GiB RAM / "
+                    f"{topology.total_storage_gib} GiB storage",
+                ]
+            )
+        if plan.capacity is not None and plan.environment is None:
+            lines.append(f"Storage pool: {plan.capacity.storage_pool}")
+        visible_params = ", ".join(
+            f"{key}={value}" for key, value in sorted(plan.parameters.items())
+        )
+        if visible_params:
+            lines.append(f"Exact parameters: {visible_params}")
+        lines.extend(["", "Approve this exact plan?"])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_plan_validation_failure(errors: tuple[str, ...]) -> str:
+        details = "\n".join(f"- {error}" for error in errors)
+        return f"Error: the proposed plan was rejected by deterministic validation:\n{details}"
+
+    def _invalidate_host_state(self) -> None:
+        self._host_state_cache = None
+        self._host_state_cache_ts = 0.0
+
+    def _verify_mutation_postconditions(self, plan: ExecutionPlan) -> str:
+        """Return structured evidence after operations that should form a cluster."""
+        if plan.action not in {
+            "deploy_microcloud",
+            "add_cluster_node",
+            "scale_environment",
+        }:
+            return ""
+
+        if plan.action == "deploy_microcloud":
+            prefix = str(plan.parameters.get("user_prefix", "lab")).removesuffix("_microcloud")
+            workspace = f"{prefix}_microcloud"
+        else:
+            workspace = str(plan.parameters.get("workspace", ""))
+
+        expected_nodes = None
+        if plan.action == "deploy_microcloud" and plan.topology is not None:
+            expected_nodes = plan.topology.nodes
+        if plan.environment is not None:
+            expected_nodes = plan.environment.target_nodes
+        expected_osds = None
+        if expected_nodes is not None and plan.topology is not None:
+            expected_osds = expected_nodes * plan.topology.ceph_disks_per_node
+        report = self.cluster_verifier.verify(
+            workspace,
+            expected_nodes=expected_nodes,
+            expected_osds=expected_osds,
+        )
+        return (
+            f"POSTCONDITION STATUS: {report.status}\n"
+            "The script finished, but only this report determines whether the "
+            "requested cluster state was achieved.\n"
+            f"{report.as_tool_result()}"
         )
 
     def _refresh_ai_environment_context(self) -> None:
@@ -183,12 +704,22 @@ class LabOrchestrator:
         """Detect hard failures from script-backed tools."""
         if not tool_result:
             return False
-        return tool_result.startswith("Script failed") or tool_result.startswith("Error:") or "Traceback" in tool_result
+        return (
+            tool_result.startswith("Script failed")
+            or tool_result.startswith("Error:")
+            or "Traceback" in tool_result
+        )
 
     def _compose_failed_tool_response(self, action: str, tool_result: str) -> str:
         """Return a deterministic failure summary so we never imply background work continues."""
         summary = self._truncate_text(tool_result.strip(), 1200)
-        if action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"):
+        if action in (
+            "deploy_microcloud",
+            "delete_environment",
+            "scale_environment",
+            "add_cluster_node",
+            "verify_cluster_health",
+        ):
             return (
                 f"{action.replace('_', ' ').capitalize()} failed. No background work is running.\n\n"
                 f"Last error:\n{summary}"
@@ -204,13 +735,17 @@ class LabOrchestrator:
         user_input: str,
     ) -> str | None:
         """Normalize generic tool labels back to a concrete tool name when possible."""
-        known_tools = {tool["name"] for tool in get_tool_definitions().get("tools", []) if tool.get("name")}
+        known_tools = {
+            tool["name"] for tool in get_tool_definitions().get("tools", []) if tool.get("name")
+        }
         if action in known_tools:
             return action
 
         text = "\n".join(part for part in (user_input, message, reasoning) if part).lower()
 
-        if any(keyword in text for keyword in ("delete", "cleanup", "clean up", "destroy", "remove")):
+        if any(
+            keyword in text for keyword in ("delete", "cleanup", "clean up", "destroy", "remove")
+        ):
             return "delete_environment"
         if any(keyword in text for keyword in ("list", "show", "enumerate")) and any(
             keyword in text for keyword in ("lab", "environment", "environments", "labs")
@@ -218,9 +753,22 @@ class LabOrchestrator:
             return "list_environments"
         if any(keyword in text for keyword in ("health", "status", "check", "verify")):
             return "verify_cluster_health"
-        if any(keyword in text for keyword in ("add node", "add nodes", "join node", "join nodes", "expand cluster")):
+        if any(
+            keyword in text
+            for keyword in ("add node", "add nodes", "join node", "join nodes", "expand cluster")
+        ):
             return "add_cluster_node"
-        if any(keyword in text for keyword in ("scale", "resize", "increase nodes", "more nodes", "re-deploy", "redeploy")):
+        if any(
+            keyword in text
+            for keyword in (
+                "scale",
+                "resize",
+                "increase nodes",
+                "more nodes",
+                "re-deploy",
+                "redeploy",
+            )
+        ):
             return "scale_environment"
 
         workspace_hint = parameters.get("workspace") if isinstance(parameters, dict) else None
@@ -242,10 +790,7 @@ class LabOrchestrator:
             short_reasoning = self._truncate_text(clean_reasoning, 320)
             return f"Plan: {short_reasoning}"
 
-        return (
-            "I received an empty response from the inference backend. "
-            "Please retry your request."
-        )
+        return "I received an empty response from the inference backend. Please retry your request."
 
     def _normalize_assistant_text(self, text: str) -> str:
         """Remove noisy fragments and repeated blocks from model output."""
@@ -324,7 +869,7 @@ class LabOrchestrator:
 
         # Handle confirmation flow
         if response.startswith("__CONFIRM__:"):
-            parts = response[len("__CONFIRM__:"):].rsplit("\n\n", 1)
+            parts = response[len("__CONFIRM__:") :].rsplit("\n\n", 1)
             message = parts[0] if len(parts) > 1 else ""
             prompt = parts[-1] if parts else "Shall I proceed?"
             self.ui.print_confirmation_prompt(message, prompt)
@@ -433,7 +978,7 @@ class LabOrchestrator:
         widths = [max(len(row[col]) for row in rows) for col in range(col_count)]
 
         def render_row(row: list[str]) -> str:
-            cols = [f" {row[i].ljust(widths[i]) } " for i in range(col_count)]
+            cols = [f" {row[i].ljust(widths[i])} " for i in range(col_count)]
             return "|" + "|".join(cols) + "|"
 
         sep = "+" + "+".join(["-" * (w + 2) for w in widths]) + "+"
@@ -448,22 +993,47 @@ class LabOrchestrator:
         if action == "inspect_host_environment":
             return self._inspect_host_environment()
 
+        if action == "verify_cluster_health":
+            workspace = str(parameters.get("workspace", ""))
+            report = self.cluster_verifier.verify(workspace)
+            return f"POSTCONDITION STATUS: {report.status}\n{report.as_tool_result()}"
+
         if action == "propose_custom_topology":
             nodes = int(parameters.get("node_count", 3))
             cpu = int(parameters.get("node_cpu", 2))
             ram = int(parameters.get("node_ram_gb", 8))
             root = int(parameters.get("root_disk_gb", 40))
             ceph = int(parameters.get("ceph_disk_gb", 50))
-            ovn = bool(parameters.get("use_ovn", True))
-            replication = int(parameters.get("ceph_replication_factor", 3))
             reasoning = parameters.get("reasoning", "")
             trade_offs = parameters.get("trade_offs", "")
             alternative = parameters.get("alternative", "")
 
+            state = self._collect_host_state()
+            capacity = self._capacity_snapshot(state)
+            topology = TopologySpec(
+                nodes=nodes,
+                node_cpu=cpu,
+                node_memory_mb=ram * 1024,
+                root_disk_gib=root,
+                ceph_disk_gib=ceph,
+                ceph_disks_per_node=1,
+                local_disk_gib=0,
+            )
+            proposal_plan = ExecutionPlan(
+                action="deploy_microcloud",
+                parameters={"nodes": nodes},
+                summary="Validate topology proposal",
+                topology=topology,
+                capacity=capacity,
+            )
+            validation = self.plan_validator.validate(proposal_plan)
+            if not validation.valid:
+                return self._format_plan_validation_failure(validation.errors)
+
             total_cpu = nodes * cpu
             total_ram = nodes * ram
             total_ceph_raw = nodes * ceph
-            total_ceph_usable = int(total_ceph_raw / max(replication, 1))
+            total_ceph_usable = int(total_ceph_raw / 3)
 
             lines = [
                 "Custom topology proposal",
@@ -473,8 +1043,8 @@ class LabOrchestrator:
                 f"  RAM / node       : {ram} GB (total: {total_ram} GB)",
                 f"  Root disk / node : {root} GB",
                 f"  Ceph disk / node : {ceph} GB",
-                f"  Ceph capacity    : ~{total_ceph_usable} GB usable ({total_ceph_raw} GB raw, replication {replication}x)",
-                f"  OVN networking   : {'enabled' if ovn else 'disabled (explicit opt-out)'}",
+                f"  Ceph capacity    : ~{total_ceph_usable} GB usable ({total_ceph_raw} GB raw, estimated 3x replication)",
+                "  OVN networking   : enabled (required by this automation)",
             ]
             if reasoning:
                 lines += ["", "Why:", f"  {reasoning}"]
@@ -486,7 +1056,8 @@ class LabOrchestrator:
 
         if action == "get_sizing_recommendation":
             scenario_name = parameters.get("scenario", "custom")
-            nodes = parameters.get("nodes")
+            nodes_value = parameters.get("nodes")
+            requested_nodes = int(nodes_value) if nodes_value is not None else None
             workload = parameters.get("workload_description", "")
             tier_str = parameters.get("tier")
             tier = SizingTier(tier_str) if tier_str else None
@@ -496,16 +1067,22 @@ class LabOrchestrator:
             host_state = self._collect_host_state()
             if host_state.get("cpu_cores"):
                 profile = self._tier_to_profile(tier_str, workload)
+                capacity = self._capacity_snapshot(host_state)
                 host_sizing = self.sizing_advisor.host_aware_size(
-                    host_state=host_state,
-                    nodes=int(nodes) if nodes else 3,
+                    host_state={
+                        "cpu_cores": capacity.cpu_available,
+                        "ram_total_mb": capacity.ram_available_mb,
+                        "storage_available_gib": capacity.storage_available_gib,
+                    },
+                    nodes=requested_nodes or 3,
                     profile=profile,
+                    residual_capacity=True,
                 )
                 return host_sizing.summary()
 
             rec = self.sizing_advisor.recommend(
                 scenario_name=scenario_name,
-                nodes=nodes,
+                nodes=requested_nodes,
                 workload_description=workload,
                 override_tier=tier,
             )
@@ -522,7 +1099,10 @@ class LabOrchestrator:
                 return f"Could not fetch documentation: {doc['error']}"
             title = doc.get("title", topic)
             content = doc.get("content", "")
-            return f"Doc: {title}\nSource: {doc['url']}\n\n{content[:2500]}"
+            fetched_at = doc.get("fetched_at", "unknown")
+            return (
+                f"Doc: {title}\nSource: {doc['url']}\nRetrieved: {fetched_at}\n\n{content[:6000]}"
+            )
 
         return None
 
@@ -566,24 +1146,26 @@ class LabOrchestrator:
             default=0,
         )
         ram_available_mb = self._parse_int(
-            self._run_host_cmd("awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null"),
+            self._run_host_cmd(
+                "awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null"
+            ),
             default=0,
         )
         disks = self._run_host_cmd(
-            "lsblk -dn -o NAME,SIZE,TYPE | awk '$3==\"disk\" {print $1\":\"$2}' | paste -sd ', ' -"
+            "lsblk -dn -o NAME,SIZE,TYPE | awk '$3==\"disk\" {print $1\":\"$2}' | paste -sd ',' -"
         )
         networks_raw = self._run_host_cmd(
-            "lxc network list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -"
+            "lxc network list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ',' -"
         )
         pools_raw = self._run_host_cmd(
-            "lxc storage list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ', ' -"
+            "lxc storage list --format csv 2>/dev/null | awk -F',' '{print $1}' | paste -sd ',' -"
         )
         lxd_version = self._run_host_cmd(
             "lxc version 2>/dev/null | awk '/Server version:/ {print $3; exit}'"
         )
 
         pools = [p.strip() for p in pools_raw.split(",") if p.strip()] if pools_raw else []
-        primary_pool = pools[0] if pools else "default"
+        primary_pool = "default" if "default" in pools else (pools[0] if pools else "default")
         storage_available_gib = self._get_pool_available_gib(primary_pool)
         environments = self._collect_environment_usage()
 
@@ -629,7 +1211,9 @@ class LabOrchestrator:
                     return int(num)
                 if unit.startswith("M"):
                     return int(num / 1024)
-        df_out = self._run_host_cmd("df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'")
+        df_out = self._run_host_cmd(
+            "df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'"
+        )
         return self._parse_int(df_out, default=0)
 
     def _collect_environment_usage(self) -> list[dict[str, Any]]:
@@ -659,8 +1243,14 @@ class LabOrchestrator:
 
             env = groups.setdefault(
                 prefix,
-                {"name": prefix, "nodes": 0, "node_cpu": cpu, "node_ram_gb": ram_gb,
-                 "total_cpu": 0, "total_ram_gb": 0},
+                {
+                    "name": prefix,
+                    "nodes": 0,
+                    "node_cpu": cpu,
+                    "node_ram_gb": ram_gb,
+                    "total_cpu": 0,
+                    "total_ram_gb": 0,
+                },
             )
             env["nodes"] += 1
             env["total_cpu"] += cpu
@@ -682,7 +1272,8 @@ class LabOrchestrator:
         if not num_match:
             return 0
         num = float(num_match.group(0))
-        unit = (re.search(r"[A-Za-z]+", value).group(0) if re.search(r"[A-Za-z]+", value) else "GiB").upper()
+        unit_match = re.search(r"[A-Za-z]+", value)
+        unit = (unit_match.group(0) if unit_match else "GiB").upper()
         if unit.startswith("T"):
             return int(num * 1024)
         if unit.startswith("M"):
@@ -695,9 +1286,23 @@ class LabOrchestrator:
     def _tier_to_profile(tier_str: str | None, workload: str = "") -> str:
         """Map a requested tier/workload to a host-aware sizing profile."""
         text = f"{tier_str or ''} {workload or ''}".lower()
-        if any(k in text for k in ("minimal", "poc", "proof of concept", "dev", "sandbox", "conservative")):
+        if any(
+            k in text
+            for k in ("minimal", "poc", "proof of concept", "dev", "sandbox", "conservative")
+        ):
             return "conservative"
-        if any(k in text for k in ("large", "production", "prod", "performance", "ha", "high availability", "enterprise")):
+        if any(
+            k in text
+            for k in (
+                "large",
+                "production",
+                "prod",
+                "performance",
+                "ha",
+                "high availability",
+                "enterprise",
+            )
+        ):
             return "performance"
         return "balanced"
 
@@ -739,7 +1344,6 @@ class LabOrchestrator:
         pool = state.get("primary_pool", "default")
         free_storage = state.get("storage_available_gib", 0)
         consumed_cpu = state.get("consumed_cpu", 0)
-        consumed_ram = state.get("consumed_ram_gb", 0)
         free_cpu = max(cpu - consumed_cpu, 0)
         free_ram = max(ram_avail_gb, 0)
 
@@ -771,21 +1375,41 @@ class LabOrchestrator:
         "prep_host": set(),
         "install_inference_snap": {"engine"},
         "deploy_microcloud": {
-            "scenario", "nodes", "sizing_tier", "node_cpu", "node_memory_mb",
-            "root_disk_gib", "ceph_disk_gib", "ceph_disks_per_node", "local_disk_gib",
-            "user_prefix", "ssh_key", "network_interface", "ovn_uplink_interface", "ceph_osd_disk",
+            "scenario",
+            "nodes",
+            "sizing_tier",
+            "node_cpu",
+            "node_memory_mb",
+            "root_disk_gib",
+            "ceph_disk_gib",
+            "ceph_disks_per_node",
+            "local_disk_gib",
+            "user_prefix",
+            "ssh_key",
         },
-        "delete_environment": {"workspace"},
+        "delete_environment": {
+            "workspace",
+            "expected_state_lineage",
+            "expected_state_serial",
+            "expected_current_nodes",
+            "expected_target_nodes",
+        },
         "list_environments": set(),
         "scale_environment": {
-            "workspace", "target_nodes", "sizing_tier", "node_cpu",
-            "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
-            "ceph_disks_per_node", "local_disk_gib",
+            "workspace",
+            "target_nodes",
+            "expected_state_lineage",
+            "expected_state_serial",
+            "expected_current_nodes",
+            "expected_target_nodes",
         },
         "add_cluster_node": {
-            "workspace", "add_nodes", "sizing_tier", "node_cpu",
-            "node_memory_mb", "root_disk_gib", "ceph_disk_gib",
-            "ceph_disks_per_node", "local_disk_gib",
+            "workspace",
+            "add_nodes",
+            "expected_state_lineage",
+            "expected_state_serial",
+            "expected_current_nodes",
+            "expected_target_nodes",
         },
         "verify_cluster_health": {"workspace"},
     }
@@ -819,11 +1443,22 @@ class LabOrchestrator:
                     value = value.removesuffix("_microcloud")
                 cmd.append(f"--{key.replace('_', '-')}={value}")
 
-            if action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node"):
+            if action in (
+                "deploy_microcloud",
+                "delete_environment",
+                "scale_environment",
+                "add_cluster_node",
+            ):
                 cmd.append("--auto-approve")
 
             logger.info(f"Running: {' '.join(cmd)}")
-            capture_only = (action in ("deploy_microcloud", "delete_environment", "scale_environment", "add_cluster_node", "verify_cluster_health"))
+            capture_only = action in (
+                "deploy_microcloud",
+                "delete_environment",
+                "scale_environment",
+                "add_cluster_node",
+                "verify_cluster_health",
+            )
             output_lines: list[str] = []
             status_label = {
                 "deploy_microcloud": "Deployment",
@@ -836,57 +1471,113 @@ class LabOrchestrator:
             if capture_only:
                 self.ui.print_operation_progress(status_label, "Started — streaming checkpoints...")
 
+            operation_started = time.monotonic()
+            operation_timed_out = False
+            child_env = os.environ.copy()
+            inherited_fds: tuple[int, ...] = ()
+            if self._infrastructure_lock_fd is not None:
+                child_env["LAB_AI_TERRAFORM_LOCK_FD"] = str(self._infrastructure_lock_fd)
+                inherited_fds = (self._infrastructure_lock_fd,)
             with subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
                 cwd=self.config.repo_root,
+                start_new_session=True,
+                env=child_env,
+                pass_fds=inherited_fds,
             ) as proc:
                 assert proc.stdout is not None
-                if not capture_only:
-                    for line in proc.stdout:
-                        print(line, end="", flush=True)
-                        output_lines.append(line)
-                else:
-                    milestone_pattern = re.compile(
-                        r"\[INFO\]|\[WARN\]|\[ERROR\]|\[SUCCESS\]|"
-                        r"Apply complete|Destroy complete|PLAY RECAP|TASK \[",
-                        flags=re.IGNORECASE,
-                    )
+                output_fd = proc.stdout.fileno()
+                os.set_blocking(output_fd, False)
+                milestone_pattern = re.compile(
+                    r"\[INFO\]|\[WARN\]|\[ERROR\]|\[SUCCESS\]|"
+                    r"Apply complete|Destroy complete|PLAY RECAP|TASK \[",
+                    flags=re.IGNORECASE,
+                )
 
-                    while True:
-                        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
-                        if ready:
-                            line = proc.stdout.readline()
-                            if line:
-                                output_lines.append(line)
-                                if milestone_pattern.search(line):
-                                    self.ui.print_operation_progress(
-                                        status_label, line.strip()
-                                    )
+                while True:
+                    ready, _, _ = select.select([output_fd], [], [], 0.5)
+                    if ready:
+                        try:
+                            chunk = os.read(output_fd, 65536)
+                        except BlockingIOError:
+                            chunk = b""
+                        if chunk:
+                            text_chunk = chunk.decode("utf-8", errors="replace")
+                            output_lines.append(text_chunk)
+                            if capture_only:
+                                for line in text_chunk.splitlines():
+                                    if milestone_pattern.search(line):
+                                        self.ui.print_operation_progress(
+                                            status_label,
+                                            line.strip(),
+                                        )
+                            else:
+                                print(text_chunk, end="", flush=True)
 
-                        if proc.poll() is not None:
-                            break
+                    if time.monotonic() - operation_started > self.config.operation_timeout:
+                        operation_timed_out = True
+                        self._terminate_process_group(proc)
+                        break
 
-                    tail = proc.stdout.read()
-                    if tail:
-                        output_lines.append(tail)
+                    if proc.poll() is not None:
+                        break
+
+                while True:
+                    try:
+                        tail = os.read(output_fd, 65536)
+                    except BlockingIOError:
+                        break
+                    if not tail:
+                        break
+                    output_lines.append(tail.decode("utf-8", errors="replace"))
 
                 proc.wait()
             if capture_only:
                 self.ui.print_phase("done", f"{status_label} finished")
 
             output = "".join(output_lines)
+            if operation_timed_out:
+                return (
+                    f"Error: {status_label} timed out after "
+                    f"{self.config.operation_timeout} seconds.\n{output[-2000:]}"
+                )
             if proc.returncode != 0:
                 return f"Script failed (exit {proc.returncode}):\n{output[-2000:]}"
             return output or "(no output)"
 
-        except subprocess.TimeoutExpired:
-            return "Action timed out."
         except Exception as exc:
             logger.error(f"Action execution error: {exc}")
             return f"Error: {exc}"
+
+    @staticmethod
+    def _terminate_process_group(proc: subprocess.Popen[bytes]) -> None:
+        """Terminate an operation and every child process it started."""
+        group_id = proc.pid
+        try:
+            os.killpg(group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group_id, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.killpg(group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     def _run_script(self, script_path) -> str:
         result = subprocess.run(
@@ -905,7 +1596,7 @@ class LabOrchestrator:
             "timestamp": datetime.now().isoformat(),
             "action": action,
             "parameters": parameters,
-            "success": "failed" not in result.lower(),
+            "success": not self._is_failed_tool_result(result),
             "result_preview": result[:200],
         }
         self.deployment_history.append(record)

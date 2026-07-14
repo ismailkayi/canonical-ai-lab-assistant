@@ -38,9 +38,13 @@ NODE_CPU=""
 NODE_MEMORY_MB=""
 ROOT_DISK_GIB=""
 CEPH_DISK_GIB=""
-CEPH_DISKS_PER_NODE=1
-LOCAL_DISK_GIB=0
+CEPH_DISKS_PER_NODE=""
+LOCAL_DISK_GIB=""
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
+EXPECTED_STATE_LINEAGE=""
+EXPECTED_STATE_SERIAL=""
+EXPECTED_CURRENT_NODES=""
+EXPECTED_TARGET_NODES=""
 
 # -----------------------------------------------------------------------
 # Argument parsing
@@ -57,6 +61,10 @@ for arg in "$@"; do
         --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
         --local-disk-gib=*)     LOCAL_DISK_GIB="${arg#*=}" ;;
         --ssh-key=*)            SSH_KEY_PATH="${arg#*=}" ;;
+        --expected-state-lineage=*) EXPECTED_STATE_LINEAGE="${arg#*=}" ;;
+        --expected-state-serial=*) EXPECTED_STATE_SERIAL="${arg#*=}" ;;
+        --expected-current-nodes=*) EXPECTED_CURRENT_NODES="${arg#*=}" ;;
+        --expected-target-nodes=*) EXPECTED_TARGET_NODES="${arg#*=}" ;;
         --auto-approve)         : ;;  # accepted but no-op (always auto)
         *) log_error "Unknown argument: ${arg}"; exit 1 ;;
     esac
@@ -65,6 +73,15 @@ done
 if [[ -z "${WORKSPACE}" ]]; then
     log_error "Usage: $0 --workspace=<name> --add-nodes=<N>"
     exit 1
+fi
+if ! [[ "${ADD_NODES}" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "add-nodes must be a positive integer"
+    exit 1
+fi
+if [[ -z "${EXPECTED_STATE_LINEAGE}" || -z "${EXPECTED_STATE_SERIAL}" \
+            || -z "${EXPECTED_CURRENT_NODES}" || -z "${EXPECTED_TARGET_NODES}" ]]; then
+        log_error "Missing approval-bound Terraform state identity/count parameters"
+        exit 1
 fi
 
 # -----------------------------------------------------------------------
@@ -81,19 +98,21 @@ INITIATOR_NODE="${LXD_PREFIX}-node-1"
 # -----------------------------------------------------------------------
 # Tool checks
 # -----------------------------------------------------------------------
-for tool in tofu ansible lxc; do
+for tool in tofu ansible lxc flock; do
     command -v "${tool}" &>/dev/null || { log_error "${tool} not found"; exit 1; }
 done
 
-# -----------------------------------------------------------------------
-# SSH key
-# -----------------------------------------------------------------------
-if [[ ! -f "${SSH_KEY_PATH}" ]]; then
-    log_info "Generating SSH key at ${SSH_KEY_PATH} ..."
-    ssh-keygen -t rsa -b 4096 -f "${SSH_KEY_PATH}" -N "" -q
+LOCK_ROOT="${SNAP_USER_COMMON:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
+mkdir -p "${LOCK_ROOT}"
+TERRAFORM_LOCK_FILE="${LOCK_ROOT}/canonical-ai-lab-assistant-terraform-${UID}.lock"
+if [[ -n "${LAB_AI_TERRAFORM_LOCK_FD:-}" \
+      && -e "/proc/$$/fd/${LAB_AI_TERRAFORM_LOCK_FD}" ]]; then
+    log_info "Using inherited infrastructure operation lock"
+else
+    exec 9>"${TERRAFORM_LOCK_FILE}"
+    log_info "Waiting for exclusive infrastructure operation lock..."
+    flock -x 9
 fi
-export TF_VAR_ssh_public_key
-TF_VAR_ssh_public_key="$(cat "${SSH_KEY_PATH}.pub")"
 
 # -----------------------------------------------------------------------
 # Verify workspace exists
@@ -107,6 +126,59 @@ if ! tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE}"; then
 fi
 tofu workspace select "${WORKSPACE}" >/dev/null 2>&1
 
+STATE_IDENTITY=$(tofu state pull)
+ACTUAL_STATE_LINEAGE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["lineage"])' <<< "${STATE_IDENTITY}")
+ACTUAL_STATE_SERIAL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["serial"])' <<< "${STATE_IDENTITY}")
+if [[ "${ACTUAL_STATE_LINEAGE}" != "${EXPECTED_STATE_LINEAGE}" \
+            || "${ACTUAL_STATE_SERIAL}" != "${EXPECTED_STATE_SERIAL}" ]]; then
+        log_error "Terraform state changed after approval; prepare and approve a new plan"
+        exit 1
+fi
+
+# Read the exact geometry saved by the original deployment. Lifecycle operations
+# must never reconstruct existing topology from defaults because that can replace
+# disks or resize all current nodes during the count change.
+DEPLOYMENT_SPEC_JSON=$(tofu output -json deployment_spec 2>/dev/null || true)
+if [[ -z "${DEPLOYMENT_SPEC_JSON}" || "${DEPLOYMENT_SPEC_JSON}" == "null" ]]; then
+    log_error "Workspace '${WORKSPACE}' predates versioned deployment specs."
+    log_error "Back up anything needed, delete it, then create it fresh with the current version before adding nodes."
+    exit 1
+fi
+
+spec_value() {
+    local key="$1"
+    python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' \
+        "${key}" <<< "${DEPLOYMENT_SPEC_JSON}"
+}
+
+spec_value_optional() {
+    local key="$1"
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' \
+        "${key}" <<< "${DEPLOYMENT_SPEC_JSON}"
+}
+
+SPEC_USER_PREFIX=$(spec_value user_prefix)
+SPEC_UBUNTU_IMAGE=$(spec_value ubuntu_image)
+SPEC_LXD_NETWORK=$(spec_value lxd_network_name)
+SPEC_LXD_POOL=$(spec_value lxd_storage_pool)
+SPEC_SSH_PUBLIC_KEY=$(spec_value_optional ssh_public_key)
+SPEC_NODE_COUNT=$(spec_value node_count)
+SPEC_NODE_CPU=$(spec_value node_cpu)
+SPEC_NODE_MEMORY_MB=$(spec_value node_memory_mb)
+SPEC_ROOT_DISK_GIB=$(spec_value root_disk_gib)
+SPEC_CEPH_DISK_GIB=$(spec_value ceph_disk_gib)
+SPEC_CEPH_DISKS_PER_NODE=$(spec_value ceph_disks_per_node)
+SPEC_LOCAL_DISK_GIB=$(spec_value local_disk_gib)
+
+if [[ -z "${SPEC_SSH_PUBLIC_KEY}" ]]; then
+    SPEC_SSH_PUBLIC_KEY=$(lxc config get "${INITIATOR_NODE}" user.user-data 2>/dev/null \
+        | awk '/^[[:space:]]*-[[:space:]]+ssh-/ {sub(/^[[:space:]]*-[[:space:]]+/, ""); print; exit}')
+fi
+if [[ -z "${SPEC_SSH_PUBLIC_KEY}" ]]; then
+    log_error "Could not recover the existing cluster SSH public key; refusing to authorize a different key on new nodes"
+    exit 1
+fi
+
 # -----------------------------------------------------------------------
 # Get current node count from Terraform state
 # -----------------------------------------------------------------------
@@ -115,8 +187,24 @@ if [[ "${CURRENT_NODES}" -eq 0 ]]; then
     log_error "Could not determine current node count from Terraform state"
     exit 1
 fi
+if [[ "${CURRENT_NODES}" != "${EXPECTED_CURRENT_NODES}" ]]; then
+    log_error "Current node count changed after approval: expected ${EXPECTED_CURRENT_NODES}, found ${CURRENT_NODES}"
+    exit 1
+fi
+if [[ "${CURRENT_NODES}" -ne "${SPEC_NODE_COUNT}" ]]; then
+    log_error "Terraform state is inconsistent: node_names=${CURRENT_NODES}, deployment_spec.node_count=${SPEC_NODE_COUNT}"
+    exit 1
+fi
 
 NEW_TOTAL=$(( CURRENT_NODES + ADD_NODES ))
+if [[ "${NEW_TOTAL}" != "${EXPECTED_TARGET_NODES}" ]]; then
+    log_error "Target node count differs from the approved plan: expected ${EXPECTED_TARGET_NODES}, calculated ${NEW_TOTAL}"
+    exit 1
+fi
+if (( NEW_TOTAL > 50 )); then
+    log_error "Target cluster size ${NEW_TOTAL} exceeds the supported maximum of 50 nodes"
+    exit 1
+fi
 
 # Even cluster sizes are supported; odd voter counts are often preferred for quorum behavior.
 if (( NEW_TOTAL % 2 == 0 )); then
@@ -126,44 +214,38 @@ fi
 log_info "Current nodes: ${CURRENT_NODES}  →  New total: ${NEW_TOTAL}"
 
 # -----------------------------------------------------------------------
-# Detect LXD defaults (network + storage pool)
+# Enforce immutable existing geometry
 # -----------------------------------------------------------------------
-get_lxd_network() {
-    local name ipv4
-    while IFS= read -r name; do
-        [[ -z "${name}" ]] && continue
-        local type; type=$(lxc network show "${name}" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
-        [[ "${type}" != "bridge" ]] && continue
-        ipv4=$(lxc network get "${name}" ipv4.address 2>/dev/null || true)
-        if [[ -n "${ipv4}" && "${ipv4}" != "none" ]]; then echo "${name}"; return; fi
-    done < <(lxc network list --format csv | awk -F',' 'NF>0 {print $1}')
-    echo "lxdbr0"
+assert_matches_spec() {
+    local label="$1" requested="$2" actual="$3"
+    if [[ -n "${requested}" && "${requested}" != "${actual}" ]]; then
+        log_error "${label} override (${requested}) differs from existing deployment (${actual}). Adding nodes cannot resize existing resources."
+        exit 1
+    fi
 }
 
-get_lxd_pool() {
-    lxc storage show default &>/dev/null && echo "default" && return
-    lxc storage list --format csv | awk -F',' 'NR==1 {print $1}'
-}
-
-export TF_VAR_lxd_network_name; TF_VAR_lxd_network_name="$(get_lxd_network)"
-export TF_VAR_lxd_storage_pool; TF_VAR_lxd_storage_pool="$(get_lxd_pool)"
-
-# -----------------------------------------------------------------------
-# Auto-size new nodes if not specified
-# -----------------------------------------------------------------------
-if [[ -z "${NODE_CPU}" || -z "${NODE_MEMORY_MB}" || -z "${ROOT_DISK_GIB}" || -z "${CEPH_DISK_GIB}" ]]; then
-    # Re-use sizing from existing nodes if possible
-    log_info "Inheriting sizing from existing cluster node..."
-    EXISTING_CPU=$(lxc config show "${INITIATOR_NODE}" 2>/dev/null | awk '/limits.cpu:/ {print $2}' || echo "2")
-    EXISTING_MEM=$(lxc config show "${INITIATOR_NODE}" 2>/dev/null | awk '/limits.memory:/ {gsub(/MiB/,"",$2); print $2}' || echo "4096")
-    NODE_CPU="${NODE_CPU:-${EXISTING_CPU:-2}}"
-    NODE_MEMORY_MB="${NODE_MEMORY_MB:-${EXISTING_MEM:-4096}}"
-    ROOT_DISK_GIB="${ROOT_DISK_GIB:-40}"
-    CEPH_DISK_GIB="${CEPH_DISK_GIB:-50}"
+if [[ -n "${SIZING_TIER}" ]]; then
+    log_error "sizing-tier cannot be changed while adding nodes; existing deployment geometry is immutable"
+    exit 1
 fi
 
-# Derive user_prefix from workspace name (strip _microcloud suffix)
-USER_PREFIX="${WORKSPACE%_microcloud}"
+assert_matches_spec "node-cpu" "${NODE_CPU}" "${SPEC_NODE_CPU}"
+assert_matches_spec "node-memory-mb" "${NODE_MEMORY_MB}" "${SPEC_NODE_MEMORY_MB}"
+assert_matches_spec "root-disk-gib" "${ROOT_DISK_GIB}" "${SPEC_ROOT_DISK_GIB}"
+assert_matches_spec "ceph-disk-gib" "${CEPH_DISK_GIB}" "${SPEC_CEPH_DISK_GIB}"
+assert_matches_spec "ceph-disks-per-node" "${CEPH_DISKS_PER_NODE}" "${SPEC_CEPH_DISKS_PER_NODE}"
+assert_matches_spec "local-disk-gib" "${LOCAL_DISK_GIB}" "${SPEC_LOCAL_DISK_GIB}"
+
+USER_PREFIX="${SPEC_USER_PREFIX}"
+NODE_CPU="${SPEC_NODE_CPU}"
+NODE_MEMORY_MB="${SPEC_NODE_MEMORY_MB}"
+ROOT_DISK_GIB="${SPEC_ROOT_DISK_GIB}"
+CEPH_DISK_GIB="${SPEC_CEPH_DISK_GIB}"
+CEPH_DISKS_PER_NODE="${SPEC_CEPH_DISKS_PER_NODE}"
+LOCAL_DISK_GIB="${SPEC_LOCAL_DISK_GIB}"
+export TF_VAR_lxd_network_name="${SPEC_LXD_NETWORK}"
+export TF_VAR_lxd_storage_pool="${SPEC_LXD_POOL}"
+export TF_VAR_ssh_public_key="${SPEC_SSH_PUBLIC_KEY}"
 
 echo ""
 echo "============================================================"
@@ -178,8 +260,11 @@ echo ""
 # -----------------------------------------------------------------------
 log_info "[PHASE 1] Provisioning ${ADD_NODES} new VM(s) with OpenTofu..."
 
-tofu apply -auto-approve -parallelism=1 \
+PLAN_FILE=$(mktemp)
+trap 'rm -f "${PLAN_FILE}"' EXIT
+tofu plan -input=false -parallelism=1 -out="${PLAN_FILE}" \
     -var="user_prefix=${USER_PREFIX}" \
+    -var="ubuntu_image=${SPEC_UBUNTU_IMAGE}" \
     -var="microcloud_node_count=${NEW_TOTAL}" \
     -var="microcloud_node_cpu=${NODE_CPU}" \
     -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}" \
@@ -187,6 +272,7 @@ tofu apply -auto-approve -parallelism=1 \
     -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}" \
     -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}" \
     -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
+tofu apply -auto-approve -parallelism=1 "${PLAN_FILE}"
 
 log_success "New VMs provisioned"
 
@@ -246,22 +332,31 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         done
     " 2>/dev/null | tr -d '[:space:]')
 
+    if [[ "${LOCAL_DISK_GIB}" -gt 0 ]]; then
+        LOCAL_DISK=$(lxc exec "${node_name}" -- bash -c "
+            serial='lxd_local--disk'
+            lsblk -dn -o NAME,SERIAL | awk -v serial=\"\$serial\" '\$2 == serial {print \"/dev/\" \$1; exit}'
+        " 2>/dev/null | tr -d '[:space:]')
+        if [[ -z "${LOCAL_DISK}" ]]; then
+            log_error "${node_name}: expected local disk serial lxd_local--disk was not found"
+            exit 1
+        fi
+    else
+        LOCAL_DISK=""
+    fi
+
     readarray -t CEPH_DISK_LIST < <(lxc exec "${node_name}" -- bash -c "
-        root_src=\$(findmnt -n -o SOURCE /)
-        root_disk=\$(lsblk -no PKNAME \"\$root_src\" 2>/dev/null || true)
-        for disk in \$(lsblk -dn -o NAME,TYPE | awk '\$2==\"disk\" {print \$1}'); do
-            [ \"\$disk\" = \"\$root_disk\" ] && continue
-            lsblk -nr -o MOUNTPOINT \"/dev/\$disk\" | grep -q '[^[:space:]]' && continue
-            echo \"/dev/\$disk\"
+        expected=${CEPH_DISKS_PER_NODE}
+        for index in \$(seq 1 \"\$expected\"); do
+            serial=\"lxd_ceph--disk--\$index\"
+            path=\$(lsblk -dn -o NAME,SERIAL | awk -v serial=\"\$serial\" '\$2 == serial {print \"/dev/\" \$1; exit}')
+            [ -n \"\$path\" ] && echo \"\$path\"
         done
     " 2>/dev/null)
 
-    # If local disk is enabled, last disk is ZFS — exclude from Ceph list
-    if [[ "${LOCAL_DISK_GIB}" -gt 0 && ${#CEPH_DISK_LIST[@]} -gt 1 ]]; then
-        LOCAL_DISK="${CEPH_DISK_LIST[-1]}"
-        unset 'CEPH_DISK_LIST[-1]'
-    else
-        LOCAL_DISK=""
+    if [[ "${#CEPH_DISK_LIST[@]}" -ne "${CEPH_DISKS_PER_NODE}" ]]; then
+        log_error "${node_name}: expected ${CEPH_DISKS_PER_NODE} Ceph disk(s), detected ${#CEPH_DISK_LIST[@]}"
+        exit 1
     fi
 
     ADD_PRESEED+="

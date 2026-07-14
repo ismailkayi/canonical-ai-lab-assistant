@@ -51,6 +51,7 @@ htmlcov/
 # Project-specific
 orchestrate.sh.log
 deployment_history.json
+inventory_*.yaml
 state/
 tmp/
 

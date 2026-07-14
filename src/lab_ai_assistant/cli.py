@@ -3,22 +3,21 @@
 import logging
 import sys
 from typing import Optional
+
 import typer
 from rich.console import Console
+
 from lab_ai_assistant import __version__
+from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import get_config
 from lab_ai_assistant.orchestrator import LabOrchestrator
-from lab_ai_assistant.ai_engine import AIEngine
 
-app = typer.Typer(
-    help="AI-powered Lab Automation Assistant for Canonical Infrastructure"
-)
+app = typer.Typer(help="AI-powered Lab Automation Assistant for Canonical Infrastructure")
 console = Console()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 
@@ -40,7 +39,7 @@ def check():
     try:
         config = get_config()
         ai = AIEngine(config)
-        
+
         if ai.is_available():
             console.print(f"[green]✓[/green] Inference engine available at {config.inference_host}")
             console.print(f"  Model: {config.inference_model}")
@@ -84,13 +83,7 @@ def setup():
 
 
 @app.callback()
-def main(
-    debug: Optional[bool] = typer.Option(
-        None,
-        "--debug",
-        help="Enable debug logging"
-    )
-):
+def main(debug: Optional[bool] = typer.Option(None, "--debug", help="Enable debug logging")):
     """Canonical AI Lab Assistant - MicroCloud-first infrastructure automation."""
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)

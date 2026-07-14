@@ -58,12 +58,8 @@ class ChatUI:
         banner.add_column(justify="center")
 
         banner.add_row("")
-        banner.add_row(
-            Text("Canonical AI Lab Assistant", style="bold bright_white")
-        )
-        banner.add_row(
-            Text("MicroCloud Topology Planner & Deployer", style="dim")
-        )
+        banner.add_row(Text("Canonical AI Lab Assistant", style="bold bright_white"))
+        banner.add_row(Text("MicroCloud Topology Planner & Deployer", style="dim"))
         banner.add_row("")
         banner.add_row(
             Text(
@@ -167,9 +163,7 @@ class ChatUI:
     def print_ai_response(self, response: str, reasoning: str = ""):
         """Display the main AI assistant response."""
         if not response.strip():
-            self.console.print(
-                Text(f" {AI_ICON}  (no response)", style="dim")
-            )
+            self.console.print(Text(f" {AI_ICON}  (no response)", style="dim"))
             return
 
         # Build the response content

@@ -56,7 +56,7 @@ OVERALL_OK=true
 echo "--- MicroCloud cluster ---"
 MC_LIST=$(run_on_node "${INITIATOR_NODE}" "microcloud cluster list 2>&1 || echo ERROR")
 echo "${MC_LIST}"
-if echo "${MC_LIST}" | grep -qi "ERROR\|failed\|unreachable"; then
+if echo "${MC_LIST}" | grep -qi "ERROR\|failed\|unreachable\|OFFLINE\|EVACUATED\|(command failed)"; then
     log_warn "MicroCloud cluster may have issues"
     OVERALL_OK=false
 else
@@ -68,7 +68,7 @@ echo ""
 echo "--- LXD cluster ---"
 LXD_LIST=$(run_on_node "${INITIATOR_NODE}" "lxc cluster list 2>&1 || echo ERROR")
 echo "${LXD_LIST}"
-if echo "${LXD_LIST}" | grep -qi "ERROR\|Offline\|Evacuated"; then
+if echo "${LXD_LIST}" | grep -qi "ERROR\|Offline\|Evacuated\|(command failed)"; then
     log_warn "LXD cluster has offline or evacuated members"
     OVERALL_OK=false
 else
@@ -82,14 +82,18 @@ CEPH_LIST=$(run_on_node "${INITIATOR_NODE}" "microceph cluster list 2>&1 || echo
 echo "${CEPH_LIST}"
 CEPH_STATUS=$(run_on_node "${INITIATOR_NODE}" "microceph.ceph -s 2>&1 || echo ERROR")
 echo "${CEPH_STATUS}"
-if echo "${CEPH_LIST}" | grep -qi "ERROR"; then
+if echo "${CEPH_LIST}" | grep -qi "ERROR\|OFFLINE\|(command failed)"; then
     log_warn "MicroCeph cluster may have issues"
     OVERALL_OK=false
 elif echo "${CEPH_STATUS}" | grep -qi "HEALTH_ERR"; then
     log_warn "Ceph cluster status: HEALTH_ERR"
     OVERALL_OK=false
 elif echo "${CEPH_STATUS}" | grep -qi "HEALTH_WARN"; then
-    log_warn "Ceph cluster status: HEALTH_WARN (may be transient)"
+    log_warn "Ceph cluster status: HEALTH_WARN"
+    OVERALL_OK=false
+elif ! echo "${CEPH_STATUS}" | grep -qi "HEALTH_OK"; then
+    log_warn "Ceph health status could not be confirmed"
+    OVERALL_OK=false
 else
     log_success "MicroCeph cluster OK"
 fi
@@ -99,7 +103,7 @@ echo ""
 echo "--- MicroOVN cluster ---"
 OVN_LIST=$(run_on_node "${INITIATOR_NODE}" "microovn cluster list 2>&1 || echo ERROR")
 echo "${OVN_LIST}"
-if echo "${OVN_LIST}" | grep -qi "ERROR"; then
+if echo "${OVN_LIST}" | grep -qi "ERROR\|OFFLINE\|(command failed)"; then
     log_warn "MicroOVN cluster may have issues"
     OVERALL_OK=false
 else

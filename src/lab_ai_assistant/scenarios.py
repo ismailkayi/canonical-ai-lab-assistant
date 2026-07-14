@@ -15,10 +15,10 @@ class NetworkMode(str, Enum):
 
 
 class SizingTier(str, Enum):
-    MINIMAL = "minimal"    # PoC / dev, absolute minimum resources
-    SMALL = "small"        # Small team lab, 3 nodes
-    MEDIUM = "medium"      # Production-like staging, 3–5 nodes
-    LARGE = "large"        # Full HA production, 5+ nodes
+    MINIMAL = "minimal"  # PoC / dev, absolute minimum resources
+    SMALL = "small"  # Small team lab, 3 nodes
+    MEDIUM = "medium"  # Production-like staging, 3–5 nodes
+    LARGE = "large"  # Full HA production, 5+ nodes
 
 
 @dataclass
@@ -41,23 +41,31 @@ class NodeSizing:
 SIZING_TIERS: dict[SizingTier, NodeSizing] = {
     SizingTier.MINIMAL: NodeSizing(
         tier=SizingTier.MINIMAL,
-        cpu=2, ram_gb=4,
-        root_disk_gb=20, storage_disk_gb=20,
+        cpu=2,
+        ram_gb=4,
+        root_disk_gb=20,
+        storage_disk_gb=20,
     ),
     SizingTier.SMALL: NodeSizing(
         tier=SizingTier.SMALL,
-        cpu=4, ram_gb=8,
-        root_disk_gb=40, storage_disk_gb=50,
+        cpu=4,
+        ram_gb=8,
+        root_disk_gb=40,
+        storage_disk_gb=50,
     ),
     SizingTier.MEDIUM: NodeSizing(
         tier=SizingTier.MEDIUM,
-        cpu=8, ram_gb=16,
-        root_disk_gb=60, storage_disk_gb=100,
+        cpu=8,
+        ram_gb=16,
+        root_disk_gb=60,
+        storage_disk_gb=100,
     ),
     SizingTier.LARGE: NodeSizing(
         tier=SizingTier.LARGE,
-        cpu=16, ram_gb=32,
-        root_disk_gb=80, storage_disk_gb=500,
+        cpu=16,
+        ram_gb=32,
+        root_disk_gb=80,
+        storage_disk_gb=500,
     ),
 }
 
@@ -109,17 +117,11 @@ SCENARIOS: dict[str, MCScenario] = {
         requires_dedicated_storage_disk=True,
         required_params=["nodes"],
         optional_params=[
-            "network_interface",
-            "ovn_uplink_interface",
-            "ceph_osd_disk",
-            "ipv4_gateway",
-            "ipv4_range",
-            "ipv6_gateway",
-            "ipv6_range",
-            "preseed_file",
+            "ceph_disks_per_node",
+            "local_disk_gib",
         ],
         notes=(
-            "OVN is on by default. It may be disabled only when the user explicitly opts out. "
+            "This automation currently enables OVN for every deployment. "
             "Ceph OSD disks are always required per node; in nested-LXD mode they are virtual block volumes "
             "provisioned by Terraform rather than host physical disks."
         ),
