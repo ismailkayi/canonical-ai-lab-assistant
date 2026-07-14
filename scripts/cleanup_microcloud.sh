@@ -136,9 +136,19 @@ fi
 
 DEPLOYMENT_SPEC_JSON=$(tofu output -json deployment_spec 2>/dev/null || true)
 if [[ -n "${DEPLOYMENT_SPEC_JSON}" && "${DEPLOYMENT_SPEC_JSON}" != "null" ]]; then
-    SSH_PUBLIC_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["ssh_public_key"])' <<< "${DEPLOYMENT_SPEC_JSON}")
-    LXD_NETWORK=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["lxd_network_name"])' <<< "${DEPLOYMENT_SPEC_JSON}")
-    LXD_STORAGE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["lxd_storage_pool"])' <<< "${DEPLOYMENT_SPEC_JSON}")
+    spec_value_optional() {
+        local key="$1"
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' \
+            "${key}" <<< "${DEPLOYMENT_SPEC_JSON}"
+    }
+
+    SPEC_SSH_PUBLIC_KEY=$(spec_value_optional ssh_public_key)
+    SPEC_LXD_NETWORK=$(spec_value_optional lxd_network_name)
+    SPEC_LXD_STORAGE=$(spec_value_optional lxd_storage_pool)
+
+    [[ -n "${SPEC_SSH_PUBLIC_KEY}" ]] && SSH_PUBLIC_KEY="${SPEC_SSH_PUBLIC_KEY}"
+    [[ -n "${SPEC_LXD_NETWORK}" ]] && LXD_NETWORK="${SPEC_LXD_NETWORK}"
+    [[ -n "${SPEC_LXD_STORAGE}" ]] && LXD_STORAGE="${SPEC_LXD_STORAGE}"
 fi
 
 log_info "Running tofu destroy..."

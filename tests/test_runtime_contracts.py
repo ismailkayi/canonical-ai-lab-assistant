@@ -42,6 +42,8 @@ def test_lifecycle_scripts_bind_state_and_apply_saved_plans() -> None:
     assert 'tofu apply -auto-approve -parallelism=1 "${PLAN_FILE}"' in add_script
     assert "tofu plan -destroy" in cleanup_script
     assert 'tofu apply -auto-approve "${PLAN_FILE}"' in cleanup_script
+    assert '.get(sys.argv[1], "")' in cleanup_script
+    assert '[[ -n "${SPEC_SSH_PUBLIC_KEY}" ]]' in cleanup_script
     assert "SPEC_SSH_PUBLIC_KEY" in add_script
 
 
