@@ -65,28 +65,55 @@ is required.
 Bootstrap installs or prepares snapd, LXD, OpenTofu, Ansible, an SSH key, and
 the local inference snap (`gemma4` by default).
 
-## Quick Start
+## Recommended Setup (`dev.sh`)
+
+Use this path unless you specifically want to manage the Python virtual
+environment yourself. `dev.sh` creates or repairs `.venv`, installs the current
+checkout in editable mode, and starts the requested command.
+
+### First Time on a Host
 
 ```bash
 git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
 cd canonical-ai-lab-assistant
 
-# Prepare Python, host tools, LXD, and the inference snap.
+# One-time host preparation: Python environment, LXD, OpenTofu, Ansible,
+# SSH key, and the local inference snap.
 ./dev.sh --bootstrap
-
-# Verify inference, then start the assistant.
-./dev.sh --check
-./dev.sh --chat
 ```
 
 If bootstrap adds your user to the `lxd` group, log out and back in before
-deploying. For later sessions, only this is needed:
+continuing. Bootstrap does not need to be repeated on every run.
+
+Start the assistant:
 
 ```bash
 ./dev.sh --chat
 ```
 
-### Manual Python Setup
+### Normal Daily Use
+
+From the repository directory, run:
+
+```bash
+./dev.sh --chat
+```
+
+Use the check command only when diagnosing inference connectivity:
+
+```bash
+./dev.sh --check
+```
+
+After pulling new source code, `./dev.sh --chat` automatically reinstalls the
+current checkout before opening the chat.
+
+## Alternative: Manual Python Setup
+
+Use this path instead of `dev.sh` only if you prefer to create, activate, and
+update the virtual environment yourself. It runs the same `lab-ai` application.
+
+### First Time on a Host
 
 ```bash
 python3 -m venv .venv
@@ -94,11 +121,31 @@ source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 
+# One-time host preparation.
+lab-ai bootstrap
+
+# Verify inference and start the assistant.
 lab-ai check
 lab-ai chat
 ```
 
-Run `lab-ai bootstrap` first if host dependencies are not installed.
+If bootstrap adds your user to the `lxd` group, log out and back in. Then
+reactivate the virtual environment before using `lab-ai`.
+
+### Normal Daily Use
+
+```bash
+cd canonical-ai-lab-assistant
+source .venv/bin/activate
+lab-ai chat
+```
+
+After pulling new source code, update the editable installation once:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e .
+```
 
 ## Example Chat Workflow
 
