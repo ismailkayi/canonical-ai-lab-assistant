@@ -1,88 +1,138 @@
 # Canonical AI Lab Assistant
 
-AI-powered MicroCloud lifecycle assistant for local lab and demo environments.
+An AI-first assistant for creating and managing local MicroCloud lab, demo,
+training, and proof-of-concept environments.
 
-It translates plain-language requests into real infrastructure actions on your host:
+Describe the environment in natural language. The assistant inspects the host,
+proposes a topology, validates it against live capacity, asks you to approve the
+exact plan, runs OpenTofu and Ansible, and verifies the resulting cluster.
 
-- Host inspection and sizing recommendations
-- Cluster deployment (OpenTofu + Ansible)
-- Environment listing, scaling, node addition, health checks, and cleanup
-- Documentation lookups with resilient fallback sources
+This project is intended for local learning and demonstration environments. It
+is not a production deployment tool.
 
-## What It Does
+## Key Capabilities
 
-You can ask for operations naturally, for example:
+- Host-aware topology and sizing recommendations
+- LXD virtual machines provisioned with OpenTofu
+- MicroCloud, LXD, MicroCeph, and MicroOVN configured with Ansible
+- One to eight Ceph OSD disks per node
+- Optional local ZFS storage alongside distributed Ceph
+- Environment listing, expansion, health verification, and cleanup
+- Current official Canonical documentation retrieval
+- Recovery from known transient inference and LXD-provider failures
 
-- "List deployed environments"
-- "Deploy a 3-node setup with 2 OSDs per node and 20GB local disk"
-- "Add 1 node to lab_microcloud"
-- "Check cluster health"
-- "Delete lab_microcloud"
-
-The assistant executes tools synchronously and reports the final outcome. It does not rely on hidden background jobs for script-backed operations.
-
-## Architecture
+## How It Works
 
 ```text
-Terminal (lab-ai chat)
-        |
-        v
-AI Engine (local inference endpoint)
-        |
-        v
-Orchestrator (tool loop + safety gates)
-        |
-        +--> scripts/deploy_microcloud.sh
-        |        |- OpenTofu (terraform/main.tf)
-        |        '- Ansible (playbooks/microcloud.yml)
-        |
-        +--> scripts/add_cluster_node.sh
-        +--> scripts/scale_microcloud.sh
-        +--> scripts/list_microcloud_environments.sh
-        +--> scripts/verify_cluster_health.sh
-        '--> scripts/cleanup_microcloud.sh
+User request
+    |
+    v
+Live host and environment observation
+    |
+    v
+AI planning and tool selection
+    |
+    v
+Schema, capability, capacity, and state validation
+    |
+    v
+Exact plan display and one-time approval
+    |
+    v
+OpenTofu infrastructure + Ansible configuration
+    |
+    v
+Evidence-based cluster verification
+    |
+    v
+AI explanation or remediation proposal
 ```
 
-Everything runs on your host through LXD-based VMs. No public cloud account is required.
+The AI plans and explains. Python owns live facts, validation, approval binding,
+locking, and verification. Shell scripts, OpenTofu, and Ansible apply only the
+approved plan. Everything runs locally through LXD VMs; no public cloud account
+is required.
 
 ## Prerequisites
 
 - Ubuntu host (24.04 recommended)
-- LXD-capable machine with enough CPU, RAM, and storage for your intended topology
-- Python 3.10+
+- Hardware virtualization available to LXD
+- Internet access for snaps, images, and current documentation
+- Python 3.10 or newer
+- A user with `sudo` access
+- Enough CPU, RAM, and storage for the requested nested VMs
 
-The bootstrap flow installs runtime dependencies such as snapd, LXD, OpenTofu, and Ansible.
+Bootstrap installs or prepares snapd, LXD, OpenTofu, Ansible, an SSH key, and
+the local inference snap (`gemma4` by default).
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
 cd canonical-ai-lab-assistant
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
 
-# Optional: prepare host dependencies
-lab-ai bootstrap
+# Prepare Python, host tools, LXD, and the inference snap.
+./dev.sh --bootstrap
 
-# Start chat
-lab-ai chat
+# Verify inference, then start the assistant.
+./dev.sh --check
+./dev.sh --chat
 ```
 
-If you use the helper script:
+If bootstrap adds your user to the `lxd` group, log out and back in before
+deploying. For later sessions, only this is needed:
 
 ```bash
 ./dev.sh --chat
+```
+
+### Manual Python Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e .
+
+lab-ai check
+lab-ai chat
+```
+
+Run `lab-ai bootstrap` first if host dependencies are not installed.
+
+## Example Chat Workflow
+
+```text
+You: Deploy a fresh 3-node MicroCloud demo environment. Use 2 vCPU,
+     6 GB RAM, a 30 GB root disk, and two 20 GB Ceph disks per node.
+
+AI:  [Displays the exact resolved plan and Plan ID.]
+
+You: yes
+
+AI:  [Deploys, verifies the cluster, and reports access and health evidence.]
+```
+
+Other useful requests:
+
+```text
+List deployed environments.
+Check the health of lab_microcloud.
+Add one node to lab_microcloud.
+Scale lab_microcloud to five nodes.
+Delete lab_microcloud.
+Use the current official MicroCloud requirements documentation to explain the
+recommended node count.
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---|---|
-| `lab-ai chat` | Start interactive assistant mode |
-| `lab-ai bootstrap` | Install and prepare host tooling |
-| `lab-ai check` | Validate inference endpoint availability |
-| `lab-ai setup` | Print key script/config locations |
+| `lab-ai chat` | Start the interactive assistant |
+| `lab-ai bootstrap` | Prepare host tools and install the inference snap |
+| `lab-ai check` | Check the configured inference endpoint |
+| `lab-ai setup` | Show important runtime paths |
 | `lab-ai version` | Show installed version |
 
 ## Configuration
@@ -93,83 +143,162 @@ Set environment variables via `.env` (or shell):
 INFERENCE_HOST=http://127.0.0.1:8336
 INFERENCE_MODEL=gemma4
 INFERENCE_TIMEOUT_SEC=120
+INFERENCE_RESTART_TIMEOUT_SEC=15
+OPERATION_TIMEOUT_SEC=3600
 LOG_LEVEL=INFO
 ```
+
+`INFERENCE_RESTART_TIMEOUT_SEC` controls how long the client waits for a local
+inference restart. `OPERATION_TIMEOUT_SEC` limits script-backed infrastructure
+operations.
+
+## Plan and Approval Safety
+
+Every infrastructure-changing action uses this flow:
+
+1. Resolve all required parameters.
+2. Validate capabilities and residual host capacity.
+3. Display the exact environment, state identity, node transition, storage
+        pool, resource totals, parameters, and Plan ID.
+4. Require a standalone confirmation such as `yes`.
+5. Revalidate host and Terraform state while holding the shared lock.
+6. Apply a saved OpenTofu plan.
+7. Verify the requested cluster state independently.
+
+Changing the plan, host capacity, or target state invalidates the approval.
+
+## Deployment Options
+
+| Option | Supported values |
+|---|---|
+| Nodes | 3-50 |
+| vCPU per node | 1 or more |
+| Memory per node | 1024 MiB or more |
+| Root disk | 20 GiB or more |
+| Ceph OSD disk | 10 GiB or more |
+| Ceph disks per node | 1-8 |
+| Local ZFS disk | 0 to disable, otherwise 10 GiB or more |
+| Networking | MicroOVN with a dedicated virtual uplink |
+| Image | Ubuntu 24.04 by default |
+
+MicroCloud runs inside LXD VMs. Ceph and optional local disks are virtual block
+volumes created in the selected LXD storage pool.
 
 ## Deployment Behavior
 
 When you confirm a deployment, the assistant:
 
-1. Detects LXD defaults (bridge and storage pool)
-2. Calculates or applies requested sizing
-3. Runs `tofu apply` (serialized for provider stability)
-4. Runs `ansible-playbook playbooks/microcloud.yml`
-5. Prints cluster access details (node names, IPs, UI URLs)
+1. Detects the LXD bridge and storage pool.
+2. Resolves and validates all node resources.
+3. Creates a new OpenTofu workspace and saved plan.
+4. Creates VMs, networks, and block volumes.
+5. Runs `ansible-playbook playbooks/microcloud.yml`.
+6. Verifies exact membership, Ceph health, and OSD count.
+7. Reports node names, IP addresses, UI URLs, and health evidence.
 
-Supported node counts in this automation are `>= 3`.
-
-Note on quorum guidance:
-
-- Even and odd cluster sizes are supported.
-- For HA characteristics and failure tolerance, topology choices still matter and should match your operational goals.
+Supported node counts are 3-50. Even and odd sizes are supported; topology and
+failure-tolerance requirements should still match the intended demonstration.
 
 ## Lifecycle Operations
 
-The assistant can manage existing environments end-to-end:
+- **Fresh deploy:** refuses to modify an existing managed environment. An empty
+        stale workspace is recycled safely.
+- **List:** reports active environments, node counts, and running state.
+- **Add nodes:** preserves the existing image, CPU, RAM, storage geometry,
+        network, storage pool, and SSH authorization.
+- **Scale:** expands to a larger total using the live add-member workflow.
+- **Downscale:** not implemented because members and Ceph OSDs must be drained
+  before VM destruction.
+- **Health:** verifies exact membership in MicroCloud, LXD, MicroCeph, and
+  MicroOVN, plus Ceph health and expected OSD count.
+- **Delete:** destroys the approved saved plan and removes the workspace and
+  generated inventory.
 
-- List environments with running node counts
-- Scale an environment to a new target size (`>= 3`)
-- Add one or more nodes to a live cluster
-- Verify MicroCloud/LXD/MicroCeph/MicroOVN health
-- Destroy an environment and remove Terraform workspace artifacts
-
-Fresh deploys never reuse an existing OpenTofu workspace. This prevents an
-accidental deploy request from resizing or destroying members of a running lab.
 Environments created before versioned deployment specifications were introduced
 must be deleted and created fresh once before add/scale operations are available.
 
-## Documentation Fetching
+## Documentation Grounding
 
-The documentation tool first tries official Ubuntu documentation URLs.
-If access is blocked (for example by Cloudflare 403 challenge), it falls back to canonical upstream documentation sources (GitHub raw docs) so guidance remains available.
+Live observations are authoritative for local host and cluster state. For
+current or version-sensitive product behavior, the assistant can retrieve
+official Canonical documentation from approved HTTPS hosts. It extracts the
+main article, records source and retrieval time, caches successful responses,
+and uses Canonical upstream documentation as a fallback.
+
+## Development Checks
+
+```bash
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+
+python -m ruff format --check src tests
+python -m ruff check src tests
+python -m mypy src
+pytest -q
+
+for script in scripts/*.sh dev.sh; do bash -n "$script"; done
+(cd terraform && tofu fmt -check -recursive && tofu validate -no-color)
+ansible-playbook --syntax-check -i 'localhost,' playbooks/microcloud.yml
+```
 
 ## Repository Layout
 
 ```text
 canonical-ai-lab-assistant/
-├── scripts/
-│   ├── deploy_microcloud.sh
-│   ├── add_cluster_node.sh
-│   ├── scale_microcloud.sh
-│   ├── cleanup_microcloud.sh
-│   ├── verify_cluster_health.sh
-│   └── list_microcloud_environments.sh
-├── playbooks/
-│   └── microcloud.yml
-├── terraform/
-│   └── main.tf
-└── src/lab_ai_assistant/
-    ├── ai_engine.py
-    ├── orchestrator.py
-    ├── doc_fetcher.py
-    ├── tools.py
-    └── cli.py
+|- dev.sh                         # Local setup and chat launcher
+|- scripts/                       # Infrastructure execution adapters
+|- playbooks/microcloud.yml       # Guest setup and cluster bootstrap
+|- terraform/main.tf              # LXD VMs, networks, and block volumes
+|- src/lab_ai_assistant/
+|  |- ai_engine.py                # Local LLM and native tool protocol
+|  |- orchestrator.py             # Agent loop, locking, and execution
+|  |- planning.py                 # Plans, validation, and approval
+|  |- verification.py             # Cluster postcondition evidence
+|  |- doc_fetcher.py              # Official documentation retrieval
+|  |- sizing.py                    # Host-aware sizing
+|  |- tools.py                     # Tool schemas and validation
+|  `- cli.py                       # Typer CLI
+`- tests/                          # Planning, lifecycle, and safety tests
 ```
 
 ## Troubleshooting
 
-### 1) `Missing Resource State After Create`
+### Inference endpoint is unavailable
 
-This is a known provider-side race behavior with some LXD/OpenTofu resource creations.
-The current deployment flow uses serialized apply execution to reduce this risk.
+```bash
+snap services gemma4
+sudo snap restart gemma4.server
+lab-ai check
+```
 
-### 2) Docs fetch returns 403
+The client waits for the health endpoint and retries after a transient local
+inference restart.
 
-If `documentation.ubuntu.com` blocks the request, the assistant automatically switches to fallback sources.
+### `Missing Resource State After Create`
 
-### 3) Tool said it would do something, but nothing ran
+Some LXD provider versions can return a transient state error after resource
+creation. The deployment serializes creation and performs one controlled retry
+only for this known error.
 
-Script-backed tools are synchronous. If a script fails, the assistant now reports failure explicitly rather than implying background execution.
+### An environment name already exists
+
+Fresh deploys do not resize existing environments. Add/scale the existing lab,
+choose another prefix, or delete it first. A workspace with no state or managed
+resources is stale and removed automatically.
+
+### An operation failed
+
+Script-backed operations are synchronous. If a failure is reported, no hidden
+background job continues. Correct the reported cause and prepare a new plan.
+
+## Current Limitations
+
+- Safe member removal and downscale are not implemented.
+- Snap channels are configured in `playbooks/microcloud.yml`, not through chat.
+- Custom preseed files are not exposed through the chat interface.
+- Network changes after deployment are not automated.
+- Snap packaging is a future delivery target; the current supported workflow is
+        a source checkout using `dev.sh` or the Python CLI.
 
 ## License
 
