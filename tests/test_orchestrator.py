@@ -106,8 +106,9 @@ def test_residual_capacity_subtracts_active_allocations(config) -> None:
 def test_fresh_deploy_rejects_existing_workspace(config) -> None:
     orchestrator = LabOrchestrator(config)
     orchestrator.cluster_verifier.workspace_exists = lambda workspace: workspace == "lab_microcloud"
+    orchestrator.cluster_verifier.workspace_resource_count = lambda _workspace: 3
 
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(ValueError, match="already contains 3 managed resource"):
         orchestrator._resolve_deployment_parameters(
             {"user_prefix": "lab", "nodes": 3},
             CapacitySnapshot(
@@ -116,6 +117,24 @@ def test_fresh_deploy_rejects_existing_workspace(config) -> None:
                 storage_available_gib=500,
             ),
         )
+
+
+def test_fresh_deploy_allows_empty_stale_workspace(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda workspace: workspace == "lab_microcloud"
+    orchestrator.cluster_verifier.workspace_resource_count = lambda _workspace: 0
+
+    resolved, topology = orchestrator._resolve_deployment_parameters(
+        {"user_prefix": "lab", "nodes": 3},
+        CapacitySnapshot(
+            cpu_available=16,
+            ram_available_mb=32 * 1024,
+            storage_available_gib=500,
+        ),
+    )
+
+    assert resolved["user_prefix"] == "lab"
+    assert topology.nodes == 3
 
 
 def test_confirmation_displays_environment_target_and_exact_parameters(config) -> None:

@@ -6,8 +6,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_fresh_deploy_refuses_existing_workspace() -> None:
     script = (REPO_ROOT / "scripts" / "deploy_microcloud.sh").read_text()
 
-    assert "Workspace '${WORKSPACE_NAME}' already exists" in script
+    assert "already contains managed resources" in script
     assert "Refusing a fresh deploy" in script
+    assert "Removing empty stale workspace" in script
 
 
 def test_storage_roles_use_exact_lxd_serials_without_disk_order_fallback() -> None:

@@ -359,10 +359,18 @@ class LabOrchestrator:
         prefix = str(resolved.get("user_prefix", "lab")).removesuffix("_microcloud")
         workspace = f"{prefix}_microcloud"
         if self.cluster_verifier.workspace_exists(workspace):
-            raise ValueError(
-                f"Workspace '{workspace}' already exists. Use add/scale for a supported "
-                "expansion, or delete it before creating a fresh deployment."
-            )
+            resource_count = self.cluster_verifier.workspace_resource_count(workspace)
+            if resource_count is None:
+                raise ValueError(
+                    f"Workspace '{workspace}' exists, but its Terraform state could not be read. "
+                    "Refusing to guess whether a fresh deployment is safe."
+                )
+            if resource_count > 0:
+                raise ValueError(
+                    f"Workspace '{workspace}' already contains {resource_count} managed "
+                    "resource(s). Use add/scale for a supported expansion, or delete it "
+                    "before creating a fresh deployment."
+                )
 
         nodes = int(resolved.get("nodes", 3))
         sizing_tier = str(resolved.get("sizing_tier", "balanced"))
@@ -566,10 +574,15 @@ class LabOrchestrator:
             prefix = str(plan.parameters.get("user_prefix", "lab")).removesuffix("_microcloud")
             workspace = f"{prefix}_microcloud"
             if self.cluster_verifier.workspace_exists(workspace):
-                return PlanValidation(
-                    valid=False,
-                    errors=(f"Workspace '{workspace}' was created after this plan was prepared.",),
-                )
+                resource_count = self.cluster_verifier.workspace_resource_count(workspace)
+                if resource_count is None or resource_count > 0:
+                    return PlanValidation(
+                        valid=False,
+                        errors=(
+                            f"Workspace '{workspace}' gained resources or became unreadable "
+                            "after this plan was prepared.",
+                        ),
+                    )
 
         if plan.action in {"add_cluster_node", "scale_environment"}:
             try:

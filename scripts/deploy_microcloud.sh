@@ -340,9 +340,22 @@ cd "${TERRAFORM_DIR}"
 tofu init -input=false >/dev/null 2>&1
 
 if tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}"; then
-    log_error "Workspace '${WORKSPACE_NAME}' already exists. Refusing a fresh deploy that could resize or destroy existing members."
-    log_error "Use the supported add/scale workflow, or delete the environment before redeploying."
-    exit 1
+    set +e
+    EXISTING_STATE=$(TF_WORKSPACE="${WORKSPACE_NAME}" tofu state list 2>&1)
+    STATE_RC=$?
+    set -e
+    if [[ "${STATE_RC}" -eq 0 && -n "$(printf '%s' "${EXISTING_STATE}" | tr -d '[:space:]')" ]]; then
+        log_error "Workspace '${WORKSPACE_NAME}' already contains managed resources. Refusing a fresh deploy that could resize or destroy existing members."
+        log_error "Use the supported add/scale workflow, or delete the environment before redeploying."
+        exit 1
+    fi
+    if [[ "${STATE_RC}" -ne 0 && "${EXISTING_STATE}" != *"No state file was found"* ]]; then
+        log_error "Workspace '${WORKSPACE_NAME}' exists, but its state could not be inspected safely"
+        exit 1
+    fi
+    log_warn "Removing empty stale workspace '${WORKSPACE_NAME}' before fresh deployment"
+    tofu workspace select default >/dev/null 2>&1
+    tofu workspace delete "${WORKSPACE_NAME}" >/dev/null 2>&1
 fi
 tofu workspace new "${WORKSPACE_NAME}" >/dev/null 2>&1
 tofu workspace select "${WORKSPACE_NAME}" >/dev/null 2>&1

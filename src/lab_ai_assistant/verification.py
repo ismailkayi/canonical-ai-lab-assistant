@@ -60,6 +60,29 @@ class ClusterVerifier:
         names = {line.replace("*", "").strip() for line in result.stdout.splitlines()}
         return workspace in names
 
+    def workspace_resource_count(self, workspace: str) -> int | None:
+        """Return managed resource count, treating a workspace with no state as empty."""
+        env = os.environ.copy()
+        env["TF_WORKSPACE"] = workspace
+        try:
+            result = subprocess.run(
+                ["tofu", "state", "list"],
+                cwd=self.terraform_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        output = "\n".join((result.stdout, result.stderr))
+        if result.returncode == 0:
+            return len([line for line in result.stdout.splitlines() if line.strip()])
+        if "No state file was found" in output:
+            return 0
+        return None
+
     def verify(
         self,
         workspace: str,
