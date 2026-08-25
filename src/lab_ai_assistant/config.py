@@ -22,7 +22,12 @@ class Config:
     verify_cluster_health_script: Path = scripts_dir / "verify_cluster_health.sh"
     add_cluster_node_script: Path = scripts_dir / "add_cluster_node.sh"
 
-    inference_engine: str = "gemma4"
+    inference_engine: str = field(default_factory=lambda: os.getenv("INFERENCE_ENGINE", "gemma4"))
+    inference_auto_discovery: bool = field(
+        default_factory=lambda: (
+            os.getenv("INFERENCE_AUTO_DISCOVERY", "true").lower() not in {"0", "false", "no", "off"}
+        )
+    )
     inference_host: str = field(
         default_factory=lambda: os.getenv("INFERENCE_HOST", "http://127.0.0.1:8336")
     )

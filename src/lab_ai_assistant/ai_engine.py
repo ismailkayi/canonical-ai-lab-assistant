@@ -3,8 +3,11 @@
 import json
 import logging
 import re
+import shutil
+import subprocess
 import time
 from typing import Any, Optional
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -23,11 +26,16 @@ class AIEngine:
 
     def __init__(self, config: Config):
         self.config = config
-        self.base_url = config.inference_host
+        self.base_url = config.inference_host.rstrip("/")
         self.model = config.inference_model
+        self._openai_base_url: Optional[str] = self._configured_openai_base_url(self.base_url)
         self.conversation_history: list[dict[str, Any]] = []
         self._api_style: Optional[str] = None
         self._resolved_model: Optional[str] = None
+        self._runtime_discovery_attempted = False
+        self._runtime_source = "configuration"
+        self._runtime_engine: Optional[str] = None
+        self._snap_server_active = False
         self._supports_native_tools: bool = True  # optimistically assume support
         self._pending_tool_call_id: Optional[str] = None
         self.max_history_messages: int = 20
@@ -37,17 +45,256 @@ class AIEngine:
         self.environment_context: str = ""
 
     def is_available(self) -> bool:
-        """Check if inference engine is running."""
-        health_paths = ("/health", "/models", "/v1/models", "/api/tags")
-        for path in health_paths:
+        """Check whether the discovered inference runtime and model are ready."""
+        self._discover_runtime()
+        model = self._resolve_model_name()
+        return self._runtime_is_ready(model)
+
+    def _runtime_is_ready(
+        self,
+        model: str,
+        timeout: float = 5,
+        log_failure: bool = True,
+    ) -> bool:
+        """Require readiness evidence appropriate to the selected backend and model."""
+        root = self._service_root()
+        encoded_model = quote(model, safe="")
+
+        # OVMS/KServe exposes model-specific readiness independently from the
+        # OpenAI-compatible /v3 API.
+        for url in (
+            f"{root}/v2/models/{encoded_model}/ready",
+            f"{root}/v1/models/{encoded_model}",
+        ):
             try:
-                response = requests.get(f"{self.base_url}{path}", timeout=5)
-                if response.status_code == 200:
+                response = requests.get(url, timeout=timeout)
+                if response.status_code == 200 and self._readiness_response_is_ready(url, response):
                     return True
             except requests.RequestException:
                 continue
-        logger.error(f"Inference engine not available at {self.base_url}")
+
+        # llama.cpp health is model-aware because one selected model is loaded by
+        # the process. Accept it for /v1-style runtimes, but not for OVMS /v3.
+        if self._runtime_source == "snap-status" and self._runtime_engine in {
+            "cpu",
+            "intel-onemkl",
+            "nvidia-gpu",
+            "amd-gpu",
+        }:
+            try:
+                if requests.get(f"{root}/health", timeout=timeout).status_code == 200:
+                    return True
+            except requests.RequestException:
+                pass
+
+        # Custom OpenAI backends may only expose a model list. Verify that the
+        # selected model is actually present instead of accepting any HTTP 200.
+        for base in self._openai_base_candidates():
+            try:
+                response = requests.get(f"{base}/models", timeout=timeout)
+                if response.status_code == 200 and model in self._models_from_payload(
+                    response.json()
+                ):
+                    return True
+            except (requests.RequestException, TypeError, ValueError):
+                continue
+
+        try:
+            response = requests.get(f"{root}/api/tags", timeout=timeout)
+            if response.status_code == 200 and model in self._models_from_payload(response.json()):
+                return True
+        except (requests.RequestException, TypeError, ValueError):
+            pass
+
+        if log_failure:
+            logger.error("Inference engine not available at %s", self.runtime_endpoint)
         return False
+
+    @staticmethod
+    def _readiness_response_is_ready(url: str, response: requests.Response) -> bool:
+        """Interpret model-status payloads instead of trusting HTTP 200 alone."""
+        if "/v1/models/" not in url:
+            return True
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if "ready" in payload:
+            return payload.get("ready") is True
+        statuses = payload.get("model_version_status")
+        if isinstance(statuses, list) and statuses:
+            return all(
+                isinstance(item, dict)
+                and str(item.get("state", "")).upper() == "AVAILABLE"
+                and (
+                    not isinstance(item.get("status"), dict)
+                    or item["status"].get("error_code") in {None, "OK"}
+                )
+                for item in statuses
+            )
+        # llama.cpp and custom OpenAI servers generally use /models lists rather
+        # than model-specific status. Unknown single-model payloads fail closed.
+        return False
+
+    @property
+    def runtime_endpoint(self) -> str:
+        """Return the active API base URL after best-effort discovery."""
+        self._discover_runtime()
+        if self._api_style == "ollama":
+            return self._service_root()
+        return self._openai_base_url or f"{self._service_root()}/v1"
+
+    def get_runtime_info(self) -> dict[str, Any]:
+        """Return user-facing information about the selected inference runtime."""
+        self._discover_runtime()
+        api_style = self._detect_api_style()
+        return {
+            "endpoint": self.runtime_endpoint,
+            "model": self._resolve_model_name(),
+            "api_style": api_style,
+            "engine": self._runtime_engine,
+            "source": self._runtime_source,
+            "server_active": self._snap_server_active,
+        }
+
+    @staticmethod
+    def _configured_openai_base_url(url: str) -> Optional[str]:
+        parsed = urlparse(url)
+        if parsed.path and parsed.path != "/":
+            return url.rstrip("/")
+        return None
+
+    @staticmethod
+    def _is_generic_model_name(model: str) -> bool:
+        return model.strip().lower() in {"", "auto", "gemma4"}
+
+    @staticmethod
+    def _is_loopback_host(hostname: Optional[str]) -> bool:
+        return hostname in {"127.0.0.1", "localhost", "::1"}
+
+    def _targets_same_local_service(self, discovered_endpoint: str) -> bool:
+        configured = urlparse(self.base_url)
+        discovered = urlparse(discovered_endpoint)
+        configured_path = configured.path.rstrip("/")
+        if configured_path not in {"", "/v1", "/v3"}:
+            return False
+        configured_port = configured.port or (443 if configured.scheme == "https" else 80)
+        discovered_port = discovered.port or (443 if discovered.scheme == "https" else 80)
+        return (
+            self._is_loopback_host(configured.hostname)
+            and self._is_loopback_host(discovered.hostname)
+            and configured_port == discovered_port
+        )
+
+    def _discover_runtime(self, force: bool = False) -> None:
+        """Discover Canonical snap endpoint/model, preserving explicit remote overrides."""
+        if self._runtime_discovery_attempted and not force:
+            return
+        if not self.config.inference_auto_discovery:
+            self._runtime_discovery_attempted = True
+            return
+
+        engine = self.config.inference_engine.strip()
+        command = shutil.which(engine) if engine else None
+        if not command:
+            return
+
+        try:
+            result = subprocess.run(
+                [command, "status", "--format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if result.returncode != 0:
+            return
+
+        try:
+            status = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(status, dict):
+            return
+
+        endpoints = status.get("endpoints", {})
+        model_payload = status.get("model", {})
+        services = status.get("services", {})
+        endpoint = endpoints.get("openai") if isinstance(endpoints, dict) else None
+        discovered_model = model_payload.get("name") if isinstance(model_payload, dict) else None
+        if not isinstance(endpoint, str) or not endpoint.startswith(("http://", "https://")):
+            return
+        if not isinstance(discovered_model, str) or not discovered_model:
+            return
+
+        # Auto-adjust only when the configured URL points at this local snap.
+        # Explicit remote/custom endpoints continue to use their configured base.
+        if self._targets_same_local_service(endpoint):
+            self._openai_base_url = endpoint.rstrip("/")
+            self._api_style = "openai"
+            self._runtime_source = "snap-status"
+            self._runtime_engine = str(status.get("engine") or engine)
+            if self._is_generic_model_name(self.model):
+                self.model = discovered_model
+                self._resolved_model = discovered_model
+            self._snap_server_active = (
+                isinstance(services, dict) and services.get("server") == "active"
+            )
+            self._runtime_discovery_attempted = True
+
+    def _service_root(self) -> str:
+        """Return the scheme/authority root for backend health and non-OpenAI APIs."""
+        candidate = self._openai_base_url or self.base_url
+        parsed = urlparse(candidate)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return self.base_url.rstrip("/")
+
+    def _openai_base_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        if self._openai_base_url:
+            candidates.append(self._openai_base_url.rstrip("/"))
+            if self._runtime_source == "configuration" and urlparse(self.base_url).path not in {
+                "",
+                "/",
+            }:
+                return candidates
+        root = self._service_root()
+        candidates.extend((f"{root}/v1", f"{root}/v3", root))
+        return list(dict.fromkeys(candidates))
+
+    def _readiness_urls(self, model: str) -> list[str]:
+        root = self._service_root()
+        encoded_model = quote(model, safe="")
+        urls = [
+            f"{root}/health",
+            f"{root}/v2/health/ready",
+            f"{root}/v2/models/{encoded_model}/ready",
+            f"{root}/v1/models/{encoded_model}",
+            f"{root}/api/tags",
+        ]
+        urls.extend(f"{base}/models" for base in self._openai_base_candidates())
+        return list(dict.fromkeys(urls))
+
+    @staticmethod
+    def _models_from_payload(payload: Any) -> list[str]:
+        """Extract concrete model names from OpenAI, llama.cpp, or Ollama lists."""
+        if not isinstance(payload, dict):
+            return []
+        models: list[str] = []
+        for item in payload.get("data", []):
+            if isinstance(item, dict) and item.get("id"):
+                models.append(str(item["id"]))
+        for item in payload.get("models", []):
+            if isinstance(item, dict):
+                model_name = item.get("name") or item.get("model")
+                if model_name:
+                    models.append(str(model_name))
+        return list(dict.fromkeys(models))
 
     def set_environment_context(self, context: str) -> None:
         """Refresh the live host-grounded context injected into the system prompt.
@@ -84,6 +331,7 @@ class AIEngine:
         messages: list[dict[str, Any]],
         include_tools: bool = True,
     ) -> dict[str, Any]:
+        self._discover_runtime()
         api_style = self._detect_api_style()
         resolved_model = self._resolve_model_name()
 
@@ -101,9 +349,7 @@ class AIEngine:
                 if api_tools:
                     payload["tools"] = api_tools
 
-            response = self._post_inference("/v1/chat/completions", payload)
-            if response.status_code == 404:
-                response = self._post_inference("/chat/completions", payload)
+            response = self._post_openai_chat(payload)
 
             # If backend rejects the tools parameter, retry without it and
             # fall back to embedding tools in the system prompt from now on.
@@ -124,7 +370,7 @@ class AIEngine:
                     }
                     for message in messages
                 ]
-                response = self._post_inference("/v1/chat/completions", payload)
+                response = self._post_openai_chat(payload)
 
             response.raise_for_status()
             result = response.json()
@@ -177,20 +423,37 @@ class AIEngine:
                 "stream": False,
                 "format": "json",
             }
-            response = self._post_inference("/api/chat", payload)
+            response = self._post_inference(f"{self._service_root()}/api/chat", payload)
             response.raise_for_status()
             result = response.json()
             raw_content = result.get("message", {}).get("content", "")
 
         return _extract_structured_response(raw_content)
 
-    def _post_inference(self, path: str, payload: dict[str, Any]) -> requests.Response:
+    def _post_openai_chat(self, payload: dict[str, Any]) -> requests.Response:
+        """POST chat completion to the discovered base, probing compatible fallbacks."""
+        last_response: Optional[requests.Response] = None
+        for base in self._openai_base_candidates():
+            response = self._post_inference(f"{base}/chat/completions", payload)
+            last_response = response
+            if response.status_code != 404:
+                self._openai_base_url = base
+                return response
+        assert last_response is not None
+        return last_response
+
+    def _post_inference(self, path_or_url: str, payload: dict[str, Any]) -> requests.Response:
         """Retry transient disconnects after the local inference service is ready."""
+        url = (
+            path_or_url
+            if path_or_url.startswith(("http://", "https://"))
+            else f"{self._service_root()}/{path_or_url.lstrip('/')}"
+        )
         last_error: requests.RequestException | None = None
         for attempt in range(self.config.max_retries):
             try:
                 return requests.post(
-                    f"{self.base_url}{path}",
+                    url,
                     json=payload,
                     timeout=self.config.response_timeout,
                 )
@@ -210,54 +473,64 @@ class AIEngine:
     def _wait_for_inference_ready(self, timeout: float) -> bool:
         """Wait for a restarted local inference backend to expose a healthy endpoint."""
         deadline = time.monotonic() + max(timeout, 0.0)
-        health_paths = ("/health", "/v1/models", "/models", "/api/tags")
 
         while time.monotonic() < deadline:
-            for path in health_paths:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                try:
-                    response = requests.get(
-                        f"{self.base_url}{path}",
-                        timeout=min(2.0, remaining),
-                    )
-                    if response.status_code == 200:
-                        return True
-                except requests.RequestException:
-                    continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._runtime_is_ready(
+                self._resolve_model_name(),
+                timeout=min(2.0, remaining),
+                log_failure=False,
+            ):
+                return True
             time.sleep(0.5)
 
         return False
 
     def _detect_api_style(self) -> str:
         """Detect server API shape and cache the result."""
+        self._discover_runtime()
         if self._api_style:
             return self._api_style
 
+        root = self._service_root()
         try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            response = requests.get(f"{root}/api/tags", timeout=5)
             if response.status_code == 200:
                 self._api_style = "ollama"
                 return self._api_style
         except requests.RequestException:
             pass
 
-        for path in ("/v1/models", "/models", "/health"):
+        for base in self._openai_base_candidates():
             try:
-                response = requests.get(f"{self.base_url}{path}", timeout=5)
+                response = requests.get(f"{base}/models", timeout=5)
                 if response.status_code == 200:
+                    self._openai_base_url = base
                     self._api_style = "openai"
                     return self._api_style
             except requests.RequestException:
                 continue
 
-        # Fall back to openai-style routes used by current gemma4 snap.
+        for path in ("/health", "/v2/health/ready"):
+            try:
+                response = requests.get(f"{root}{path}", timeout=5)
+                if response.status_code == 200:
+                    self._openai_base_url = self._openai_base_url or f"{root}/v1"
+                    self._api_style = "openai"
+                    return self._api_style
+            except requests.RequestException:
+                continue
+
+        # Preserve backward compatibility for custom OpenAI-compatible services.
+        self._openai_base_url = self._openai_base_url or f"{root}/v1"
         self._api_style = "openai"
         return self._api_style
 
     def _resolve_model_name(self) -> str:
         """Pick a concrete model name, allowing broad config defaults like 'gemma4'."""
+        self._discover_runtime()
         if self._resolved_model:
             return self._resolved_model
 
@@ -273,6 +546,10 @@ class AIEngine:
                 self._resolved_model = candidate
                 return self._resolved_model
 
+        if not self._is_generic_model_name(configured):
+            self._resolved_model = configured
+            return self._resolved_model
+
         for candidate in candidates:
             if configured in candidate or candidate.startswith(configured):
                 self._resolved_model = candidate
@@ -283,37 +560,32 @@ class AIEngine:
 
     def _fetch_available_models(self) -> list[str]:
         """Query model list endpoints across supported API styles."""
-        endpoints = ("/v1/models", "/models", "/api/tags")
+        self._discover_runtime()
+        models: list[str] = []
+        if self._runtime_source == "snap-status" and self.model:
+            models.append(self.model)
+
+        root = self._service_root()
+        endpoints = [f"{base}/models" for base in self._openai_base_candidates()]
+        endpoints.append(f"{root}/api/tags")
 
         for endpoint in endpoints:
             try:
-                response = requests.get(f"{self.base_url}{endpoint}", timeout=5)
+                response = requests.get(endpoint, timeout=5)
                 if response.status_code != 200:
                     continue
 
                 payload = response.json()
-                models: list[str] = []
-
-                # OpenAI-style list payload
-                for item in payload.get("data", []) if isinstance(payload, dict) else []:
-                    model_id = item.get("id")
-                    if model_id:
-                        models.append(model_id)
-
-                # Gemma/Ollama-style list payload
-                for item in payload.get("models", []) if isinstance(payload, dict) else []:
-                    model_name = item.get("name") or item.get("model")
-                    if model_name:
-                        models.append(model_name)
+                models.extend(self._models_from_payload(payload))
 
                 if models:
-                    return list(dict.fromkeys(models))
+                    break
             except requests.RequestException:
                 continue
             except (TypeError, ValueError):
                 continue
 
-        return []
+        return list(dict.fromkeys(models))
 
     def _build_openai_tools(self) -> list[dict[str, Any]]:
         """Convert internal tool definitions to OpenAI-compatible tools format."""
