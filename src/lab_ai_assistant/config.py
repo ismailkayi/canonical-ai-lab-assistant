@@ -49,6 +49,9 @@ class Config:
     response_timeout: int = field(
         default_factory=lambda: int(os.getenv("INFERENCE_TIMEOUT_SEC", "120"))
     )
+    inference_max_output_tokens: int = field(
+        default_factory=lambda: int(os.getenv("INFERENCE_MAX_OUTPUT_TOKENS", "512"))
+    )
     inference_restart_timeout: float = field(
         default_factory=lambda: float(os.getenv("INFERENCE_RESTART_TIMEOUT_SEC", "15"))
     )

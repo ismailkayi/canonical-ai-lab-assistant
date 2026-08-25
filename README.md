@@ -190,6 +190,7 @@ Set environment variables via `.env` (or shell):
 INFERENCE_HOST=http://127.0.0.1:8336
 INFERENCE_MODEL=gemma4
 INFERENCE_TIMEOUT_SEC=120
+INFERENCE_MAX_OUTPUT_TOKENS=512
 INFERENCE_RESTART_TIMEOUT_SEC=15
 INFERENCE_MAX_RETRIES=3
 OPERATION_TIMEOUT_SEC=3600
@@ -200,7 +201,8 @@ LOG_LEVEL=INFO
 inference restart. `OPERATION_TIMEOUT_SEC` limits script-backed infrastructure
 operations. `INFERENCE_MAX_RETRIES` controls retry attempts for transient
 disconnects; lower it (for example `1`) to fail faster when a long request is
-timing out.
+timing out. `INFERENCE_MAX_OUTPUT_TOKENS` caps each inference response to avoid
+runaway generations that can cause long delays.
 
 ## Plan and Approval Safety
 

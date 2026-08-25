@@ -340,6 +340,7 @@ class AIEngine:
                 "model": resolved_model,
                 "messages": messages,
                 "stream": False,
+                "max_tokens": self.config.inference_max_output_tokens,
             }
 
             # Pass tool definitions via the native API parameter when available.
@@ -422,6 +423,7 @@ class AIEngine:
                 "messages": messages,
                 "stream": False,
                 "format": "json",
+                "options": {"num_predict": self.config.inference_max_output_tokens},
             }
             response = self._post_inference(f"{self._service_root()}/api/chat", payload)
             response.raise_for_status()
