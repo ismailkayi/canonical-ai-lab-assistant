@@ -10,6 +10,7 @@ RUN_CHAT=false
 OPEN_SHELL=false
 FORCE_REINSTALL=false
 CLEAN_VENV=false
+RUN_DIAGNOSE=false
 
 usage() {
   echo "Usage:"
@@ -17,6 +18,7 @@ usage() {
   echo "  ./dev.sh --bootstrap"
   echo "  ./dev.sh --check"
   echo "  ./dev.sh --chat"
+  echo "  ./dev.sh --diagnose"
   echo "  ./dev.sh --shell"
   echo "  ./dev.sh --force-reinstall"
   echo "  ./dev.sh --clean"
@@ -27,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --bootstrap) RUN_BOOTSTRAP=true ;;
     --check) RUN_CHECK=true ;;
     --chat) RUN_CHAT=true ;;
+    --diagnose) RUN_DIAGNOSE=true ;;
     --shell) OPEN_SHELL=true ;;
     --force-reinstall) FORCE_REINSTALL=true ;;
     --clean) CLEAN_VENV=true ;;
@@ -92,6 +95,11 @@ fi
 if [[ "${RUN_CHECK}" == "true" ]]; then
   echo "[info] Running inference health check..."
   "${LABAI}" check || true
+fi
+
+if [[ "${RUN_DIAGNOSE}" == "true" ]]; then
+  echo "[info] Running comprehensive inference diagnostics..."
+  bash "${ROOT_DIR}/scripts/diagnose_inference.sh" || true
 fi
 
 if [[ "${RUN_CHAT}" == "true" ]]; then
