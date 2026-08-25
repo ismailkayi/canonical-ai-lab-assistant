@@ -457,7 +457,7 @@ class AIEngine:
                     json=payload,
                     timeout=self.config.response_timeout,
                 )
-            except (requests.ConnectionError, requests.Timeout) as exc:
+            except requests.ConnectionError as exc:
                 last_error = exc
                 if attempt + 1 < self.config.max_retries:
                     logger.warning(
@@ -467,6 +467,29 @@ class AIEngine:
                         self.config.max_retries,
                     )
                     self._wait_for_inference_ready(self.config.inference_restart_timeout)
+            except requests.Timeout as exc:
+                last_error = exc
+                logger.warning(
+                    "Inference request timed out after %ss (attempt %s/%s)",
+                    self.config.response_timeout,
+                    attempt + 1,
+                    self.config.max_retries,
+                )
+                # Read timeouts on the same payload are usually not transient.
+                # Retry only when the backend appears unavailable.
+                backend_ready = self._runtime_is_ready(
+                    self._resolve_model_name(),
+                    timeout=2,
+                    log_failure=False,
+                )
+                if backend_ready or attempt + 1 >= self.config.max_retries:
+                    break
+                logger.warning(
+                    "Inference backend not ready after timeout; waiting before retry %s/%s",
+                    attempt + 2,
+                    self.config.max_retries,
+                )
+                self._wait_for_inference_ready(self.config.inference_restart_timeout)
         assert last_error is not None
         raise last_error
 

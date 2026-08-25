@@ -52,10 +52,10 @@ class Config:
     inference_restart_timeout: float = field(
         default_factory=lambda: float(os.getenv("INFERENCE_RESTART_TIMEOUT_SEC", "15"))
     )
+    max_retries: int = field(default_factory=lambda: int(os.getenv("INFERENCE_MAX_RETRIES", "3")))
     operation_timeout: int = field(
         default_factory=lambda: int(os.getenv("OPERATION_TIMEOUT_SEC", "3600"))
     )
-    max_retries: int = 3
 
     def __post_init__(self):
         # Resolve script root robustly for both source checkout and snap runtime.

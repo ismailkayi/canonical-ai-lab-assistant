@@ -191,13 +191,16 @@ INFERENCE_HOST=http://127.0.0.1:8336
 INFERENCE_MODEL=gemma4
 INFERENCE_TIMEOUT_SEC=120
 INFERENCE_RESTART_TIMEOUT_SEC=15
+INFERENCE_MAX_RETRIES=3
 OPERATION_TIMEOUT_SEC=3600
 LOG_LEVEL=INFO
 ```
 
 `INFERENCE_RESTART_TIMEOUT_SEC` controls how long the client waits for a local
 inference restart. `OPERATION_TIMEOUT_SEC` limits script-backed infrastructure
-operations.
+operations. `INFERENCE_MAX_RETRIES` controls retry attempts for transient
+disconnects; lower it (for example `1`) to fail faster when a long request is
+timing out.
 
 ## Plan and Approval Safety
 
@@ -378,6 +381,7 @@ Increase the timeout if the inference snap is slow to respond:
 ```bash
 export INFERENCE_TIMEOUT_SEC=60
 export INFERENCE_RESTART_TIMEOUT_SEC=20
+export INFERENCE_MAX_RETRIES=1
 lab-ai check
 ```
 
