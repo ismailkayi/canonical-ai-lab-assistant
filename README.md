@@ -312,10 +312,80 @@ canonical-ai-lab-assistant/
 
 ### Inference endpoint is unavailable
 
+**Symptom:** `Error: Inference engine not available at http://127.0.0.1:8336`
+
+#### Quick Diagnostic
+
+Run the comprehensive diagnostic script to identify the exact issue:
+
+```bash
+./scripts/diagnose_inference.sh
+```
+
+This checks:
+- Snap installation status
+- Service status
+- Port availability
+- Health endpoint
+- Available models
+- Chat endpoint
+- Python client connectivity
+
+#### Common Solutions
+
+**1. Snap services not running:**
 ```bash
 snap services gemma4
-sudo snap restart gemma4.server
+sudo snap restart gemma4
 lab-ai check
+```
+
+**2. Snap on different machine:**
+
+If you see different hostnames between snap installation and CLI execution:
+
+```bash
+# Find the snap machine's IP
+export INFERENCE_HOST="http://<snap_host_ip>:8336"
+lab-ai check
+```
+
+Or save to `.env`:
+```bash
+cat > .env << 'EOF'
+INFERENCE_HOST=http://<snap_host_ip>:8336
+INFERENCE_MODEL=gemma4
+EOF
+```
+
+**3. Model name mismatch:**
+
+The configured model may need adjustment based on installed version:
+
+```bash
+# Check available models
+curl http://127.0.0.1:8336/v1/models | jq '.data[].id'
+
+# Update the model name
+export INFERENCE_MODEL=gemma4-e4b-q4-k-m
+lab-ai check
+```
+
+**4. Timeout or connection issues:**
+
+Increase the timeout if the inference snap is slow to respond:
+
+```bash
+export INFERENCE_TIMEOUT_SEC=60
+export INFERENCE_RESTART_TIMEOUT_SEC=20
+lab-ai check
+```
+
+**5. Enable debug logging:**
+
+```bash
+export LOG_LEVEL=DEBUG
+lab-ai --debug check
 ```
 
 The client waits for the health endpoint and retries after a transient local
