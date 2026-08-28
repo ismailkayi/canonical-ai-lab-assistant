@@ -51,6 +51,8 @@ class ChatUI:
     def __init__(self, console: Optional[Console] = None):
         self.console = console or Console(theme=THEME, highlight=False)
         self._turn_count = 0
+        self._active_spinner: Optional[Spinner] = None
+        self._active_label = ""
 
     def print_welcome(self):
         """Display a clean welcome banner."""
@@ -109,13 +111,43 @@ class ChatUI:
         spinner_text.append(f" {PHASE_ICONS['thinking']} ", style="phase.active")
         spinner_text.append(label, style="phase.active")
 
-        with Live(
-            Spinner("dots", text=spinner_text, style="bright_magenta"),
-            console=self.console,
-            refresh_per_second=10,
-            transient=True,
-        ):
-            yield
+        spinner = Spinner("dots", text=spinner_text, style="bright_magenta")
+        self._active_spinner = spinner
+        self._active_label = label
+        try:
+            with Live(
+                spinner,
+                console=self.console,
+                refresh_per_second=10,
+                transient=True,
+            ):
+                yield
+        finally:
+            self._active_spinner = None
+            self._active_label = ""
+
+    def stream_preview(self, text: str) -> None:
+        """Show streamed answer text in place of the static spinner label.
+
+        The preview is transient: it disappears when the spinner stops, and the
+        formatted response is printed afterwards. Its only job is to prove the
+        assistant is working rather than frozen.
+        """
+        spinner = self._active_spinner
+        if spinner is None:
+            return
+
+        tail = " ".join(text.split())
+        max_chars = max(self.console.width - len(self._active_label) - 12, 20)
+        if len(tail) > max_chars:
+            tail = "..." + tail[-(max_chars - 3) :]
+
+        preview = Text()
+        preview.append(f" {PHASE_ICONS['thinking']} ", style="phase.active")
+        preview.append(self._active_label, style="phase.active")
+        if tail:
+            preview.append(f" — {tail}", style="dim")
+        spinner.update(text=preview)
 
     def print_phase(self, phase: str, detail: str = ""):
         """Show a short phase indicator (analyzing, planning, executing)."""

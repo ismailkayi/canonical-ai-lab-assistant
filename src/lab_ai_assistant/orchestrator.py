@@ -50,6 +50,11 @@ class LabOrchestrator:
         self.doc_fetcher = DocFetcher(cache_dir=config.state_dir)
         self.deployment_history: list[dict[str, Any]] = []
         self.ui = ChatUI()
+        # Let the engine surface transient runtime notices (for example a local
+        # model reloading after an idle unload) instead of appearing frozen.
+        self.ai_engine.status_notifier = lambda message: self.ui.print_phase("thinking", message)
+        # Show answer text as it is generated so long replies feel responsive.
+        self.ai_engine.stream_callback = self.ui.stream_preview
         self.plan_validator = PlanValidator()
         self.approval_manager = ApprovalManager()
         self.cluster_verifier = ClusterVerifier(config.repo_root / "terraform")
@@ -65,13 +70,18 @@ class LabOrchestrator:
 
         Streams output live so the user can see progress and respond to sudo prompts.
         """
+        script_args: dict[Path, list[str]] = {
+            # Honour a configured engine so bootstrap and runtime agree on which
+            # snap this host should use.
+            self.config.install_inference_script: ["--engine", self.config.inference_engine],
+        }
         for script in [self.config.prep_host_script, self.config.install_inference_script]:
             if not script.exists():
                 print(f"[warn] Script not found, skipping: {script}")
                 continue
             print(f"\n--- {script.name} ---")
             result = subprocess.run(
-                ["bash", str(script)],
+                ["bash", str(script), *script_args.get(script, [])],
                 cwd=self.config.repo_root,
                 # No capture_output — output goes directly to the terminal
             )
@@ -204,7 +214,8 @@ class LabOrchestrator:
                 self._record_deployment(action, parameters, tool_result)
 
             if self._is_failed_tool_result(tool_result):
-                self.ai_engine.record_tool_observation(action, tool_result)
+                # _compose_failed_tool_response closes the pending tool call while
+                # collecting the AI diagnosis.
                 return self._compose_failed_tool_response(action, tool_result)
 
             tool_result_for_ai = self._prepare_tool_result_for_ai(action, tool_result)
@@ -295,7 +306,8 @@ class LabOrchestrator:
         self._invalidate_host_state()
 
         if self._is_failed_tool_result(tool_result):
-            self.ai_engine.record_tool_observation(plan.action, tool_result)
+            # _compose_failed_tool_response closes the pending tool call while
+            # collecting the AI diagnosis.
             return self._compose_failed_tool_response(plan.action, tool_result)
 
         verification_result = self._verify_mutation_postconditions(plan)
@@ -724,7 +736,12 @@ class LabOrchestrator:
         )
 
     def _compose_failed_tool_response(self, action: str, tool_result: str) -> str:
-        """Return a deterministic failure summary so we never imply background work continues."""
+        """Return a deterministic failure summary so we never imply background work continues.
+
+        The deterministic text is authoritative. An AI root-cause analysis is
+        appended when available, because explaining a failed MicroCloud run is
+        where the model adds the most value.
+        """
         summary = self._truncate_text(tool_result.strip(), 1200)
         if action in (
             "deploy_microcloud",
@@ -733,11 +750,47 @@ class LabOrchestrator:
             "add_cluster_node",
             "verify_cluster_health",
         ):
-            return (
+            response = (
                 f"{action.replace('_', ' ').capitalize()} failed. No background work is running.\n\n"
                 f"Last error:\n{summary}"
             )
-        return f"Operation failed.\n\nLast error:\n{summary}"
+        else:
+            response = f"Operation failed.\n\nLast error:\n{summary}"
+
+        diagnosis = self._diagnose_failure(action, tool_result)
+        if diagnosis:
+            response += f"\n\nAI analysis:\n{diagnosis}"
+        return response
+
+    def _diagnose_failure(self, action: str, tool_result: str) -> str:
+        """Best-effort AI root-cause analysis; never blocks the failure report."""
+        try:
+            evidence = self._bound_failure_evidence(tool_result)
+            self.ui.print_phase("analyzing", "Diagnosing the failure...")
+            return self.ai_engine.diagnose_tool_failure(action, evidence)
+        except Exception as exc:
+            logger.debug(f"Could not diagnose failure for {action}: {exc}")
+            return ""
+
+    _FAILURE_EVIDENCE_CHARS = 4000
+
+    def _bound_failure_evidence(self, tool_result: str) -> str:
+        """Keep failure evidence small enough to be safe for the model context.
+
+        A failed deployment can emit very large Ansible output. Errors normally
+        surface at the end of a run, so the tail is weighted more heavily than
+        the head.
+        """
+        text = (tool_result or "").strip()
+        if len(text) <= self._FAILURE_EVIDENCE_CHARS:
+            return text
+        head_chars = self._FAILURE_EVIDENCE_CHARS // 3
+        tail_chars = self._FAILURE_EVIDENCE_CHARS - head_chars
+        return (
+            f"(evidence truncated for context safety; original length {len(text)} chars)\n"
+            f"Head:\n{text[:head_chars]}\n\n"
+            f"Tail:\n{text[-tail_chars:]}"
+        )
 
     def _resolve_tool_action(
         self,
@@ -747,25 +800,22 @@ class LabOrchestrator:
         parameters: dict[str, Any],
         user_input: str,
     ) -> str | None:
-        """Normalize generic tool labels back to a concrete tool name when possible."""
+        """Normalize generic tool labels back to a concrete tool name when possible.
+
+        Only the user's own words are searched. The model's message and reasoning
+        are excluded on purpose: an incidental word like "remove" inside its
+        explanation must never be enough to select a destructive operation.
+        """
         known_tools = {
             tool["name"] for tool in get_tool_definitions().get("tools", []) if tool.get("name")
         }
         if action in known_tools:
             return action
 
-        text = "\n".join(part for part in (user_input, message, reasoning) if part).lower()
+        text = (user_input or "").lower()
 
-        if any(
-            keyword in text for keyword in ("delete", "cleanup", "clean up", "destroy", "remove")
-        ):
-            return "delete_environment"
-        if any(keyword in text for keyword in ("list", "show", "enumerate")) and any(
-            keyword in text for keyword in ("lab", "environment", "environments", "labs")
-        ):
-            return "list_environments"
-        if any(keyword in text for keyword in ("health", "status", "check", "verify")):
-            return "verify_cluster_health"
+        # Ordered from most specific to least so that, for example, "add nodes"
+        # is not swallowed by the broader scale rule.
         if any(
             keyword in text
             for keyword in ("add node", "add nodes", "join node", "join nodes", "expand cluster")
@@ -783,12 +833,21 @@ class LabOrchestrator:
             )
         ):
             return "scale_environment"
-
-        workspace_hint = parameters.get("workspace") if isinstance(parameters, dict) else None
-        if action == "tool_call" and isinstance(workspace_hint, str) and workspace_hint:
+        if any(keyword in text for keyword in ("list", "show", "enumerate")) and any(
+            keyword in text for keyword in ("lab", "environment", "environments", "labs")
+        ):
+            return "list_environments"
+        if any(keyword in text for keyword in ("health", "status", "check", "verify")):
+            return "verify_cluster_health"
+        if any(
+            keyword in text for keyword in ("delete", "cleanup", "clean up", "destroy", "remove")
+        ):
             return "delete_environment"
 
-        return action if action in known_tools else None
+        # Deliberately no destructive default: an unrecognised action with a
+        # workspace parameter is ambiguous, and guessing "delete" from ambiguity
+        # is never the safe choice.
+        return None
 
     def _compose_user_facing_response(self, message: str, reasoning: str) -> str:
         """Build a concise, readable assistant response for terminal UX."""
@@ -1295,10 +1354,29 @@ class LabOrchestrator:
             return int(num / (1024 * 1024))
         return int(num)
 
+    # An explicit tier is a decision the model already made; it maps directly to
+    # a sizing profile. Free-text inference is only a fallback for when no tier
+    # was supplied.
+    _TIER_PROFILES: dict[str, str] = {
+        "minimal": "conservative",
+        "conservative": "conservative",
+        "small": "balanced",
+        "medium": "balanced",
+        "balanced": "balanced",
+        "large": "performance",
+        "performance": "performance",
+    }
+
     @staticmethod
     def _tier_to_profile(tier_str: str | None, workload: str = "") -> str:
         """Map a requested tier/workload to a host-aware sizing profile."""
-        text = f"{tier_str or ''} {workload or ''}".lower()
+        explicit = (tier_str or "").strip().lower()
+        if explicit in LabOrchestrator._TIER_PROFILES:
+            # Honour the model's choice instead of re-deriving it from prose,
+            # where an unrelated word such as "dev" could silently downgrade it.
+            return LabOrchestrator._TIER_PROFILES[explicit]
+
+        text = f"{explicit} {workload or ''}".lower()
         if any(
             k in text
             for k in ("minimal", "poc", "proof of concept", "dev", "sandbox", "conservative")
@@ -1386,7 +1464,7 @@ class LabOrchestrator:
     # the AI from hallucinating options and crashing the scripts.
     _SCRIPT_ACCEPTED_PARAMS: dict[str, set[str]] = {
         "prep_host": set(),
-        "install_inference_snap": {"engine"},
+        "install_inference_snap": {"engine", "model"},
         "deploy_microcloud": {
             "scenario",
             "nodes",

@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote, urlparse
 
 import requests
@@ -37,12 +37,29 @@ class AIEngine:
         self._runtime_engine: Optional[str] = None
         self._snap_server_active = False
         self._supports_native_tools: bool = True  # optimistically assume support
+        self._supports_thinking_control: bool = True  # optimistically assume support
         self._pending_tool_call_id: Optional[str] = None
         self.max_history_messages: int = 20
         # Live, host-grounded context injected into the system prompt every turn.
         # The orchestrator refreshes this so the model always plans against the
         # REAL host capacity and existing environments, never guesses.
         self.environment_context: str = ""
+        # Optional sink for transient runtime notices (for example a local model
+        # reloading after an idle unload). Kept as a plain callable so the engine
+        # stays independent of any particular UI.
+        self.status_notifier: Optional[Callable[[str], None]] = None
+        # Optional sink for streamed answer text. Receives the accumulated answer
+        # so far, letting a UI show progress while the model is still writing.
+        self.stream_callback: Optional[Callable[[str], None]] = None
+
+    def _notify(self, message: str) -> None:
+        """Surface a transient runtime notice without ever breaking the request."""
+        if not self.status_notifier:
+            return
+        try:
+            self.status_notifier(message)
+        except Exception:  # pragma: no cover - notification must never fail a call
+            logger.debug("Status notifier raised; continuing", exc_info=True)
 
     def is_available(self) -> bool:
         """Check whether the discovered inference runtime and model are ready."""
@@ -330,18 +347,28 @@ class AIEngine:
         self,
         messages: list[dict[str, Any]],
         include_tools: bool = True,
+        _thinking_retry: bool = False,
     ) -> dict[str, Any]:
         self._discover_runtime()
         api_style = self._detect_api_style()
         resolved_model = self._resolve_model_name()
 
+        # Thinking models burn the entire output budget on hidden reasoning and
+        # return an empty answer, so keep it off unless explicitly enabled.
+        disable_thinking = not self.config.inference_enable_thinking or _thinking_retry
+
         if api_style == "openai":
+            # Streaming is only worthwhile when someone is watching the output.
+            want_stream = bool(self.config.inference_stream and self.stream_callback)
             payload: dict[str, Any] = {
                 "model": resolved_model,
                 "messages": messages,
-                "stream": False,
+                "stream": want_stream,
                 "max_tokens": self.config.inference_max_output_tokens,
             }
+
+            if disable_thinking and self._supports_thinking_control:
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
 
             # Pass tool definitions via the native API parameter when available.
             # This is significantly more token-efficient than embedding in prompt.
@@ -350,7 +377,17 @@ class AIEngine:
                 if api_tools:
                     payload["tools"] = api_tools
 
-            response = self._post_openai_chat(payload)
+            response = self._post_openai_chat(payload, stream=want_stream)
+
+            # Not every OpenAI-compatible backend understands chat_template_kwargs.
+            # Drop it before assuming the rest of the request is at fault.
+            if response.status_code in (400, 422) and "chat_template_kwargs" in payload:
+                logger.warning(
+                    "Backend rejected chat_template_kwargs; retrying without thinking control"
+                )
+                self._supports_thinking_control = False
+                payload.pop("chat_template_kwargs", None)
+                response = self._post_openai_chat(payload, stream=want_stream)
 
             # If backend rejects the tools parameter, retry without it and
             # fall back to embedding tools in the system prompt from now on.
@@ -371,11 +408,29 @@ class AIEngine:
                     }
                     for message in messages
                 ]
-                response = self._post_openai_chat(payload)
+                response = self._post_openai_chat(payload, stream=want_stream)
 
             response.raise_for_status()
-            result = response.json()
-            message_payload = result.get("choices", [{}])[0].get("message", {})
+            if want_stream:
+                try:
+                    message_payload, finish_reason = self._consume_openai_stream(response)
+                except (requests.RequestException, ValueError) as exc:
+                    # A broken stream must not lose the turn; the same request is
+                    # cheap to repeat without streaming.
+                    logger.warning("Streaming response failed (%s); retrying without stream", exc)
+                    payload["stream"] = False
+                    response = self._post_openai_chat(payload, stream=False)
+                    response.raise_for_status()
+                    result = response.json()
+                    choice = result.get("choices", [{}])[0]
+                    message_payload = choice.get("message", {})
+                    finish_reason = choice.get("finish_reason", "")
+            else:
+                result = response.json()
+                choice = result.get("choices", [{}])[0]
+                message_payload = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "")
+
             tool_calls = message_payload.get("tool_calls", [])
 
             if isinstance(tool_calls, list) and tool_calls:
@@ -414,9 +469,38 @@ class AIEngine:
             content = message_payload.get("content", "")
             reasoning_content = message_payload.get("reasoning_content", "")
 
-            # Some local OpenAI-compatible backends may emit reasoning_content while
-            # leaving content empty. Prefer content, but fall back to reasoning text.
-            raw_content = content if content else reasoning_content
+            raw_content = content
+            if not raw_content and reasoning_content:
+                if finish_reason == "length":
+                    # A thinking model spent its whole budget on hidden reasoning
+                    # and never emitted an answer. That transcript is an internal
+                    # monologue, so surfacing it would read as the assistant
+                    # talking to itself mid-sentence.
+                    if not disable_thinking:
+                        logger.warning(
+                            "Model exhausted its output budget on reasoning; "
+                            "retrying with thinking disabled"
+                        )
+                        return self._call_inference(
+                            messages,
+                            include_tools=include_tools,
+                            _thinking_retry=True,
+                        )
+                    logger.warning(
+                        "Model returned truncated reasoning and no answer even with "
+                        "thinking disabled; consider raising INFERENCE_MAX_OUTPUT_TOKENS"
+                    )
+                    return {
+                        "content": (
+                            "The model used its entire response budget on internal "
+                            "reasoning without producing an answer. Try a narrower "
+                            "question, or raise INFERENCE_MAX_OUTPUT_TOKENS."
+                        ),
+                        "error": True,
+                    }
+                # Some backends complete normally but report the answer only in
+                # reasoning_content. In that case it really is the response.
+                raw_content = reasoning_content
         else:
             payload = {
                 "model": resolved_model,
@@ -432,11 +516,15 @@ class AIEngine:
 
         return _extract_structured_response(raw_content)
 
-    def _post_openai_chat(self, payload: dict[str, Any]) -> requests.Response:
+    def _post_openai_chat(
+        self,
+        payload: dict[str, Any],
+        stream: bool = False,
+    ) -> requests.Response:
         """POST chat completion to the discovered base, probing compatible fallbacks."""
         last_response: Optional[requests.Response] = None
         for base in self._openai_base_candidates():
-            response = self._post_inference(f"{base}/chat/completions", payload)
+            response = self._post_inference(f"{base}/chat/completions", payload, stream=stream)
             last_response = response
             if response.status_code != 404:
                 self._openai_base_url = base
@@ -444,7 +532,132 @@ class AIEngine:
         assert last_response is not None
         return last_response
 
-    def _post_inference(self, path_or_url: str, payload: dict[str, Any]) -> requests.Response:
+    def _consume_openai_stream(
+        self,
+        response: requests.Response,
+    ) -> tuple[dict[str, Any], str]:
+        """Assemble a streamed chat completion into a normal message payload.
+
+        Returns the same shape as a non-streamed response so all downstream
+        interpretation stays in one place.
+        """
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: dict[int, dict[str, Any]] = {}
+        finish_reason = ""
+        emit = self._stream_emitter()
+
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:") :].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+
+            choices = event.get("choices") or [{}]
+            choice = choices[0] if isinstance(choices[0], dict) else {}
+            if choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
+
+            delta = choice.get("delta") or {}
+            if not isinstance(delta, dict):
+                continue
+
+            chunk = delta.get("content")
+            if isinstance(chunk, str) and chunk:
+                content_parts.append(chunk)
+                emit("".join(content_parts))
+
+            reasoning_chunk = delta.get("reasoning_content")
+            if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                reasoning_parts.append(reasoning_chunk)
+
+            self._merge_tool_call_deltas(tool_calls, delta.get("tool_calls"))
+
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(content_parts),
+        }
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
+        return message, finish_reason
+
+    def _stream_emitter(self) -> Callable[[str], None]:
+        """Build a guarded emitter that only forwards human-readable prose.
+
+        The model may answer with the structured JSON contract instead of prose.
+        Showing a half-written JSON object would be noise, so once the answer
+        looks structured the preview stays silent and only the parsed result is
+        shown at the end.
+        """
+        state = {"decided": False, "suppress": False}
+
+        def emit(accumulated: str) -> None:
+            if not self.stream_callback:
+                return
+            if not state["decided"]:
+                stripped = accumulated.lstrip()
+                if not stripped:
+                    return
+                state["decided"] = True
+                state["suppress"] = stripped[0] in "{[`"
+            if state["suppress"]:
+                return
+            try:
+                self.stream_callback(accumulated)
+            except Exception:  # pragma: no cover - preview must never break a turn
+                logger.debug("Stream callback raised; continuing", exc_info=True)
+
+        return emit
+
+    @staticmethod
+    def _merge_tool_call_deltas(
+        tool_calls: dict[int, dict[str, Any]],
+        deltas: Any,
+    ) -> None:
+        """Merge streamed tool-call fragments, whose arguments arrive in pieces."""
+        if not isinstance(deltas, list):
+            return
+        for item in deltas:
+            if not isinstance(item, dict):
+                continue
+            index = item.get("index", 0)
+            if not isinstance(index, int):
+                index = 0
+            call = tool_calls.setdefault(
+                index,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if item.get("id"):
+                call["id"] = str(item["id"])
+            if item.get("type"):
+                call["type"] = str(item["type"])
+            function = item.get("function")
+            if not isinstance(function, dict):
+                continue
+            if function.get("name"):
+                call["function"]["name"] = str(function["name"])
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                call["function"]["arguments"] += arguments
+
+    def _post_inference(
+        self,
+        path_or_url: str,
+        payload: dict[str, Any],
+        stream: bool = False,
+    ) -> requests.Response:
         """Retry transient disconnects after the local inference service is ready."""
         url = (
             path_or_url
@@ -458,15 +671,21 @@ class AIEngine:
                     url,
                     json=payload,
                     timeout=self.config.response_timeout,
+                    stream=stream,
                 )
             except requests.ConnectionError as exc:
                 last_error = exc
                 if attempt + 1 < self.config.max_retries:
+                    # Local inference snaps unload the model after an idle period,
+                    # so the first request after a pause is dropped mid-connection.
                     logger.warning(
                         "Inference request disconnected; waiting for backend readiness "
                         "before retry %s/%s",
                         attempt + 2,
                         self.config.max_retries,
+                    )
+                    self._notify(
+                        "Local inference model is reloading after being idle; waiting for it..."
                     )
                     self._wait_for_inference_ready(self.config.inference_restart_timeout)
             except requests.Timeout as exc:
@@ -491,6 +710,7 @@ class AIEngine:
                     attempt + 2,
                     self.config.max_retries,
                 )
+                self._notify("Local inference backend is not responding yet; waiting for it...")
                 self._wait_for_inference_ready(self.config.inference_restart_timeout)
         assert last_error is not None
         raise last_error
@@ -922,6 +1142,49 @@ ENVIRONMENT MANAGEMENT:
         )
         self._pending_tool_call_id = None
         self._trim_conversation_history()
+
+    def diagnose_tool_failure(self, tool_name: str, result: str) -> str:
+        """Ask the model to explain why a tool failed and what to try next.
+
+        Tool definitions are deliberately withheld so this call can only produce
+        analysis text; it can never trigger another infrastructure operation. The
+        caller keeps its own deterministic failure summary, so an empty return
+        value simply means no analysis is appended.
+        """
+        self.record_tool_observation(tool_name, result)
+
+        prompt = (
+            f"The '{tool_name}' operation failed. Raw evidence:\n\n{result}\n\n"
+            "Act as a MicroCloud/LXD troubleshooting expert and answer in at most "
+            "8 lines:\n"
+            "1. Most likely root cause, justified by specific evidence above.\n"
+            "2. The single safest next diagnostic or remediation step.\n"
+            "Do not claim the operation succeeded, do not imply background work "
+            "continues, and do not invent log lines that are not shown."
+        )
+        self.conversation_history.append({"role": "user", "content": prompt})
+        self._trim_conversation_history()
+
+        messages = [
+            {"role": "system", "content": self._get_default_system_prompt(include_tools=False)}
+        ] + self.conversation_history
+
+        try:
+            response = self._call_inference(messages, include_tools=False)
+        except Exception as exc:
+            logger.error(f"Failure diagnosis could not be generated: {exc}")
+            return ""
+
+        if response.get("error"):
+            return ""
+
+        text = str(
+            response.get("content") or response.get("message") or response.get("reasoning") or ""
+        ).strip()
+        if text:
+            self.conversation_history.append({"role": "assistant", "content": text})
+            self._trim_conversation_history()
+        return text
 
     def feed_tool_result(self, tool_name: str, result: str) -> dict[str, Any]:
         """Inject a tool result into conversation history and get the AI's next step.

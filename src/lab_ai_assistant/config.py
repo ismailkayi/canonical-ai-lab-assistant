@@ -52,6 +52,22 @@ class Config:
     inference_max_output_tokens: int = field(
         default_factory=lambda: int(os.getenv("INFERENCE_MAX_OUTPUT_TOKENS", "512"))
     )
+    # Thinking models (for example Gemma 4) otherwise spend the whole output
+    # budget on hidden reasoning and return an empty answer. Keep it off so the
+    # assistant stays interactive.
+    inference_enable_thinking: bool = field(
+        default_factory=lambda: (
+            os.getenv("INFERENCE_ENABLE_THINKING", "false").lower() in {"1", "true", "yes", "on"}
+        )
+    )
+    # Streaming only changes how the answer is delivered, not what is generated.
+    # It exists so the first words appear immediately instead of after the whole
+    # response has been produced.
+    inference_stream: bool = field(
+        default_factory=lambda: (
+            os.getenv("INFERENCE_STREAM", "true").lower() not in {"0", "false", "no", "off"}
+        )
+    )
     inference_restart_timeout: float = field(
         default_factory=lambda: float(os.getenv("INFERENCE_RESTART_TIMEOUT_SEC", "15"))
     )

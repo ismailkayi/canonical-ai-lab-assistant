@@ -11,6 +11,7 @@ from lab_ai_assistant.planning import (
     PlanValidation,
     TopologySpec,
 )
+from lab_ai_assistant.tools import get_tool_definitions
 from lab_ai_assistant.verification import ServiceCheck, VerificationReport
 
 
@@ -197,6 +198,10 @@ def test_script_failure_closes_native_tool_call(config) -> None:
     orchestrator.ai_engine._pending_tool_call_id = "call-failed"
     orchestrator._execute_action = lambda *_args: "Script failed (exit 1): boom"
     orchestrator._record_deployment = lambda *args: None
+    # Keep the diagnosis step offline; we assert on wiring, not model wording.
+    orchestrator.ai_engine._call_inference = lambda *_args, **_kwargs: {
+        "content": "Root cause: the workspace lock was still held."
+    }
     plan = ExecutionPlan(
         action="delete_environment",
         parameters={"workspace": "lab_microcloud"},
@@ -207,8 +212,19 @@ def test_script_failure_closes_native_tool_call(config) -> None:
 
     assert "failed" in result.lower()
     assert orchestrator.ai_engine._pending_tool_call_id is None
-    assert orchestrator.ai_engine.conversation_history[-1]["role"] == "tool"
-    assert "Script failed" in orchestrator.ai_engine.conversation_history[-1]["content"]
+
+    tool_messages = [
+        message
+        for message in orchestrator.ai_engine.conversation_history
+        if message.get("role") == "tool"
+    ]
+    assert tool_messages, "the native tool call must still be closed on failure"
+    assert tool_messages[-1]["tool_call_id"] == "call-failed"
+    assert "Script failed" in tool_messages[-1]["content"]
+
+    # The deterministic summary stays authoritative, with AI analysis appended.
+    assert "No background work is running" in result
+    assert "Root cause: the workspace lock was still held." in result
 
 
 def test_expansion_revalidation_rejects_changed_geometry(config) -> None:
@@ -427,3 +443,132 @@ def test_empty_native_tool_call_is_closed(config) -> None:
     assert "empty response" in result.lower()
     assert orchestrator.ai_engine._pending_tool_call_id is None
     assert "valid action name" in orchestrator.ai_engine.conversation_history[-1]["content"]
+
+
+def test_large_failure_output_is_bounded_before_diagnosis(config) -> None:
+    """A huge Ansible log must not flood the model context."""
+    orchestrator = LabOrchestrator(config)
+    huge = "filler line\n" * 5000 + "FATAL: no route to host 10.0.5.22:9443"
+
+    evidence = orchestrator._bound_failure_evidence(huge)
+
+    assert len(evidence) < len(huge)
+    assert "truncated for context safety" in evidence
+    # The decisive error sits at the end of a run, so the tail must survive.
+    assert "FATAL: no route to host 10.0.5.22:9443" in evidence
+
+
+def test_small_failure_output_is_passed_through_untouched(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    assert orchestrator._bound_failure_evidence("Script failed (exit 1): boom") == (
+        "Script failed (exit 1): boom"
+    )
+
+
+def test_bootstrap_passes_configured_engine_to_installer(config, monkeypatch) -> None:
+    """Bootstrap must install the engine the runtime will actually talk to."""
+    config.inference_engine = "qwen3"
+    orchestrator = LabOrchestrator(config)
+    commands: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return _Result()
+
+    monkeypatch.setattr("lab_ai_assistant.orchestrator.subprocess.run", fake_run)
+    orchestrator.bootstrap_host()
+
+    installer = [cmd for cmd in commands if "install_inference_snap.sh" in cmd[1]]
+    assert installer, "the inference installer must run during bootstrap"
+    assert installer[0][2:] == ["--engine", "qwen3"]
+
+    prep = [cmd for cmd in commands if "prep_host.sh" in cmd[1]]
+    assert prep and prep[0][2:] == [], "prep_host takes no arguments"
+
+
+def test_explicit_tier_is_not_overridden_by_workload_text(config) -> None:
+    """The model's explicit sizing decision must survive unrelated prose."""
+    orchestrator = LabOrchestrator(config)
+
+    # "dev" in the workload used to silently downgrade an explicit "large".
+    assert orchestrator._tier_to_profile("large", "dev sandbox") == "performance"
+    assert orchestrator._tier_to_profile("medium", "poc") == "balanced"
+    assert orchestrator._tier_to_profile("minimal", "production HA") == "conservative"
+
+
+def test_every_advertised_tier_maps_to_a_profile(config) -> None:
+    """Each tier the tool schema offers must resolve to a real sizing profile."""
+    orchestrator = LabOrchestrator(config)
+    schema = get_tool_definitions()
+    deploy = next(t for t in schema["tools"] if t["name"] == "deploy_microcloud")
+    tiers = deploy["parameters"]["properties"]["sizing_tier"]["enum"]
+
+    for tier in tiers:
+        assert orchestrator._tier_to_profile(tier) in {
+            "conservative",
+            "balanced",
+            "performance",
+        }
+
+
+def test_tier_is_inferred_only_when_absent(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    assert orchestrator._tier_to_profile(None, "a small poc lab") == "conservative"
+    assert orchestrator._tier_to_profile("", "production cluster") == "performance"
+    assert orchestrator._tier_to_profile(None, "") == "balanced"
+
+
+def test_model_prose_cannot_trigger_a_destructive_action(config) -> None:
+    """A stray word in the model's own explanation must not select a delete."""
+    orchestrator = LabOrchestrator(config)
+
+    resolved = orchestrator._resolve_tool_action(
+        "tool_call",
+        message="I will remove the guesswork and list what you have.",
+        reasoning="Nothing here should destroy anything.",
+        parameters={"workspace": "lab_microcloud"},
+        user_input="show my labs",
+    )
+
+    assert resolved == "list_environments"
+
+
+def test_unknown_action_with_workspace_is_not_assumed_to_be_delete(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    resolved = orchestrator._resolve_tool_action(
+        "tool_call",
+        message="",
+        reasoning="",
+        parameters={"workspace": "lab_microcloud"},
+        user_input="tell me about microcloud storage",
+    )
+
+    assert resolved is None
+
+
+def test_user_intent_still_routes_known_lifecycle_requests(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    resolve = orchestrator._resolve_tool_action
+
+    assert resolve("tool_call", "", "", {}, "delete lab_microcloud") == "delete_environment"
+    assert resolve("tool_call", "", "", {}, "add nodes to my cluster") == "add_cluster_node"
+    assert resolve("tool_call", "", "", {}, "scale it to 5 nodes") == "scale_environment"
+    assert resolve("tool_call", "", "", {}, "list my labs") == "list_environments"
+    assert resolve("tool_call", "", "", {}, "check cluster health") == "verify_cluster_health"
+
+
+def test_add_nodes_is_not_swallowed_by_the_scale_rule(config) -> None:
+    """Ordering matters: 'add nodes' is more specific than 'more nodes'."""
+    orchestrator = LabOrchestrator(config)
+
+    resolved = orchestrator._resolve_tool_action(
+        "tool_call", "", "", {}, "add nodes so I have more nodes"
+    )
+
+    assert resolved == "add_cluster_node"

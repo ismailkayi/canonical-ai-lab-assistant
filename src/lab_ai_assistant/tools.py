@@ -34,7 +34,15 @@ def get_tool_definitions() -> dict[str, Any]:
                             "type": "string",
                             "description": "Snap name (default: gemma4)",
                             "default": "gemma4",
-                        }
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Optional model variant to select. Smaller models download "
+                                "faster and need less RAM (gemma4: e2b ~2.9GB, e4b ~5.0GB "
+                                "default, 26b ~15.8GB)."
+                            ),
+                        },
                     },
                     "required": [],
                 },

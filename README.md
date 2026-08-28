@@ -65,6 +65,17 @@ is required.
 Bootstrap installs or prepares snapd, LXD, OpenTofu, Ansible, an SSH key, and
 the local inference snap (`gemma4` by default).
 
+The snap package itself is small, but the model is downloaded separately the
+first time it is needed. Bootstrap now waits for that download and for the
+service to answer, so the first chat message does not stall on a silent
+multi-gigabyte fetch. For the `gemma4` snap the choices are roughly `e2b`
+(~2.9 GB), the default `e4b` (~5.0 GB), and `26b` (~15.8 GB). On a small or
+CPU-only host, pick the smaller model:
+
+```bash
+bash scripts/install_inference_snap.sh --model e2b
+```
+
 ## Recommended Setup (`dev.sh`)
 
 Use this path unless you specifically want to manage the Python virtual
@@ -191,6 +202,8 @@ INFERENCE_HOST=http://127.0.0.1:8336
 INFERENCE_MODEL=gemma4
 INFERENCE_TIMEOUT_SEC=120
 INFERENCE_MAX_OUTPUT_TOKENS=512
+INFERENCE_ENABLE_THINKING=false
+INFERENCE_STREAM=true
 INFERENCE_RESTART_TIMEOUT_SEC=15
 INFERENCE_MAX_RETRIES=3
 OPERATION_TIMEOUT_SEC=3600
@@ -203,6 +216,17 @@ operations. `INFERENCE_MAX_RETRIES` controls retry attempts for transient
 disconnects; lower it (for example `1`) to fail faster when a long request is
 timing out. `INFERENCE_MAX_OUTPUT_TOKENS` caps each inference response to avoid
 runaway generations that can cause long delays.
+
+`INFERENCE_ENABLE_THINKING` stays `false` by default. Thinking-capable models
+such as Gemma 4 otherwise spend the whole output budget on hidden reasoning and
+return an empty answer, which makes short requests far slower without improving
+them. Set it to `true` only if you want extended reasoning and also raise
+`INFERENCE_MAX_OUTPUT_TOKENS` well above the reasoning length.
+
+`INFERENCE_STREAM` shows the answer while it is still being written, so the
+first words appear in about a second instead of after the full response. It
+changes delivery only, never the result. Set it to `false` for plain,
+non-animated output.
 
 ## Plan and Approval Safety
 
@@ -387,7 +411,19 @@ export INFERENCE_MAX_RETRIES=1
 lab-ai check
 ```
 
-**5. Enable debug logging:**
+**5. First message after a pause is slow:**
+
+Inference snaps unload the model after an idle period, so the next request has
+to load it again. The assistant reports this as "Local inference model is
+reloading after being idle" and retries automatically. To keep the model
+resident for longer:
+
+```bash
+gemma4 get sleep-idle-seconds
+gemma4 set sleep-idle-seconds=3600
+```
+
+**6. Enable debug logging:**
 
 ```bash
 export LOG_LEVEL=DEBUG
