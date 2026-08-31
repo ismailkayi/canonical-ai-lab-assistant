@@ -37,6 +37,7 @@ LOCAL_DISK_GIB=0
 NETWORK_MODE="standard-2nic"
 OVN_UNDERLAY_CIDR=""
 CEPH_NETWORK_CIDR=""
+RESOURCE_NAMESPACE=""
 USER_PREFIX="lab"
 AUTO_APPROVE=false
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
@@ -61,6 +62,7 @@ for arg in "$@"; do
         --network-mode=*)    NETWORK_MODE="${arg#*=}" ;;
         --ovn-underlay-cidr=*) OVN_UNDERLAY_CIDR="${arg#*=}" ;;
         --ceph-network-cidr=*) CEPH_NETWORK_CIDR="${arg#*=}" ;;
+        --resource-namespace=*) RESOURCE_NAMESPACE="${arg#*=}" ;;
         --network-interface=*) NETWORK_INTERFACE="${arg#*=}" ;;
         --ovn-uplink-interface=*) OVN_UPLINK_INTERFACE="${arg#*=}" ;;
         --ceph-osd-disk=*) CEPH_OSD_DISK="${arg#*=}" ;;
@@ -199,7 +201,9 @@ detect_lxd_defaults() {
 }
 
 validate_plane_subnet_availability() {
-    [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]] || return
+    if [[ "${NETWORK_MODE}" != "fully-segregated-4nic" ]]; then
+        return 0
+    fi
 
     local existing_subnets=""
     existing_subnets=$(
@@ -390,6 +394,13 @@ print_microcloud_summary() {
 # Main
 # -----------------------------------------------------------------------
 WORKSPACE_NAME="${USER_PREFIX}_microcloud"
+if [[ -z "${RESOURCE_NAMESPACE}" ]]; then
+    RESOURCE_NAMESPACE=$(printf '%s' "${WORKSPACE_NAME}" | sha256sum | cut -c1-8)
+fi
+if ! [[ "${RESOURCE_NAMESPACE}" =~ ^[0-9a-f]{8}$ ]]; then
+    log_error "resource-namespace must contain exactly eight lowercase hex characters"
+    exit 1
+fi
 
 print_section "MicroCloud Deployment — scenario: ${SCENARIO}"
 
@@ -420,17 +431,14 @@ print_kv "Cluster NIC" "${NETWORK_INTERFACE:-auto-detect}"
 print_kv "OVN uplink NIC" "${OVN_UPLINK_INTERFACE:-auto-detect}"
 print_kv "Ceph OSD disk" "${CEPH_OSD_DISK:-auto-detect}"
 print_kv "Workspace" "${WORKSPACE_NAME}"
+print_kv "Resource namespace" "${RESOURCE_NAMESPACE}"
 echo ""
-
-if [[ "${AUTO_APPROVE}" != "true" ]]; then
-    read -r -p "Proceed with deployment? [y/N] " confirm
-    [[ "${confirm,,}" != "y" ]] && { log_warn "Aborted."; exit 0; }
-fi
 
 # --- OpenTofu provisioning ---
 cd "${TERRAFORM_DIR}"
 tofu init -input=false >/dev/null 2>&1
 
+STALE_WORKSPACE=false
 if tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}"; then
     set +e
     EXISTING_STATE=$(TF_WORKSPACE="${WORKSPACE_NAME}" tofu state list 2>&1)
@@ -445,6 +453,98 @@ if tofu workspace list | tr -d '* ' | grep -qx "${WORKSPACE_NAME}"; then
         log_error "Workspace '${WORKSPACE_NAME}' exists, but its state could not be inspected safely"
         exit 1
     fi
+    STALE_WORKSPACE=true
+fi
+
+LXD_PREFIX="${WORKSPACE_NAME//_/-}"
+EXPECTED_PROFILES=("${LXD_PREFIX}-iac-base")
+EXPECTED_NETWORKS=("ca-${RESOURCE_NAMESPACE}-up")
+if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+    EXPECTED_NETWORKS+=(
+        "ca-${RESOURCE_NAMESPACE}-ov"
+        "ca-${RESOURCE_NAMESPACE}-ce"
+    )
+fi
+EXPECTED_INSTANCES=()
+EXPECTED_VOLUMES=()
+for i in $(seq 1 "${NODES}"); do
+    EXPECTED_INSTANCES+=("${LXD_PREFIX}-node-${i}")
+    for disk in $(seq 1 "${CEPH_DISKS_PER_NODE}"); do
+        EXPECTED_VOLUMES+=("${LXD_PREFIX}-ceph-${i}-${disk}")
+    done
+    if [[ "${LOCAL_DISK_GIB}" -gt 0 ]]; then
+        EXPECTED_VOLUMES+=("${LXD_PREFIX}-local-${i}")
+    fi
+done
+
+collect_existing_lxd_names() {
+    local instance_rc=0
+    local profile_rc=0
+    local network_rc=0
+    local volume_rc=0
+    set +e
+    EXISTING_INSTANCES=$(lxc --project default list --format csv -c n 2>&1)
+    instance_rc=$?
+    EXISTING_PROFILES=$(lxc --project default profile list --format csv -c n 2>&1)
+    profile_rc=$?
+    EXISTING_NETWORKS=$(lxc --project default network list --format csv -c n 2>&1)
+    network_rc=$?
+    EXISTING_VOLUMES=$(lxc --project default storage volume list \
+        "${TF_VAR_lxd_storage_pool}" --format csv 2>&1)
+    volume_rc=$?
+    set -e
+    if [[ "${instance_rc}" -ne 0 || "${profile_rc}" -ne 0 \
+            || "${network_rc}" -ne 0 || "${volume_rc}" -ne 0 ]]; then
+        log_error "Could not inspect the complete default-project LXD namespace"
+        [[ "${instance_rc}" -ne 0 ]] && log_error "instances: ${EXISTING_INSTANCES}"
+        [[ "${profile_rc}" -ne 0 ]] && log_error "profiles: ${EXISTING_PROFILES}"
+        [[ "${network_rc}" -ne 0 ]] && log_error "networks: ${EXISTING_NETWORKS}"
+        [[ "${volume_rc}" -ne 0 ]] && log_error "volumes: ${EXISTING_VOLUMES}"
+        exit 1
+    fi
+    EXISTING_VOLUMES=$(printf '%s\n' "${EXISTING_VOLUMES}" |
+        awk -F',' '$1 == "custom" {print $2}')
+}
+
+assert_lxd_names_available() {
+    local -a conflicts=()
+    collect_existing_lxd_names
+    for name in "${EXPECTED_PROFILES[@]}"; do
+        grep -Fxq "${name}" <<< "${EXISTING_PROFILES}" \
+            && conflicts+=("profile:${name}")
+    done
+    for name in "${EXPECTED_NETWORKS[@]}"; do
+        grep -Fxq "${name}" <<< "${EXISTING_NETWORKS}" \
+            && conflicts+=("network:${name}")
+    done
+    for name in "${EXPECTED_INSTANCES[@]}"; do
+        grep -Fxq "${name}" <<< "${EXISTING_INSTANCES}" \
+            && conflicts+=("instance:${name}")
+    done
+    for name in "${EXPECTED_VOLUMES[@]}"; do
+        grep -Fxq "${name}" <<< "${EXISTING_VOLUMES}" \
+            && conflicts+=("volume:${name}")
+    done
+    if [[ "${#conflicts[@]}" -gt 0 ]]; then
+        log_error "Requested prefix collides with existing unmanaged or orphaned LXD resources:"
+        printf '  - %s\n' "${conflicts[@]}" >&2
+        log_error "Choose a different --user-prefix or remove only resources you own."
+        exit 1
+    fi
+}
+
+assert_lxd_names_available
+
+if [[ "${AUTO_APPROVE}" != "true" ]]; then
+    read -r -p "Proceed with deployment? [y/N] " confirm
+    [[ "${confirm,,}" != "y" ]] && { log_warn "Aborted."; exit 0; }
+fi
+
+# The direct script can wait on an interactive prompt, so repeat the exact
+# namespace reservation immediately before creating the Terraform workspace.
+assert_lxd_names_available
+
+if [[ "${STALE_WORKSPACE}" == "true" ]]; then
     log_warn "Removing empty stale workspace '${WORKSPACE_NAME}' before fresh deployment"
     tofu workspace select default >/dev/null 2>&1
     tofu workspace delete "${WORKSPACE_NAME}" >/dev/null 2>&1
@@ -457,6 +557,7 @@ APPLY_ARGS=(
     -auto-approve
     -parallelism=1
     -var="user_prefix=${USER_PREFIX}"
+    -var="resource_namespace=${RESOURCE_NAMESPACE}"
     -var="microcloud_node_count=${NODES}"
     -var="microcloud_node_cpu=${NODE_CPU}"
     -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}"
@@ -482,9 +583,10 @@ APPLY_LOG=$(mktemp)
 trap 'rm -f "${APPLY_LOG}"' EXIT
 if ! run_tofu_apply "${APPLY_LOG}"; then
     if grep -q "Missing Resource State After Create" "${APPLY_LOG}"; then
-        log_warn "LXD provider returned transient missing state; reconciling with one retry..."
-        : > "${APPLY_LOG}"
-        run_tofu_apply "${APPLY_LOG}"
+        log_error "LXD created a resource that Terraform did not record in state."
+        log_error "Automatic retry is disabled because it could collide with that resource."
+        log_error "Inspect the names above before retrying with the same prefix."
+        exit 1
     else
         exit 1
     fi

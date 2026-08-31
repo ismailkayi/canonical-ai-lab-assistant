@@ -105,6 +105,7 @@ fi
 
 LXD_NETWORK="lxdbr0"
 LXD_STORAGE="default"
+RESOURCE_NAMESPACE=""
 
 # -----------------------------------------------------------------------
 # Run terraform destroy
@@ -145,10 +146,19 @@ if [[ -n "${DEPLOYMENT_SPEC_JSON}" && "${DEPLOYMENT_SPEC_JSON}" != "null" ]]; th
     SPEC_SSH_PUBLIC_KEY=$(spec_value_optional ssh_public_key)
     SPEC_LXD_NETWORK=$(spec_value_optional lxd_network_name)
     SPEC_LXD_STORAGE=$(spec_value_optional lxd_storage_pool)
+    RESOURCE_NAMESPACE=$(spec_value_optional resource_namespace)
 
     [[ -n "${SPEC_SSH_PUBLIC_KEY}" ]] && SSH_PUBLIC_KEY="${SPEC_SSH_PUBLIC_KEY}"
     [[ -n "${SPEC_LXD_NETWORK}" ]] && LXD_NETWORK="${SPEC_LXD_NETWORK}"
     [[ -n "${SPEC_LXD_STORAGE}" ]] && LXD_STORAGE="${SPEC_LXD_STORAGE}"
+fi
+
+if [[ -z "${RESOURCE_NAMESPACE}" ]]; then
+    # Version-2 environments predate hash-based network names. The variable is
+    # required to evaluate the current configuration, but a destroy plan still
+    # removes the exact legacy names recorded in state.
+    RESOURCE_NAMESPACE=$(printf '%s' "${WORKSPACE}" | sha256sum | cut -c1-8)
+    log_warn "Deployment predates resource namespaces; using a destroy-only fallback"
 fi
 
 log_info "Running tofu destroy..."
@@ -156,6 +166,7 @@ PLAN_FILE=$(mktemp)
 trap 'rm -f "${PLAN_FILE}"' EXIT
 tofu plan -destroy -input=false -out="${PLAN_FILE}" \
     -var="ssh_public_key=${SSH_PUBLIC_KEY}" \
+    -var="resource_namespace=${RESOURCE_NAMESPACE}" \
     -var="lxd_network_name=${LXD_NETWORK}" \
     -var="lxd_storage_pool=${LXD_STORAGE}"
 tofu apply -auto-approve "${PLAN_FILE}"

@@ -85,3 +85,33 @@ def test_fully_segregated_network_contract_is_wired_end_to_end() -> None:
     assert "ceph-general" in health
     assert "cluster_network" in health
     assert "public_network" in health
+
+
+def test_fresh_deploy_preflights_every_default_project_resource_name() -> None:
+    terraform = (REPO_ROOT / "terraform" / "main.tf").read_text()
+    deploy = (REPO_ROOT / "scripts" / "deploy_microcloud.sh").read_text()
+    add_node = (REPO_ROOT / "scripts" / "add_cluster_node.sh").read_text()
+    cleanup = (REPO_ROOT / "scripts" / "cleanup_microcloud.sh").read_text()
+
+    assert 'name = "ca-${var.resource_namespace}-up"' in terraform
+    assert 'name  = "ca-${var.resource_namespace}-ov"' in terraform
+    assert 'name  = "ca-${var.resource_namespace}-ce"' in terraform
+    assert "user.canonical-ai-lab-assistant.owner" in terraform
+    assert "resource_namespace  = var.resource_namespace" in terraform
+
+    for resource_type in ("INSTANCES", "PROFILES", "NETWORKS", "VOLUMES"):
+        assert f"EXISTING_{resource_type}" in deploy
+        assert f"{resource_type[:-1].lower()}:" in deploy
+    assert "Could not inspect the complete default-project LXD namespace" in deploy
+    assert deploy.count("assert_lxd_names_available") >= 3
+    assert deploy.index('assert_lxd_names_available\n\nif [[ "${AUTO_APPROVE}"') < deploy.index(
+        'read -r -p "Proceed with deployment?'
+    )
+    assert deploy.rindex("assert_lxd_names_available") < deploy.index(
+        'tofu workspace new "${WORKSPACE_NAME}"'
+    )
+    assert "Automatic retry is disabled" in deploy
+    assert "reconciling with one retry" not in deploy
+    assert "SPEC_RESOURCE_NAMESPACE" in add_node
+    assert "resource_namespace" in cleanup
+    assert "using a destroy-only fallback" in cleanup

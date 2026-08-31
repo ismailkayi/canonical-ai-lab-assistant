@@ -896,6 +896,10 @@ CORE FACTS:
   non-overlapping CIDRs when the user does not provide advanced overrides.
 - A deployed environment's network mode is immutable. Add/scale inherits it
   from Terraform state; changing modes requires a fresh environment.
+- All resources remain in the default LXD project. Before deployment the
+  deterministic layer reserves an exact hash-based resource namespace and
+  rejects any profile/network/instance/volume name already used by unmanaged
+  or orphaned LXD resources. Suggest a different user prefix when this happens.
 
 SYSTEM ARCHITECTURE — HOW THE AUTOMATION WORKS:
 This system has a layered pipeline. Understand each layer so you can accurately

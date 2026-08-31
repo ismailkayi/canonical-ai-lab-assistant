@@ -39,6 +39,20 @@ class CapacitySnapshot(BaseModel):
     source: str = "live-host-observation"
 
 
+class LXDResourceManifest(BaseModel):
+    """Exact default-project LXD names reserved by a fresh deployment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workspace: str
+    resource_namespace: str = Field(pattern=r"^[0-9a-f]{8}$")
+    storage_pool: str
+    profiles: tuple[str, ...]
+    networks: tuple[str, ...]
+    instances: tuple[str, ...]
+    volumes: tuple[str, ...]
+
+
 class EnvironmentSnapshot(BaseModel):
     """Exact Terraform state identity and node transition bound to an approval."""
 

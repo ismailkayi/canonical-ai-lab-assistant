@@ -1,5 +1,8 @@
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from lab_ai_assistant.planning import LXDResourceManifest
 from lab_ai_assistant.verification import ClusterVerifier
 
 
@@ -132,3 +135,70 @@ def test_verification_fails_closed_on_a_broken_network_plane() -> None:
     assert check.status == "partial"
     assert check.observed_members == 2
     assert "node-2" in check.detail
+
+
+def test_lxd_name_conflicts_reports_all_exact_resource_types(monkeypatch) -> None:
+    payloads = iter(
+        [
+            [{"name": "lab-microcloud-iac-base"}],
+            [{"name": "ca-1234abcd-up"}],
+            [{"name": "lab-microcloud-node-1"}],
+            [
+                {"name": "lab-microcloud-ceph-1-1", "type": "custom"},
+                {"name": "ignored-image", "type": "image"},
+            ],
+        ]
+    )
+    monkeypatch.setattr(
+        "lab_ai_assistant.verification.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(next(payloads)),
+            stderr="",
+        ),
+    )
+    manifest = LXDResourceManifest(
+        workspace="lab_microcloud",
+        resource_namespace="1234abcd",
+        storage_pool="default",
+        profiles=("lab-microcloud-iac-base",),
+        networks=("ca-1234abcd-up",),
+        instances=("lab-microcloud-node-1",),
+        volumes=("lab-microcloud-ceph-1-1",),
+    )
+
+    conflicts = ClusterVerifier(Path("terraform")).lxd_name_conflicts(manifest)
+
+    assert conflicts == (
+        "profile:lab-microcloud-iac-base",
+        "network:ca-1234abcd-up",
+        "instance:lab-microcloud-node-1",
+        "volume:lab-microcloud-ceph-1-1",
+    )
+
+
+def test_lxd_name_conflicts_fails_closed_on_unreadable_list(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "lab_ai_assistant.verification.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="LXD unavailable",
+        ),
+    )
+    manifest = LXDResourceManifest(
+        workspace="lab_microcloud",
+        resource_namespace="1234abcd",
+        storage_pool="default",
+        profiles=(),
+        networks=(),
+        instances=(),
+        volumes=(),
+    )
+
+    try:
+        ClusterVerifier(Path("terraform")).lxd_name_conflicts(manifest)
+    except RuntimeError as exc:
+        assert "LXD unavailable" in str(exc)
+    else:
+        raise AssertionError("unreadable LXD namespace must fail closed")

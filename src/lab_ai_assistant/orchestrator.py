@@ -29,6 +29,7 @@ from lab_ai_assistant.planning import (
     CapacitySnapshot,
     EnvironmentSnapshot,
     ExecutionPlan,
+    LXDResourceManifest,
     PlanValidation,
     PlanValidator,
     TopologySpec,
@@ -193,7 +194,7 @@ class LabOrchestrator:
             if action in MUTATING_ACTIONS:
                 try:
                     plan = self._build_execution_plan(action, parameters, message, reasoning)
-                except (TypeError, ValueError) as exc:
+                except (TypeError, ValueError, RuntimeError) as exc:
                     feedback = f"Error: execution plan could not be built: {exc}"
                     ai_response = self.ai_engine.feed_tool_result(action, feedback)
                     continue
@@ -413,7 +414,26 @@ class LabOrchestrator:
         resolved.setdefault("ceph_disk_gib", recommendation.ceph_disk_gb)
         resolved.setdefault("ceph_disks_per_node", 1)
         resolved.setdefault("local_disk_gib", 0)
+        resolved["resource_namespace"] = self._resource_namespace(workspace)
         self._resolve_network_parameters(resolved, workspace, nodes)
+
+        manifest = self._build_lxd_resource_manifest(
+            workspace=workspace,
+            storage_pool=capacity.storage_pool,
+            nodes=nodes,
+            ceph_disks_per_node=int(resolved["ceph_disks_per_node"]),
+            local_disk_enabled=int(resolved["local_disk_gib"]) > 0,
+            network_mode=str(resolved["network_mode"]),
+            resource_namespace=str(resolved["resource_namespace"]),
+        )
+        conflicts = self.cluster_verifier.lxd_name_conflicts(manifest)
+        if conflicts:
+            details = ", ".join(conflicts)
+            raise ValueError(
+                "The requested prefix collides with existing unmanaged or orphaned "
+                f"LXD resources in the default project: {details}. "
+                "Choose a different user_prefix or remove only resources you own."
+            )
 
         topology = TopologySpec(
             nodes=resolved["nodes"],
@@ -428,6 +448,42 @@ class LabOrchestrator:
             ceph_network_cidr=resolved.get("ceph_network_cidr"),
         )
         return resolved, topology
+
+    @staticmethod
+    def _resource_namespace(workspace: str) -> str:
+        return hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:8]
+
+    @staticmethod
+    def _build_lxd_resource_manifest(
+        *,
+        workspace: str,
+        storage_pool: str,
+        nodes: int,
+        ceph_disks_per_node: int,
+        local_disk_enabled: bool,
+        network_mode: str,
+        resource_namespace: str,
+    ) -> LXDResourceManifest:
+        prefix = workspace.replace("_", "-")
+        networks = [f"ca-{resource_namespace}-up"]
+        if network_mode == SEGREGATED_NETWORK_MODE:
+            networks.extend((f"ca-{resource_namespace}-ov", f"ca-{resource_namespace}-ce"))
+        volumes = [
+            f"{prefix}-ceph-{node}-{disk}"
+            for node in range(1, nodes + 1)
+            for disk in range(1, ceph_disks_per_node + 1)
+        ]
+        if local_disk_enabled:
+            volumes.extend(f"{prefix}-local-{node}" for node in range(1, nodes + 1))
+        return LXDResourceManifest(
+            workspace=workspace,
+            resource_namespace=resource_namespace,
+            storage_pool=storage_pool,
+            profiles=(f"{prefix}-iac-base",),
+            networks=tuple(networks),
+            instances=tuple(f"{prefix}-node-{node}" for node in range(1, nodes + 1)),
+            volumes=tuple(volumes),
+        )
 
     def _resolve_network_parameters(
         self,
@@ -599,6 +655,12 @@ class LabOrchestrator:
                 f"Workspace '{workspace}' predates versioned deployment specs. "
                 "Back up anything needed, delete that environment, then create it fresh "
                 "with this version before using add/scale."
+            )
+        resource_namespace = str(spec.get("resource_namespace", ""))
+        if not re.fullmatch(r"[0-9a-f]{8}", resource_namespace):
+            raise ValueError(
+                f"Workspace '{workspace}' predates collision-safe resource namespaces. "
+                "It can be deleted safely, but add/scale requires a fresh deployment."
             )
 
         state = self.cluster_verifier.workspace_state(workspace)
@@ -793,6 +855,29 @@ class LabOrchestrator:
                         valid=False,
                         errors=(f"Dedicated network availability changed after approval: {exc}",),
                     )
+            manifest = self._build_lxd_resource_manifest(
+                workspace=workspace,
+                storage_pool=(
+                    plan.capacity.storage_pool if plan.capacity is not None else "default"
+                ),
+                nodes=plan.topology.nodes,
+                ceph_disks_per_node=plan.topology.ceph_disks_per_node,
+                local_disk_enabled=plan.topology.local_disk_gib > 0,
+                network_mode=plan.topology.network_mode,
+                resource_namespace=str(plan.parameters.get("resource_namespace", "")),
+            )
+            try:
+                conflicts = self.cluster_verifier.lxd_name_conflicts(manifest)
+            except RuntimeError as exc:
+                return PlanValidation(valid=False, errors=(str(exc),))
+            if conflicts:
+                return PlanValidation(
+                    valid=False,
+                    errors=(
+                        "LXD resource names became unavailable after approval: "
+                        + ", ".join(conflicts),
+                    ),
+                )
 
         if plan.action in {"add_cluster_node", "scale_environment"}:
             try:
@@ -810,7 +895,6 @@ class LabOrchestrator:
                         "prepare and approve a new plan.",
                     ),
                 )
-
         current_state = self._collect_host_state(force=True)
         storage_pool = plan.capacity.storage_pool if plan.capacity else None
         current_plan = plan.model_copy(
@@ -1700,6 +1784,7 @@ class LabOrchestrator:
             "network_mode",
             "ovn_underlay_cidr",
             "ceph_network_cidr",
+            "resource_namespace",
             "user_prefix",
             "ssh_key",
         },

@@ -261,6 +261,22 @@ Changing the plan, host capacity, or target state invalidates the approval.
 MicroCloud runs inside LXD VMs. Ceph and optional local disks are virtual block
 volumes created in the selected LXD storage pool.
 
+### LXD name collision safety
+
+All resources remain in the normal LXD `default` project, preserving the
+original deployment topology and access commands. Before approval and again
+immediately before execution, the assistant checks the exact profile, network,
+instance, and custom-volume names that Terraform will create.
+
+If an unmanaged or orphaned resource already has one of those names, deployment
+stops before a workspace or infrastructure change and reports every conflicting
+type/name. Choose a different `user_prefix`, or remove only resources you know
+you own.
+
+Short OVN bridge names use a persisted eight-character SHA-256 namespace (for
+example `ca-f21a40ab-up`) instead of a truncated user prefix. Resources also
+carry owner/role metadata for diagnosis.
+
 ### Network layouts
 
 The default `standard-2nic` layout preserves the existing lightweight lab
@@ -469,14 +485,17 @@ inference restart.
 ### `Missing Resource State After Create`
 
 Some LXD provider versions can return a transient state error after resource
-creation. The deployment serializes creation and performs one controlled retry
-only for this known error.
+creation. The deployment does not retry blindly: the remote object may exist
+without Terraform state, and retrying can turn that drift into an
+`already exists` collision. The operation stops and tells you to inspect the
+reported names before reusing that prefix.
 
 ### An environment name already exists
 
 Fresh deploys do not resize existing environments. Add/scale the existing lab,
 choose another prefix, or delete it first. A workspace with no state or managed
-resources is stale and removed automatically.
+resources is stale and removed automatically. LXD names are checked separately
+because Terraform workspaces do not isolate the shared LXD namespace.
 
 ### An operation failed
 

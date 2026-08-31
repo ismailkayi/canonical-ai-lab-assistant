@@ -50,6 +50,16 @@ variable "lxd_storage_pool" {
   type        = string
 }
 
+variable "resource_namespace" {
+  description = "Eight-hex collision-resistant namespace resolved before deployment"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{8}$", var.resource_namespace))
+    error_message = "resource_namespace must contain exactly eight lowercase hex characters."
+  }
+}
+
 variable "microcloud_node_count" {
   description = "Number of MicroCloud nodes (minimum 3 for this automation flow)"
   type        = number
@@ -184,7 +194,6 @@ locals {
   # LXD names must not contain underscores
   lxd_prefix            = replace(local.env_id, "_", "-")
   segregated_networking = var.microcloud_network_mode == "fully-segregated-4nic"
-  network_hash          = substr(md5(local.env_id), 0, 4)
   nic_planes            = ["mgmt0", "ovn-uplink", "ovn-underlay", "ceph-general"]
   node_macs = [
     for node_index in range(var.microcloud_node_count) : {
@@ -205,7 +214,9 @@ resource "lxd_profile" "lab_base" {
   name = "${local.lxd_prefix}-iac-base"
 
   config = {
-    "security.nesting" = "true"
+    "security.nesting"                      = "true"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "base-profile"
   }
 
   device {
@@ -232,12 +243,13 @@ resource "lxd_profile" "lab_base" {
 # -----------------------------------------------------------------------
 
 resource "lxd_network" "ovn_uplink" {
-  # Limit to 15 chars to stay within Linux bridge name limits
-  name = "mc-${substr(local.lxd_prefix, 0, 8)}-up"
+  name = "ca-${var.resource_namespace}-up"
   type = "bridge"
   config = {
-    "ipv4.address" = "none"
-    "ipv6.address" = "none"
+    "ipv4.address"                          = "none"
+    "ipv6.address"                          = "none"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "ovn-uplink"
   }
 }
 
@@ -246,7 +258,7 @@ resource "lxd_network" "ovn_uplink" {
 # on the management NIC.
 resource "lxd_network" "ovn_underlay" {
   count = local.segregated_networking ? 1 : 0
-  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${local.network_hash}-ov"
+  name  = "ca-${var.resource_namespace}-ov"
   type  = "bridge"
   config = {
     "ipv4.address"                          = "none"
@@ -259,7 +271,7 @@ resource "lxd_network" "ovn_underlay" {
 
 resource "lxd_network" "ceph" {
   count = local.segregated_networking ? 1 : 0
-  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${local.network_hash}-ce"
+  name  = "ca-${var.resource_namespace}-ce"
   type  = "bridge"
   config = {
     "ipv4.address"                          = "none"
@@ -293,7 +305,12 @@ resource "lxd_volume" "microcloud_ceph_disks" {
   name         = "${local.lxd_prefix}-ceph-${local.ceph_volumes[count.index].node + 1}-${local.ceph_volumes[count.index].osd + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
-  config       = { size = "${var.microcloud_ceph_disk_size_gib}GiB" }
+  description  = "Canonical AI Lab Assistant Ceph OSD for ${local.env_id}"
+  config = {
+    size                                    = "${var.microcloud_ceph_disk_size_gib}GiB"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "ceph-osd"
+  }
 }
 
 # -----------------------------------------------------------------------
@@ -305,7 +322,12 @@ resource "lxd_volume" "microcloud_local_disks" {
   name         = "${local.lxd_prefix}-local-${count.index + 1}"
   pool         = var.lxd_storage_pool
   content_type = "block"
-  config       = { size = "${var.local_disk_size_gib}GiB" }
+  description  = "Canonical AI Lab Assistant local disk for ${local.env_id}"
+  config = {
+    size                                    = "${var.local_disk_size_gib}GiB"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "local-disk"
+  }
 }
 
 # -----------------------------------------------------------------------
@@ -402,11 +424,13 @@ resource "lxd_instance" "microcloud_nodes" {
   }
 
   config = merge({
-    "user.user-data" = <<-EOT
+    "user.user-data"                        = <<-EOT
       #cloud-config
       ssh_authorized_keys:
         - ${var.ssh_public_key}
     EOT
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "microcloud-node"
     }, local.segregated_networking ? {
     "cloud-init.network-config" = yamlencode({
       version = 2
@@ -520,7 +544,8 @@ output "inventory_file" {
 output "deployment_spec" {
   description = "Resolved environment geometry reused by safe lifecycle operations"
   value = {
-    version             = 2
+    version             = 3
+    resource_namespace  = var.resource_namespace
     user_prefix         = var.user_prefix
     ubuntu_image        = var.ubuntu_image
     lxd_network_name    = var.lxd_network_name

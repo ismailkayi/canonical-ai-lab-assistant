@@ -179,6 +179,7 @@ def test_expansion_rejects_total_above_fifty_nodes(config) -> None:
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "resource_namespace": "1234abcd",
     }
     orchestrator.cluster_verifier.workspace_state = lambda _workspace: {
         "state_lineage": "lineage-1",
@@ -686,6 +687,7 @@ def test_expansion_inherits_persisted_segregated_network_geometry(config) -> Non
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "resource_namespace": "1234abcd",
         "network_mode": "fully-segregated-4nic",
         "ovn_underlay_cidr": "172.28.42.0/24",
         "ceph_network_cidr": "172.29.42.0/24",
@@ -719,6 +721,7 @@ def test_expansion_rejects_segregated_cidr_too_small_for_target(config) -> None:
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "resource_namespace": "1234abcd",
         "network_mode": "fully-segregated-4nic",
         "ovn_underlay_cidr": "172.28.42.0/28",
         "ceph_network_cidr": "172.29.42.0/28",
@@ -734,6 +737,27 @@ def test_expansion_rejects_segregated_cidr_too_small_for_target(config) -> None:
         orchestrator._resolve_expansion_topology(
             "add_cluster_node",
             {"workspace": "lab_microcloud", "add_nodes": 3},
+        )
+
+
+def test_version_two_environment_is_destroy_only(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.deployment_spec = lambda _workspace: {
+        "node_count": 3,
+        "node_cpu": 2,
+        "node_memory_mb": 4096,
+        "root_disk_gib": 30,
+        "ceph_disk_gib": 20,
+        "ceph_disks_per_node": 1,
+        "local_disk_gib": 0,
+        "lxd_storage_pool": "default",
+        "network_mode": "standard-2nic",
+    }
+
+    with pytest.raises(ValueError, match="deleted safely.*add/scale"):
+        orchestrator._resolve_expansion_topology(
+            "add_cluster_node",
+            {"workspace": "lab_microcloud", "add_nodes": 1},
         )
 
 
@@ -794,3 +818,85 @@ def test_custom_topology_proposal_keeps_the_network_choice(config) -> None:
     assert "Network layout   : fully-segregated-4nic" in result
     assert "OVN underlay / Ceph public+internal" in result
     assert "collision-checked in the exact deploy plan" in result
+
+
+def test_resource_namespace_is_deterministic_and_workspace_specific(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    first = orchestrator._resource_namespace("training_a_microcloud")
+    repeated = orchestrator._resource_namespace("training_a_microcloud")
+    similar = orchestrator._resource_namespace("training_b_microcloud")
+
+    assert first == repeated
+    assert first != similar
+    assert len(first) == 8
+    assert all(character in "0123456789abcdef" for character in first)
+
+
+def test_lxd_manifest_contains_every_planned_name(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    manifest = orchestrator._build_lxd_resource_manifest(
+        workspace="training_microcloud",
+        storage_pool="default",
+        nodes=2,
+        ceph_disks_per_node=2,
+        local_disk_enabled=True,
+        network_mode="fully-segregated-4nic",
+        resource_namespace="1234abcd",
+    )
+
+    assert manifest.profiles == ("training-microcloud-iac-base",)
+    assert manifest.networks == (
+        "ca-1234abcd-up",
+        "ca-1234abcd-ov",
+        "ca-1234abcd-ce",
+    )
+    assert manifest.instances == (
+        "training-microcloud-node-1",
+        "training-microcloud-node-2",
+    )
+    assert manifest.volumes == (
+        "training-microcloud-ceph-1-1",
+        "training-microcloud-ceph-1-2",
+        "training-microcloud-ceph-2-1",
+        "training-microcloud-ceph-2-2",
+        "training-microcloud-local-1",
+        "training-microcloud-local-2",
+    )
+
+
+def test_deployment_rejects_exact_unmanaged_lxd_collision(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator.cluster_verifier.lxd_name_conflicts = lambda _manifest: (
+        "instance:lab-microcloud-node-2",
+        "volume:lab-microcloud-ceph-1-1",
+    )
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="instance:lab-microcloud-node-2"):
+        orchestrator._resolve_deployment_parameters(
+            {"nodes": 3, "user_prefix": "lab"},
+            capacity,
+        )
+
+
+def test_deployment_plan_persists_resolved_resource_namespace(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    resolved, _ = orchestrator._resolve_deployment_parameters(
+        {"nodes": 3, "user_prefix": "training"},
+        capacity,
+    )
+
+    assert resolved["resource_namespace"] == orchestrator._resource_namespace("training_microcloud")

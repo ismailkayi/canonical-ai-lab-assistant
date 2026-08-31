@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from lab_ai_assistant.planning import LXDResourceManifest
+
 
 class ServiceCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -77,12 +79,77 @@ class ClusterVerifier:
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
+
         output = "\n".join((result.stdout, result.stderr))
         if result.returncode == 0:
             return len([line for line in result.stdout.splitlines() if line.strip()])
         if "No state file was found" in output:
             return 0
         return None
+
+    def lxd_name_conflicts(self, manifest: LXDResourceManifest) -> tuple[str, ...]:
+        """Return exact default-project name collisions, failing on unreadable LXD data."""
+        sources = {
+            "profile": (
+                ["lxc", "--project", "default", "profile", "list", "--format=json"],
+                set(manifest.profiles),
+            ),
+            "network": (
+                ["lxc", "--project", "default", "network", "list", "--format=json"],
+                set(manifest.networks),
+            ),
+            "instance": (
+                ["lxc", "--project", "default", "list", "--format=json"],
+                set(manifest.instances),
+            ),
+            "volume": (
+                [
+                    "lxc",
+                    "--project",
+                    "default",
+                    "storage",
+                    "volume",
+                    "list",
+                    manifest.storage_pool,
+                    "--format=json",
+                ],
+                set(manifest.volumes),
+            ),
+        }
+
+        conflicts: list[str] = []
+        for resource_type, (command, expected) in sources.items():
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(f"Could not inspect LXD {resource_type} names: {exc}") from exc
+            if result.returncode != 0:
+                detail = self._compact(result.stderr or result.stdout)
+                raise RuntimeError(
+                    f"Could not inspect LXD {resource_type} names: " f"{detail or 'unknown error'}"
+                )
+            try:
+                payload = json.loads(result.stdout)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"LXD returned invalid {resource_type} list data") from exc
+            if not isinstance(payload, list):
+                raise RuntimeError(f"LXD returned no {resource_type} list")
+
+            existing = {
+                str(item.get("name"))
+                for item in payload
+                if isinstance(item, dict)
+                and item.get("name")
+                and (resource_type != "volume" or item.get("type") == "custom")
+            }
+            conflicts.extend(f"{resource_type}:{name}" for name in sorted(existing & expected))
+        return tuple(conflicts)
 
     def verify(
         self,

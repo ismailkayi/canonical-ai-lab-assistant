@@ -169,6 +169,11 @@ SPEC_ROOT_DISK_GIB=$(spec_value root_disk_gib)
 SPEC_CEPH_DISK_GIB=$(spec_value ceph_disk_gib)
 SPEC_CEPH_DISKS_PER_NODE=$(spec_value ceph_disks_per_node)
 SPEC_LOCAL_DISK_GIB=$(spec_value local_disk_gib)
+SPEC_RESOURCE_NAMESPACE=$(spec_value_optional resource_namespace)
+if ! [[ "${SPEC_RESOURCE_NAMESPACE}" =~ ^[0-9a-f]{8}$ ]]; then
+    log_error "Workspace predates collision-safe resource namespaces; add/scale is unavailable"
+    exit 1
+fi
 SPEC_NETWORK_MODE=$(spec_value_optional network_mode)
 SPEC_OVN_UNDERLAY_CIDR=$(spec_value_optional ovn_underlay_cidr)
 SPEC_CEPH_NETWORK_CIDR=$(spec_value_optional ceph_network_cidr)
@@ -275,6 +280,7 @@ PLAN_FILE=$(mktemp)
 trap 'rm -f "${PLAN_FILE}"' EXIT
 tofu plan -input=false -parallelism=1 -out="${PLAN_FILE}" \
     -var="user_prefix=${USER_PREFIX}" \
+    -var="resource_namespace=${SPEC_RESOURCE_NAMESPACE}" \
     -var="ubuntu_image=${SPEC_UBUNTU_IMAGE}" \
     -var="microcloud_node_count=${NEW_TOTAL}" \
     -var="microcloud_node_cpu=${NODE_CPU}" \
