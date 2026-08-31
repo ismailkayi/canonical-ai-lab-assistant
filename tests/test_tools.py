@@ -29,3 +29,26 @@ def test_tool_validation_rejects_ranges_unknown_fields_and_bad_names() -> None:
             "local_disk_gib": 0,
         },
     )[0]
+
+
+def test_deploy_tool_exposes_optional_fully_segregated_networking() -> None:
+    deploy = get_tool_by_name("deploy_microcloud")
+    properties = deploy["parameters"]["properties"]
+
+    assert properties["network_mode"]["enum"] == [
+        "standard-2nic",
+        "fully-segregated-4nic",
+    ]
+    assert validate_tool_parameters(
+        "deploy_microcloud",
+        {
+            "nodes": 3,
+            "network_mode": "fully-segregated-4nic",
+            "ovn_underlay_cidr": "172.28.42.0/24",
+            "ceph_network_cidr": "172.29.42.0/24",
+        },
+    )[0]
+    assert not validate_tool_parameters(
+        "deploy_microcloud",
+        {"nodes": 3, "network_mode": "four-nics"},
+    )[0]

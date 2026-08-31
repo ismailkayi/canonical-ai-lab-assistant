@@ -84,3 +84,51 @@ def test_verification_rejects_arbitrary_unexpected_member_name() -> None:
 
     assert report.status == "partial"
     assert any("unexpected=['rogue']" in check.detail for check in report.checks)
+
+
+class SegregatedVerifier(FakeVerifier):
+    def __init__(self, broken_node: str | None = None):
+        super().__init__(6)
+        self.broken_node = broken_node
+
+    def deployment_spec(self, workspace):
+        return {
+            "node_count": 3,
+            "ceph_disks_per_node": 2,
+            "network_mode": "fully-segregated-4nic",
+            "ovn_underlay_cidr": "172.28.42.0/24",
+            "ceph_network_cidr": "172.29.42.0/24",
+        }
+
+    def _run_in_node(self, node, command):
+        if command[:4] == ["microceph", "cluster", "config", "get"]:
+            key = command[4]
+            return (
+                0,
+                f"| 0 | {key} | 172.29.42.0/24 |",
+            )
+        if command[0] == "bash":
+            if node == self.broken_node:
+                return 1, "ovn-underlay route failed"
+            return 0, ""
+        return super()._run_in_node(node, command)
+
+
+def test_verification_checks_fully_segregated_network_planes() -> None:
+    report = SegregatedVerifier().verify("lab_microcloud")
+
+    check = next(item for item in report.checks if item.name == "segregated-networks")
+    assert report.status == "healthy"
+    assert check.status == "healthy"
+    assert check.observed_members == 3
+    assert "Ceph public/internal=172.29.42.0/24" in check.detail
+
+
+def test_verification_fails_closed_on_a_broken_network_plane() -> None:
+    report = SegregatedVerifier(broken_node="lab-microcloud-node-2").verify("lab_microcloud")
+
+    check = next(item for item in report.checks if item.name == "segregated-networks")
+    assert report.status == "partial"
+    assert check.status == "partial"
+    assert check.observed_members == 2
+    assert "node-2" in check.detail

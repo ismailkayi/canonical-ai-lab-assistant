@@ -97,3 +97,66 @@ def test_confirmation_classification(message: str) -> None:
     assert classify_confirmation(message) == "approve"
     assert classify_confirmation("no") == "reject"
     assert classify_confirmation("change the RAM") == "other"
+
+
+def test_fully_segregated_topology_requires_two_distinct_ipv4_planes() -> None:
+    topology = TopologySpec(
+        nodes=3,
+        node_cpu=2,
+        node_memory_mb=4096,
+        root_disk_gib=30,
+        ceph_disk_gib=20,
+        ceph_disks_per_node=1,
+        network_mode="fully-segregated-4nic",
+        ovn_underlay_cidr="172.28.42.0/24",
+        ceph_network_cidr="172.29.42.0/24",
+    )
+
+    assert topology.network_mode == "fully-segregated-4nic"
+
+    with pytest.raises(ValueError, match="requires ovn_underlay_cidr"):
+        TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+            network_mode="fully-segregated-4nic",
+        )
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        TopologySpec(
+            **{
+                **topology.model_dump(),
+                "ceph_network_cidr": "172.28.42.128/25",
+            }
+        )
+
+
+def test_segregated_plane_cidrs_must_fit_every_node() -> None:
+    with pytest.raises(ValueError, match="usable addresses"):
+        TopologySpec(
+            nodes=8,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+            network_mode="fully-segregated-4nic",
+            ovn_underlay_cidr="172.28.42.0/28",
+            ceph_network_cidr="172.29.42.0/28",
+        )
+
+
+def test_standard_topology_rejects_unused_plane_cidrs() -> None:
+    with pytest.raises(ValueError, match="require fully-segregated-4nic"):
+        TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+            ovn_underlay_cidr="172.28.42.0/24",
+        )

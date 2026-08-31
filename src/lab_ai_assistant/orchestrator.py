@@ -1,6 +1,8 @@
 """Lab orchestration and execution layer for custom-topology MicroCloud workflows."""
 
 import fcntl
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -21,6 +23,8 @@ from lab_ai_assistant.config import Config
 from lab_ai_assistant.doc_fetcher import DocFetcher
 from lab_ai_assistant.planning import (
     MUTATING_ACTIONS,
+    SEGREGATED_NETWORK_MODE,
+    STANDARD_NETWORK_MODE,
     ApprovalManager,
     CapacitySnapshot,
     EnvironmentSnapshot,
@@ -409,6 +413,7 @@ class LabOrchestrator:
         resolved.setdefault("ceph_disk_gib", recommendation.ceph_disk_gb)
         resolved.setdefault("ceph_disks_per_node", 1)
         resolved.setdefault("local_disk_gib", 0)
+        self._resolve_network_parameters(resolved, workspace, nodes)
 
         topology = TopologySpec(
             nodes=resolved["nodes"],
@@ -418,8 +423,159 @@ class LabOrchestrator:
             ceph_disk_gib=resolved["ceph_disk_gib"],
             ceph_disks_per_node=resolved["ceph_disks_per_node"],
             local_disk_gib=resolved["local_disk_gib"],
+            network_mode=resolved["network_mode"],
+            ovn_underlay_cidr=resolved.get("ovn_underlay_cidr"),
+            ceph_network_cidr=resolved.get("ceph_network_cidr"),
         )
         return resolved, topology
+
+    def _resolve_network_parameters(
+        self,
+        resolved: dict[str, Any],
+        workspace: str,
+        nodes: int,
+    ) -> None:
+        """Resolve an exact, non-overlapping network geometry into the plan."""
+        mode = str(resolved.get("network_mode", STANDARD_NETWORK_MODE)).strip().lower()
+        resolved["network_mode"] = mode
+
+        supplied_ovn = str(resolved.get("ovn_underlay_cidr", "") or "").strip()
+        supplied_ceph = str(resolved.get("ceph_network_cidr", "") or "").strip()
+        if mode == STANDARD_NETWORK_MODE:
+            if supplied_ovn or supplied_ceph:
+                raise ValueError(
+                    "Dedicated plane CIDRs are only valid with fully-segregated-4nic mode"
+                )
+            resolved.pop("ovn_underlay_cidr", None)
+            resolved.pop("ceph_network_cidr", None)
+            return
+        if mode != SEGREGATED_NETWORK_MODE:
+            raise ValueError("network_mode must be standard-2nic or fully-segregated-4nic")
+
+        occupied = self._occupied_ipv4_networks()
+        # The playbook selects one of these for the logical OVN tenant network.
+        reserved = [
+            *occupied,
+            ipaddress.ip_network("192.168.250.0/24"),
+            ipaddress.ip_network("10.250.1.0/24"),
+        ]
+
+        ovn_network = (
+            self._validate_plane_cidr(supplied_ovn, nodes, "ovn_underlay_cidr")
+            if supplied_ovn
+            else None
+        )
+        ceph_network = (
+            self._validate_plane_cidr(supplied_ceph, nodes, "ceph_network_cidr")
+            if supplied_ceph
+            else None
+        )
+
+        if ovn_network is not None:
+            self._reject_network_overlap(ovn_network, reserved, "OVN underlay")
+        if ceph_network is not None:
+            self._reject_network_overlap(ceph_network, reserved, "Ceph")
+        if ovn_network is not None and ceph_network is not None:
+            if ovn_network.overlaps(ceph_network):
+                raise ValueError("OVN underlay and Ceph network CIDRs must not overlap")
+        else:
+            ovn_network, ceph_network = self._select_plane_cidrs(
+                workspace,
+                nodes,
+                reserved,
+                ovn_network,
+                ceph_network,
+            )
+
+        resolved["ovn_underlay_cidr"] = str(ovn_network)
+        resolved["ceph_network_cidr"] = str(ceph_network)
+
+    def _occupied_ipv4_networks(self) -> list[ipaddress.IPv4Network]:
+        """Return host routes and assistant-managed plane CIDRs."""
+        output = self._run_host_cmd(
+            """{
+                ip -o -4 route show table all 2>/dev/null |
+                    awk '$1 != "default" {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\\./ && $i ~ /\\//) {print $i; break}}'
+                while IFS= read -r network; do
+                    [ -z "$network" ] && continue
+                    lxc network get "$network" ipv4.address 2>/dev/null || true
+                    lxc network get "$network" user.canonical-ai-lab-assistant.cidr 2>/dev/null || true
+                done < <(lxc network list --format csv 2>/dev/null | awk -F',' 'NF {print $1}')
+            }""",
+            timeout=20,
+        )
+        networks: list[ipaddress.IPv4Network] = []
+        for token in output.split():
+            try:
+                network = ipaddress.ip_network(token, strict=False)
+            except ValueError:
+                continue
+            if isinstance(network, ipaddress.IPv4Network) and network.prefixlen != 0:
+                networks.append(network)
+        return list(dict.fromkeys(networks))
+
+    @staticmethod
+    def _validate_plane_cidr(
+        value: str,
+        nodes: int,
+        field_name: str,
+    ) -> ipaddress.IPv4Network:
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a valid network CIDR: {exc}") from exc
+        if not isinstance(network, ipaddress.IPv4Network):
+            raise ValueError(f"{field_name} must be an IPv4 network")
+        if nodes + 9 >= network.num_addresses - 1:
+            raise ValueError(f"{field_name} {network} has no usable address at offset {nodes + 9}")
+        return network
+
+    @staticmethod
+    def _reject_network_overlap(
+        candidate: ipaddress.IPv4Network,
+        reserved: list[ipaddress.IPv4Network],
+        label: str,
+    ) -> None:
+        for existing in reserved:
+            if candidate.overlaps(existing):
+                raise ValueError(f"{label} subnet {candidate} overlaps {existing}")
+
+    def _select_plane_cidrs(
+        self,
+        workspace: str,
+        nodes: int,
+        reserved: list[ipaddress.IPv4Network],
+        ovn_network: ipaddress.IPv4Network | None,
+        ceph_network: ipaddress.IPv4Network | None,
+    ) -> tuple[ipaddress.IPv4Network, ipaddress.IPv4Network]:
+        """Select deterministic /24s, walking slots to avoid host collisions."""
+        seed = int(hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:8], 16)
+        candidate_bases = ((172, 28, 29), (10, 228, 229))
+
+        for first_octet, ovn_second, ceph_second in candidate_bases:
+            for attempt in range(240):
+                slot = 10 + ((seed + attempt) % 240)
+                candidate_ovn = ovn_network or ipaddress.ip_network(
+                    f"{first_octet}.{ovn_second}.{slot}.0/24"
+                )
+                candidate_ceph = ceph_network or ipaddress.ip_network(
+                    f"{first_octet}.{ceph_second}.{slot}.0/24"
+                )
+                self._validate_plane_cidr(str(candidate_ovn), nodes, "ovn_underlay_cidr")
+                self._validate_plane_cidr(str(candidate_ceph), nodes, "ceph_network_cidr")
+                if candidate_ovn.overlaps(candidate_ceph):
+                    continue
+                if any(
+                    candidate_ovn.overlaps(existing) or candidate_ceph.overlaps(existing)
+                    for existing in reserved
+                ):
+                    continue
+                return candidate_ovn, candidate_ceph
+
+        raise ValueError(
+            "Could not select non-overlapping OVN underlay and Ceph subnets. "
+            "Provide ovn_underlay_cidr and ceph_network_cidr explicitly."
+        )
 
     def _resolve_expansion_topology(
         self,
@@ -474,6 +630,21 @@ class LabOrchestrator:
                 "the supported maximum is 50"
             )
 
+        network_mode = spec.get("network_mode", STANDARD_NETWORK_MODE)
+        ovn_underlay_cidr = spec.get("ovn_underlay_cidr") or None
+        ceph_network_cidr = spec.get("ceph_network_cidr") or None
+        if network_mode == SEGREGATED_NETWORK_MODE:
+            self._validate_plane_cidr(
+                str(ovn_underlay_cidr or ""),
+                target_nodes,
+                "ovn_underlay_cidr",
+            )
+            self._validate_plane_cidr(
+                str(ceph_network_cidr or ""),
+                target_nodes,
+                "ceph_network_cidr",
+            )
+
         topology = TopologySpec(
             nodes=added_nodes,
             node_cpu=spec["node_cpu"],
@@ -482,6 +653,9 @@ class LabOrchestrator:
             ceph_disk_gib=spec["ceph_disk_gib"],
             ceph_disks_per_node=spec["ceph_disks_per_node"],
             local_disk_gib=spec["local_disk_gib"],
+            network_mode=network_mode,
+            ovn_underlay_cidr=ovn_underlay_cidr,
+            ceph_network_cidr=ceph_network_cidr,
         )
         environment = EnvironmentSnapshot(
             workspace=workspace,
@@ -595,6 +769,30 @@ class LabOrchestrator:
                             "after this plan was prepared.",
                         ),
                     )
+            if plan.topology.network_mode == SEGREGATED_NETWORK_MODE:
+                try:
+                    ovn_network = self._validate_plane_cidr(
+                        str(plan.topology.ovn_underlay_cidr or ""),
+                        plan.topology.nodes,
+                        "ovn_underlay_cidr",
+                    )
+                    ceph_network = self._validate_plane_cidr(
+                        str(plan.topology.ceph_network_cidr or ""),
+                        plan.topology.nodes,
+                        "ceph_network_cidr",
+                    )
+                    occupied = [
+                        *self._occupied_ipv4_networks(),
+                        ipaddress.ip_network("192.168.250.0/24"),
+                        ipaddress.ip_network("10.250.1.0/24"),
+                    ]
+                    self._reject_network_overlap(ovn_network, occupied, "OVN underlay")
+                    self._reject_network_overlap(ceph_network, occupied, "Ceph")
+                except ValueError as exc:
+                    return PlanValidation(
+                        valid=False,
+                        errors=(f"Dedicated network availability changed after approval: {exc}",),
+                    )
 
         if plan.action in {"add_cluster_node", "scale_environment"}:
             try:
@@ -655,6 +853,14 @@ class LabOrchestrator:
                     "Storage per node: "
                     f"{topology.ceph_disks_per_node} x {topology.ceph_disk_gib} GiB Ceph / "
                     f"{topology.local_disk_gib} GiB local",
+                    "Network layout: "
+                    f"{topology.network_mode}"
+                    + (
+                        f" / OVN underlay {topology.ovn_underlay_cidr}"
+                        f" / Ceph {topology.ceph_network_cidr}"
+                        if topology.network_mode == SEGREGATED_NETWORK_MODE
+                        else ""
+                    ),
                     "Totals: "
                     f"{topology.total_cpu} vCPU / {topology.total_ram_mb // 1024} GiB RAM / "
                     f"{topology.total_storage_gib} GiB storage",
@@ -673,7 +879,13 @@ class LabOrchestrator:
     @staticmethod
     def _format_plan_validation_failure(errors: tuple[str, ...]) -> str:
         details = "\n".join(f"- {error}" for error in errors)
-        return f"Error: the proposed plan was rejected by deterministic validation:\n{details}"
+        return (
+            "Error: the proposed plan was rejected by deterministic validation:\n"
+            f"{details}\n"
+            "Revise the parameters to satisfy these exact limits and call the same tool "
+            "immediately. Do not ask for informal confirmation; the orchestrator will "
+            "display and approve the corrected exact plan."
+        )
 
     def _invalidate_host_state(self) -> None:
         self._host_state_cache = None
@@ -1076,6 +1288,7 @@ class LabOrchestrator:
             ram = int(parameters.get("node_ram_gb", 8))
             root = int(parameters.get("root_disk_gb", 40))
             ceph = int(parameters.get("ceph_disk_gb", 50))
+            network_mode = str(parameters.get("network_mode", STANDARD_NETWORK_MODE))
             reasoning = parameters.get("reasoning", "")
             trade_offs = parameters.get("trade_offs", "")
             alternative = parameters.get("alternative", "")
@@ -1117,7 +1330,16 @@ class LabOrchestrator:
                 f"  Ceph disk / node : {ceph} GB",
                 f"  Ceph capacity    : ~{total_ceph_usable} GB usable ({total_ceph_raw} GB raw, estimated 3x replication)",
                 "  OVN networking   : enabled (required by this automation)",
+                f"  Network layout   : {network_mode}",
             ]
+            if network_mode == SEGREGATED_NETWORK_MODE:
+                lines.append(
+                    "  Dedicated planes : mgmt0 / IP-free OVN uplink / "
+                    "OVN underlay / Ceph public+internal"
+                )
+                lines.append(
+                    "  Plane CIDRs      : resolved and collision-checked in the exact deploy plan"
+                )
             if reasoning:
                 lines += ["", "Why:", f"  {reasoning}"]
             if trade_offs:
@@ -1475,6 +1697,9 @@ class LabOrchestrator:
             "ceph_disk_gib",
             "ceph_disks_per_node",
             "local_disk_gib",
+            "network_mode",
+            "ovn_underlay_cidr",
+            "ceph_network_cidr",
             "user_prefix",
             "ssh_key",
         },

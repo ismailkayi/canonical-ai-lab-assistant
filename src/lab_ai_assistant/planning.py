@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from typing import Any, Literal
 
@@ -21,6 +22,9 @@ MUTATING_ACTIONS = frozenset(
 
 AFFIRMATIVE_RESPONSES = frozenset({"yes", "y", "confirm", "proceed", "evet", "e"})
 NEGATIVE_RESPONSES = frozenset({"no", "n", "cancel", "abort", "hayır", "hayir", "iptal"})
+
+STANDARD_NETWORK_MODE = "standard-2nic"
+SEGREGATED_NETWORK_MODE = "fully-segregated-4nic"
 
 
 class CapacitySnapshot(BaseModel):
@@ -60,11 +64,47 @@ class TopologySpec(BaseModel):
     ceph_disk_gib: int = Field(ge=10)
     ceph_disks_per_node: int = Field(ge=1, le=8)
     local_disk_gib: int = Field(default=0, ge=0)
+    network_mode: Literal["standard-2nic", "fully-segregated-4nic"] = STANDARD_NETWORK_MODE
+    ovn_underlay_cidr: str | None = None
+    ceph_network_cidr: str | None = None
 
     @model_validator(mode="after")
-    def validate_local_disk_size(self) -> "TopologySpec":
+    def validate_topology(self) -> "TopologySpec":
         if 0 < self.local_disk_gib < 10:
             raise ValueError("local_disk_gib must be 0 (disabled) or at least 10 GiB")
+
+        cidrs = (self.ovn_underlay_cidr, self.ceph_network_cidr)
+        if self.network_mode == STANDARD_NETWORK_MODE:
+            if any(cidrs):
+                raise ValueError("Dedicated plane CIDRs require fully-segregated-4nic mode")
+            return self
+
+        if not all(cidrs):
+            raise ValueError(
+                "fully-segregated-4nic mode requires ovn_underlay_cidr and ceph_network_cidr"
+            )
+
+        networks: list[ipaddress.IPv4Network] = []
+        for field_name, value in (
+            ("ovn_underlay_cidr", self.ovn_underlay_cidr),
+            ("ceph_network_cidr", self.ceph_network_cidr),
+        ):
+            try:
+                network = ipaddress.ip_network(value, strict=True)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be a valid network CIDR: {exc}") from exc
+            if not isinstance(network, ipaddress.IPv4Network):
+                raise ValueError(f"{field_name} must be an IPv4 network")
+            last_node_offset = self.nodes + 9
+            if last_node_offset >= network.num_addresses - 1:
+                raise ValueError(
+                    f"{field_name} does not have usable addresses 10-{last_node_offset} "
+                    f"for {self.nodes} nodes"
+                )
+            networks.append(network)
+
+        if networks[0].overlaps(networks[1]):
+            raise ValueError("OVN underlay and Ceph network CIDRs must not overlap")
         return self
 
     @property

@@ -119,9 +119,14 @@ SCENARIOS: dict[str, MCScenario] = {
         optional_params=[
             "ceph_disks_per_node",
             "local_disk_gib",
+            "network_mode",
+            "ovn_underlay_cidr",
+            "ceph_network_cidr",
         ],
         notes=(
             "This automation currently enables OVN for every deployment. "
+            "It defaults to a two-NIC layout and can optionally create a fully "
+            "segregated four-NIC layout with dedicated OVN underlay and Ceph planes. "
             "Ceph OSD disks are always required per node; in nested-LXD mode they are virtual block volumes "
             "provisioned by Terraform rather than host physical disks."
         ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -151,6 +152,15 @@ class ClusterVerifier:
             )
 
         checks.append(self._check_ceph_health(initiator, expected_osds))
+        if spec.get("network_mode") == "fully-segregated-4nic":
+            checks.append(
+                self._check_segregated_networks(
+                    prefix,
+                    expected_nodes,
+                    str(spec.get("ovn_underlay_cidr", "")),
+                    str(spec.get("ceph_network_cidr", "")),
+                )
+            )
         overall = self._overall_status(checks)
         return VerificationReport(
             workspace=workspace,
@@ -280,6 +290,103 @@ class ClusterVerifier:
             name="ceph-health",
             status=status,
             command_ok=returncode == 0,
+            detail=detail,
+        )
+
+    def _check_segregated_networks(
+        self,
+        prefix: str,
+        expected_nodes: int,
+        ovn_cidr: str,
+        ceph_cidr: str,
+    ) -> ServiceCheck:
+        """Verify addresses and ring connectivity on both dedicated planes."""
+        try:
+            ovn_network = ipaddress.ip_network(ovn_cidr, strict=True)
+            ceph_network = ipaddress.ip_network(ceph_cidr, strict=True)
+        except ValueError as exc:
+            return ServiceCheck(
+                name="segregated-networks",
+                status="unhealthy",
+                command_ok=False,
+                expected_members=expected_nodes or None,
+                observed_members=0,
+                detail=f"Invalid persisted network CIDR: {exc}",
+            )
+        if (
+            expected_nodes <= 0
+            or expected_nodes + 9 >= ovn_network.num_addresses - 1
+            or expected_nodes + 9 >= ceph_network.num_addresses - 1
+        ):
+            return ServiceCheck(
+                name="segregated-networks",
+                status="unhealthy",
+                command_ok=False,
+                expected_members=expected_nodes or None,
+                observed_members=0,
+                detail="Persisted network geometry has insufficient node addresses.",
+            )
+
+        failures: list[str] = []
+        observed = 0
+        for index in range(1, expected_nodes + 1):
+            node = f"{prefix}-node-{index}"
+            ovn_ip = str(ovn_network[index + 9])
+            ceph_ip = str(ceph_network[index + 9])
+            peer_index = index % expected_nodes + 1
+            peer_ovn_ip = str(ovn_network[peer_index + 9])
+            peer_ceph_ip = str(ceph_network[peer_index + 9])
+            command = [
+                "bash",
+                "-lc",
+                (
+                    "set -euo pipefail; "
+                    "for iface in mgmt0 ovn-uplink ovn-underlay ceph-general; do "
+                    'ip link show dev "$iface" >/dev/null; done; '
+                    "! ip -o address show dev ovn-uplink | grep -Eq 'inet6? '; "
+                    f"ip -4 -o address show dev ovn-underlay | grep -Fq ' {ovn_ip}/'; "
+                    f"ip -4 -o address show dev ceph-general | grep -Fq ' {ceph_ip}/'; "
+                    "ip -4 route show default | grep -q ' dev mgmt0'; "
+                    f"ping -I ovn-underlay -c 1 -W 2 {peer_ovn_ip} >/dev/null; "
+                    f"ping -I ceph-general -c 1 -W 2 {peer_ceph_ip} >/dev/null"
+                ),
+            ]
+            returncode, output = self._run_in_node(node, command)
+            if returncode == 0:
+                observed += 1
+            else:
+                failures.append(f"{node}: {self._compact(output) or 'plane check failed'}")
+
+        initiator = f"{prefix}-node-1"
+        for option in ("cluster_network", "public_network"):
+            returncode, config_output = self._run_in_node(
+                initiator,
+                ["microceph", "cluster", "config", "get", option],
+            )
+            pattern = rf"\b{option}\b.*\b{re.escape(ceph_cidr)}\b"
+            if returncode != 0 or not re.search(pattern, config_output):
+                failures.append(f"Ceph {option} is not {ceph_cidr}")
+
+        status: Literal["healthy", "partial", "unhealthy"]
+        if not failures:
+            status = "healthy"
+            detail = (
+                f"All {observed} members have four NICs; OVN={ovn_cidr}, "
+                f"Ceph public/internal={ceph_cidr}."
+            )
+        elif observed == 0:
+            status = "unhealthy"
+            detail = "; ".join(failures)
+        else:
+            status = "partial"
+            detail = "; ".join(failures)
+
+        return ServiceCheck(
+            name="segregated-networks",
+            status=status,
+            command_ok=not failures,
+            expected_members=expected_nodes or None,
+            observed_members=observed,
             detail=detail,
         )
 

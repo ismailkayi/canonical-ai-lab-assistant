@@ -127,6 +127,53 @@ variable "local_disk_size_gib" {
   }
 }
 
+variable "microcloud_network_mode" {
+  description = "MicroCloud network layout: standard-2nic or fully-segregated-4nic"
+  type        = string
+  default     = "standard-2nic"
+
+  validation {
+    condition     = contains(["standard-2nic", "fully-segregated-4nic"], var.microcloud_network_mode)
+    error_message = "microcloud_network_mode must be standard-2nic or fully-segregated-4nic."
+  }
+}
+
+variable "microcloud_ovn_underlay_cidr" {
+  description = "Static IPv4 subnet for the dedicated OVN Geneve underlay"
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.microcloud_network_mode == "standard-2nic" ||
+      try(
+        can(cidrhost(var.microcloud_ovn_underlay_cidr, var.microcloud_node_count + 9)) &&
+        var.microcloud_node_count + 9 < pow(2, 32 - tonumber(split("/", var.microcloud_ovn_underlay_cidr)[1])) - 1,
+        false
+      )
+    )
+    error_message = "microcloud_ovn_underlay_cidr must provide a non-broadcast address for every node."
+  }
+}
+
+variable "microcloud_ceph_network_cidr" {
+  description = "Static IPv4 subnet shared by Ceph public and internal traffic"
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.microcloud_network_mode == "standard-2nic" ||
+      try(
+        can(cidrhost(var.microcloud_ceph_network_cidr, var.microcloud_node_count + 9)) &&
+        var.microcloud_node_count + 9 < pow(2, 32 - tonumber(split("/", var.microcloud_ceph_network_cidr)[1])) - 1,
+        false
+      )
+    )
+    error_message = "microcloud_ceph_network_cidr must provide a non-broadcast address for every node."
+  }
+}
+
 # -----------------------------------------------------------------------
 # Locals
 # -----------------------------------------------------------------------
@@ -135,7 +182,19 @@ locals {
   # env_id follows the workspace name (e.g. alice_microcloud)
   env_id = terraform.workspace == "default" ? var.user_prefix : terraform.workspace
   # LXD names must not contain underscores
-  lxd_prefix = replace(local.env_id, "_", "-")
+  lxd_prefix            = replace(local.env_id, "_", "-")
+  segregated_networking = var.microcloud_network_mode == "fully-segregated-4nic"
+  network_hash          = substr(md5(local.env_id), 0, 4)
+  nic_planes            = ["mgmt0", "ovn-uplink", "ovn-underlay", "ceph-general"]
+  node_macs = [
+    for node_index in range(var.microcloud_node_count) : {
+      for plane in local.nic_planes :
+      plane => join(":", concat(
+        ["02", "00"],
+        regexall("..", substr(md5("${local.env_id}-${node_index + 1}-${plane}"), 0, 8))
+      ))
+    }
+  ]
 }
 
 # -----------------------------------------------------------------------
@@ -179,6 +238,35 @@ resource "lxd_network" "ovn_uplink" {
   config = {
     "ipv4.address" = "none"
     "ipv6.address" = "none"
+  }
+}
+
+# These bridges deliberately have no host address or DHCP. The guest receives
+# deterministic static addresses through cloud-init, keeping its default route
+# on the management NIC.
+resource "lxd_network" "ovn_underlay" {
+  count = local.segregated_networking ? 1 : 0
+  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${local.network_hash}-ov"
+  type  = "bridge"
+  config = {
+    "ipv4.address"                          = "none"
+    "ipv6.address"                          = "none"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "ovn-underlay"
+    "user.canonical-ai-lab-assistant.cidr"  = var.microcloud_ovn_underlay_cidr
+  }
+}
+
+resource "lxd_network" "ceph" {
+  count = local.segregated_networking ? 1 : 0
+  name  = "mc-${substr(local.lxd_prefix, 0, 4)}-${local.network_hash}-ce"
+  type  = "bridge"
+  config = {
+    "ipv4.address"                          = "none"
+    "ipv6.address"                          = "none"
+    "user.canonical-ai-lab-assistant.owner" = local.env_id
+    "user.canonical-ai-lab-assistant.role"  = "ceph"
+    "user.canonical-ai-lab-assistant.cidr"  = var.microcloud_ceph_network_cidr
   }
 }
 
@@ -240,8 +328,47 @@ resource "lxd_instance" "microcloud_nodes" {
   device {
     name = "eth1"
     type = "nic"
-    properties = {
-      network = lxd_network.ovn_uplink.name
+    properties = merge(
+      { network = lxd_network.ovn_uplink.name },
+      local.segregated_networking ? { hwaddr = local.node_macs[count.index]["ovn-uplink"] } : {}
+    )
+  }
+
+  # Override the profile's management device only in segregated mode so
+  # cloud-init can match and rename it deterministically.
+  dynamic "device" {
+    for_each = local.segregated_networking ? [1] : []
+    content {
+      name = "eth0"
+      type = "nic"
+      properties = {
+        network = var.lxd_network_name
+        hwaddr  = local.node_macs[count.index]["mgmt0"]
+      }
+    }
+  }
+
+  dynamic "device" {
+    for_each = local.segregated_networking ? [1] : []
+    content {
+      name = "eth2"
+      type = "nic"
+      properties = {
+        network = lxd_network.ovn_underlay[0].name
+        hwaddr  = local.node_macs[count.index]["ovn-underlay"]
+      }
+    }
+  }
+
+  dynamic "device" {
+    for_each = local.segregated_networking ? [1] : []
+    content {
+      name = "eth3"
+      type = "nic"
+      properties = {
+        network = lxd_network.ceph[0].name
+        hwaddr  = local.node_macs[count.index]["ceph-general"]
+      }
     }
   }
 
@@ -274,13 +401,56 @@ resource "lxd_instance" "microcloud_nodes" {
     }
   }
 
-  config = {
+  config = merge({
     "user.user-data" = <<-EOT
       #cloud-config
       ssh_authorized_keys:
         - ${var.ssh_public_key}
     EOT
-  }
+    }, local.segregated_networking ? {
+    "cloud-init.network-config" = yamlencode({
+      version = 2
+      ethernets = {
+        mgmt0 = {
+          match    = { macaddress = local.node_macs[count.index]["mgmt0"] }
+          set-name = "mgmt0"
+          dhcp4    = true
+          dhcp6    = false
+        }
+        ovn-uplink = {
+          match      = { macaddress = local.node_macs[count.index]["ovn-uplink"] }
+          set-name   = "ovn-uplink"
+          dhcp4      = false
+          dhcp6      = false
+          accept-ra  = false
+          link-local = []
+          optional   = true
+        }
+        ovn-underlay = {
+          match      = { macaddress = local.node_macs[count.index]["ovn-underlay"] }
+          set-name   = "ovn-underlay"
+          dhcp4      = false
+          dhcp6      = false
+          accept-ra  = false
+          link-local = []
+          addresses = [
+            "${cidrhost(var.microcloud_ovn_underlay_cidr, count.index + 10)}/${split("/", var.microcloud_ovn_underlay_cidr)[1]}"
+          ]
+        }
+        ceph-general = {
+          match      = { macaddress = local.node_macs[count.index]["ceph-general"] }
+          set-name   = "ceph-general"
+          dhcp4      = false
+          dhcp6      = false
+          accept-ra  = false
+          link-local = []
+          addresses = [
+            "${cidrhost(var.microcloud_ceph_network_cidr, count.index + 10)}/${split("/", var.microcloud_ceph_network_cidr)[1]}"
+          ]
+        }
+      }
+    })
+  } : {})
 }
 
 # -----------------------------------------------------------------------
@@ -295,9 +465,14 @@ resource "local_file" "ansible_inventory" {
           hosts = {
             for name in lxd_instance.microcloud_nodes[*].name :
             name => {
-              ansible_connection  = "lxd"
-              expected_ceph_disks = var.ceph_disks_per_node
-              local_disk_enabled  = var.local_disk_size_gib > 0
+              ansible_connection           = "lxd"
+              expected_ceph_disks          = var.ceph_disks_per_node
+              local_disk_enabled           = var.local_disk_size_gib > 0
+              microcloud_network_mode      = var.microcloud_network_mode
+              microcloud_ovn_underlay_ip   = local.segregated_networking ? cidrhost(var.microcloud_ovn_underlay_cidr, index(lxd_instance.microcloud_nodes[*].name, name) + 10) : ""
+              microcloud_ovn_underlay_cidr = var.microcloud_ovn_underlay_cidr
+              microcloud_ceph_network_ip   = local.segregated_networking ? cidrhost(var.microcloud_ceph_network_cidr, index(lxd_instance.microcloud_nodes[*].name, name) + 10) : ""
+              microcloud_ceph_network_cidr = var.microcloud_ceph_network_cidr
             }
           }
         }
@@ -327,6 +502,16 @@ output "ovn_uplink_network" {
   description = "Name of the OVN uplink bridge created for this environment"
 }
 
+output "ovn_underlay_network" {
+  value       = local.segregated_networking ? lxd_network.ovn_underlay[0].name : null
+  description = "Dedicated OVN underlay bridge, when fully segregated networking is enabled"
+}
+
+output "ceph_network" {
+  value       = local.segregated_networking ? lxd_network.ceph[0].name : null
+  description = "Dedicated Ceph bridge, when fully segregated networking is enabled"
+}
+
 output "inventory_file" {
   value       = local_file.ansible_inventory.filename
   description = "Path to the generated Ansible inventory file"
@@ -335,7 +520,7 @@ output "inventory_file" {
 output "deployment_spec" {
   description = "Resolved environment geometry reused by safe lifecycle operations"
   value = {
-    version             = 1
+    version             = 2
     user_prefix         = var.user_prefix
     ubuntu_image        = var.ubuntu_image
     lxd_network_name    = var.lxd_network_name
@@ -348,5 +533,8 @@ output "deployment_spec" {
     ceph_disk_gib       = var.microcloud_ceph_disk_size_gib
     ceph_disks_per_node = var.ceph_disks_per_node
     local_disk_gib      = var.local_disk_size_gib
+    network_mode        = var.microcloud_network_mode
+    ovn_underlay_cidr   = var.microcloud_ovn_underlay_cidr
+    ceph_network_cidr   = var.microcloud_ceph_network_cidr
   }
 }

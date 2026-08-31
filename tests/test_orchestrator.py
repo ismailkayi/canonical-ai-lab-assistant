@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import time
 
@@ -572,3 +573,224 @@ def test_add_nodes_is_not_swallowed_by_the_scale_rule(config) -> None:
     )
 
     assert resolved == "add_cluster_node"
+
+
+def test_standard_network_mode_remains_the_default(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    resolved, topology = orchestrator._resolve_deployment_parameters(
+        {"nodes": 3, "user_prefix": "default-network"},
+        capacity,
+    )
+
+    assert resolved["network_mode"] == "standard-2nic"
+    assert "ovn_underlay_cidr" not in resolved
+    assert topology.network_mode == "standard-2nic"
+
+
+def test_segregated_network_mode_resolves_exact_non_overlapping_cidrs(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    occupied = [ipaddress.ip_network("172.28.10.0/24")]
+    orchestrator._occupied_ipv4_networks = lambda: occupied
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    parameters = {
+        "nodes": 3,
+        "user_prefix": "network-training",
+        "network_mode": "fully-segregated-4nic",
+    }
+    first, topology = orchestrator._resolve_deployment_parameters(parameters, capacity)
+    second, _ = orchestrator._resolve_deployment_parameters(parameters, capacity)
+
+    ovn = ipaddress.ip_network(first["ovn_underlay_cidr"])
+    ceph = ipaddress.ip_network(first["ceph_network_cidr"])
+    assert first["ovn_underlay_cidr"] == second["ovn_underlay_cidr"]
+    assert first["ceph_network_cidr"] == second["ceph_network_cidr"]
+    assert not ovn.overlaps(ceph)
+    assert not ovn.overlaps(occupied[0])
+    assert topology.network_mode == "fully-segregated-4nic"
+
+
+def test_explicit_segregated_cidr_cannot_overlap_host_network(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator._occupied_ipv4_networks = lambda: [ipaddress.ip_network("172.28.42.0/24")]
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="overlaps"):
+        orchestrator._resolve_deployment_parameters(
+            {
+                "nodes": 3,
+                "network_mode": "fully-segregated-4nic",
+                "ovn_underlay_cidr": "172.28.42.0/24",
+                "ceph_network_cidr": "172.29.42.0/24",
+            },
+            capacity,
+        )
+
+
+def test_confirmation_displays_segregated_network_geometry(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    plan = ExecutionPlan(
+        action="deploy_microcloud",
+        parameters={
+            "nodes": 3,
+            "network_mode": "fully-segregated-4nic",
+            "ovn_underlay_cidr": "172.28.42.0/24",
+            "ceph_network_cidr": "172.29.42.0/24",
+        },
+        summary="Create a network training lab",
+        topology=TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+            network_mode="fully-segregated-4nic",
+            ovn_underlay_cidr="172.28.42.0/24",
+            ceph_network_cidr="172.29.42.0/24",
+        ),
+    )
+
+    rendered = orchestrator._format_plan_for_confirmation(plan)
+
+    assert "fully-segregated-4nic" in rendered
+    assert "OVN underlay 172.28.42.0/24" in rendered
+    assert "Ceph 172.29.42.0/24" in rendered
+
+
+def test_expansion_inherits_persisted_segregated_network_geometry(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.deployment_spec = lambda _workspace: {
+        "node_count": 3,
+        "node_cpu": 2,
+        "node_memory_mb": 4096,
+        "root_disk_gib": 30,
+        "ceph_disk_gib": 20,
+        "ceph_disks_per_node": 1,
+        "local_disk_gib": 0,
+        "lxd_storage_pool": "default",
+        "network_mode": "fully-segregated-4nic",
+        "ovn_underlay_cidr": "172.28.42.0/24",
+        "ceph_network_cidr": "172.29.42.0/24",
+    }
+    orchestrator.cluster_verifier.workspace_state = lambda _workspace: {
+        "state_lineage": "lineage-1",
+        "state_serial": 7,
+        "current_nodes": 3,
+        "storage_pool": "default",
+    }
+
+    topology = orchestrator._resolve_expansion_topology(
+        "add_cluster_node",
+        {"workspace": "lab_microcloud", "add_nodes": 2},
+    )
+
+    assert topology.nodes == 2
+    assert topology.network_mode == "fully-segregated-4nic"
+    assert topology.ovn_underlay_cidr == "172.28.42.0/24"
+    assert topology.ceph_network_cidr == "172.29.42.0/24"
+
+
+def test_expansion_rejects_segregated_cidr_too_small_for_target(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.deployment_spec = lambda _workspace: {
+        "node_count": 3,
+        "node_cpu": 2,
+        "node_memory_mb": 4096,
+        "root_disk_gib": 30,
+        "ceph_disk_gib": 20,
+        "ceph_disks_per_node": 1,
+        "local_disk_gib": 0,
+        "lxd_storage_pool": "default",
+        "network_mode": "fully-segregated-4nic",
+        "ovn_underlay_cidr": "172.28.42.0/28",
+        "ceph_network_cidr": "172.29.42.0/28",
+    }
+    orchestrator.cluster_verifier.workspace_state = lambda _workspace: {
+        "state_lineage": "lineage-1",
+        "state_serial": 7,
+        "current_nodes": 3,
+        "storage_pool": "default",
+    }
+
+    with pytest.raises(ValueError, match="no usable address"):
+        orchestrator._resolve_expansion_topology(
+            "add_cluster_node",
+            {"workspace": "lab_microcloud", "add_nodes": 3},
+        )
+
+
+def test_revalidation_blocks_a_new_network_overlap_after_approval(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator._occupied_ipv4_networks = lambda: [ipaddress.ip_network("172.28.42.0/24")]
+    plan = ExecutionPlan(
+        action="deploy_microcloud",
+        parameters={
+            "nodes": 3,
+            "network_mode": "fully-segregated-4nic",
+            "ovn_underlay_cidr": "172.28.42.0/24",
+            "ceph_network_cidr": "172.29.42.0/24",
+        },
+        summary="Create a network lab",
+        topology=TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+            network_mode="fully-segregated-4nic",
+            ovn_underlay_cidr="172.28.42.0/24",
+            ceph_network_cidr="172.29.42.0/24",
+        ),
+        capacity=CapacitySnapshot(
+            cpu_available=8,
+            ram_available_mb=16 * 1024,
+            storage_available_gib=200,
+        ),
+    )
+
+    validation = orchestrator._revalidate_approved_plan(plan)
+
+    assert not validation.valid
+    assert "availability changed after approval" in validation.errors[0]
+
+
+def test_custom_topology_proposal_keeps_the_network_choice(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._collect_host_state = lambda force=False: host_state()
+
+    result = orchestrator._handle_local_tool(
+        "propose_custom_topology",
+        {
+            "node_count": 3,
+            "node_cpu": 2,
+            "node_ram_gb": 4,
+            "root_disk_gb": 30,
+            "ceph_disk_gb": 20,
+            "network_mode": "fully-segregated-4nic",
+            "reasoning": "Teach isolated traffic planes.",
+        },
+    )
+
+    assert "Network layout   : fully-segregated-4nic" in result
+    assert "OVN underlay / Ceph public+internal" in result
+    assert "collision-checked in the exact deploy plan" in result

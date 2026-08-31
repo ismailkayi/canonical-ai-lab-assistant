@@ -34,6 +34,9 @@ ROOT_DISK_GIB=""
 CEPH_DISK_GIB=""
 CEPH_DISKS_PER_NODE=1
 LOCAL_DISK_GIB=0
+NETWORK_MODE="standard-2nic"
+OVN_UNDERLAY_CIDR=""
+CEPH_NETWORK_CIDR=""
 USER_PREFIX="lab"
 AUTO_APPROVE=false
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
@@ -55,6 +58,9 @@ for arg in "$@"; do
         --ceph-disk-gib=*)  CEPH_DISK_GIB="${arg#*=}" ;;
         --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
         --local-disk-gib=*)  LOCAL_DISK_GIB="${arg#*=}" ;;
+        --network-mode=*)    NETWORK_MODE="${arg#*=}" ;;
+        --ovn-underlay-cidr=*) OVN_UNDERLAY_CIDR="${arg#*=}" ;;
+        --ceph-network-cidr=*) CEPH_NETWORK_CIDR="${arg#*=}" ;;
         --network-interface=*) NETWORK_INTERFACE="${arg#*=}" ;;
         --ovn-uplink-interface=*) OVN_UPLINK_INTERFACE="${arg#*=}" ;;
         --ceph-osd-disk=*) CEPH_OSD_DISK="${arg#*=}" ;;
@@ -64,6 +70,45 @@ for arg in "$@"; do
         *) log_error "Unknown argument: ${arg}"; exit 1 ;;
     esac
 done
+
+if [[ "${NETWORK_MODE}" != "standard-2nic" \
+        && "${NETWORK_MODE}" != "fully-segregated-4nic" ]]; then
+    log_error "network-mode must be standard-2nic or fully-segregated-4nic"
+    exit 1
+fi
+if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" \
+        && ( -z "${OVN_UNDERLAY_CIDR}" || -z "${CEPH_NETWORK_CIDR}" ) ]]; then
+    log_error "fully-segregated-4nic requires --ovn-underlay-cidr and --ceph-network-cidr"
+    exit 1
+fi
+if [[ "${NETWORK_MODE}" == "standard-2nic" \
+        && ( -n "${OVN_UNDERLAY_CIDR}" || -n "${CEPH_NETWORK_CIDR}" ) ]]; then
+    log_error "Dedicated plane CIDRs require fully-segregated-4nic mode"
+    exit 1
+fi
+if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+    if ! python3 - "${OVN_UNDERLAY_CIDR}" "${CEPH_NETWORK_CIDR}" "${NODES}" <<'PY'
+import ipaddress
+import sys
+
+ovn = ipaddress.ip_network(sys.argv[1], strict=True)
+ceph = ipaddress.ip_network(sys.argv[2], strict=True)
+nodes = int(sys.argv[3])
+if ovn.version != 4 or ceph.version != 4:
+    raise SystemExit("dedicated plane CIDRs must be IPv4")
+if ovn.overlaps(ceph):
+    raise SystemExit("OVN underlay and Ceph network CIDRs must not overlap")
+if nodes + 9 >= ovn.num_addresses - 1 or nodes + 9 >= ceph.num_addresses - 1:
+    raise SystemExit("dedicated plane CIDRs do not have enough node addresses")
+for tenant in (ipaddress.ip_network("192.168.250.0/24"), ipaddress.ip_network("10.250.1.0/24")):
+    if ovn.overlaps(tenant) or ceph.overlaps(tenant):
+        raise SystemExit(f"dedicated plane CIDRs must not overlap reserved OVN subnet {tenant}")
+PY
+    then
+        log_error "Invalid fully segregated network geometry"
+        exit 1
+    fi
+fi
 
 # -----------------------------------------------------------------------
 # Paths
@@ -151,6 +196,47 @@ detect_lxd_defaults() {
 
     print_kv "LXD network" "${detected_network}"
     print_kv "LXD storage pool" "${detected_pool}"
+}
+
+validate_plane_subnet_availability() {
+    [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]] || return
+
+    local existing_subnets=""
+    existing_subnets=$(
+        {
+            ip -o -4 route show table all 2>/dev/null \
+                | awk '$1 != "default" {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./ && $i ~ /\//) {print $i; break}}'
+            while IFS= read -r network; do
+                [[ -z "${network}" ]] && continue
+                lxc network get "${network}" ipv4.address 2>/dev/null || true
+                lxc network get "${network}" user.canonical-ai-lab-assistant.cidr \
+                    2>/dev/null || true
+            done < <(lxc network list --format csv 2>/dev/null | awk -F',' 'NF {print $1}')
+        } | sort -u
+    )
+
+    if ! python3 - "${OVN_UNDERLAY_CIDR}" "${CEPH_NETWORK_CIDR}" \
+            "${existing_subnets}" <<'PY'
+import ipaddress
+import sys
+
+ovn = ipaddress.ip_network(sys.argv[1], strict=True)
+ceph = ipaddress.ip_network(sys.argv[2], strict=True)
+for line in sys.argv[3].splitlines():
+    try:
+        existing = ipaddress.ip_network(line.strip(), strict=False)
+    except ValueError:
+        continue
+    if existing.prefixlen == 0:
+        continue
+    for label, candidate in (("OVN underlay", ovn), ("Ceph", ceph)):
+        if candidate.overlaps(existing):
+            raise SystemExit(f"{label} subnet {candidate} overlaps host/LXD subnet {existing}")
+PY
+    then
+        log_error "Dedicated network subnet conflicts with existing host state"
+        exit 1
+    fi
 }
 
 # -----------------------------------------------------------------------
@@ -308,6 +394,7 @@ WORKSPACE_NAME="${USER_PREFIX}_microcloud"
 print_section "MicroCloud Deployment — scenario: ${SCENARIO}"
 
 detect_lxd_defaults
+validate_plane_subnet_availability
 
 if [[ -z "${NODE_CPU}" || -z "${NODE_MEMORY_MB}" ]]; then
     log_info "Auto-sizing nodes (tier: ${SIZING_TIER:-balanced}) ..."
@@ -324,6 +411,11 @@ print_kv "Root disk / node" "${ROOT_DISK_GIB} GiB"
 print_kv "Ceph disk / node" "${CEPH_DISK_GIB} GiB"
 print_kv "Ceph OSDs / node" "${CEPH_DISKS_PER_NODE}"
 print_kv "Local disk / node" "$([ "${LOCAL_DISK_GIB}" -gt 0 ] && echo "${LOCAL_DISK_GIB} GiB (ZFS)" || echo "disabled")"
+print_kv "Network mode" "${NETWORK_MODE}"
+if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+    print_kv "OVN underlay" "${OVN_UNDERLAY_CIDR}"
+    print_kv "Ceph public/internal" "${CEPH_NETWORK_CIDR}"
+fi
 print_kv "Cluster NIC" "${NETWORK_INTERFACE:-auto-detect}"
 print_kv "OVN uplink NIC" "${OVN_UPLINK_INTERFACE:-auto-detect}"
 print_kv "Ceph OSD disk" "${CEPH_OSD_DISK:-auto-detect}"
@@ -372,6 +464,9 @@ APPLY_ARGS=(
     -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}"
     -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}"
     -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
+    -var="microcloud_network_mode=${NETWORK_MODE}"
+    -var="microcloud_ovn_underlay_cidr=${OVN_UNDERLAY_CIDR}"
+    -var="microcloud_ceph_network_cidr=${CEPH_NETWORK_CIDR}"
 )
 
 run_tofu_apply() {

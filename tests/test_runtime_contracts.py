@@ -55,3 +55,33 @@ def test_shell_health_fallback_is_fail_closed() -> None:
     assert "HEALTH_WARN" in script
     assert 'elif echo "${CEPH_STATUS}"' in script
     assert "OVERALL_OK=false" in script
+
+
+def test_fully_segregated_network_contract_is_wired_end_to_end() -> None:
+    terraform = (REPO_ROOT / "terraform" / "main.tf").read_text()
+    playbook = (REPO_ROOT / "playbooks" / "microcloud.yml").read_text()
+    deploy = (REPO_ROOT / "scripts" / "deploy_microcloud.sh").read_text()
+    add_node = (REPO_ROOT / "scripts" / "add_cluster_node.sh").read_text()
+    health = (REPO_ROOT / "scripts" / "verify_cluster_health.sh").read_text()
+
+    assert 'default     = "standard-2nic"' in terraform
+    assert 'name = "eth2"' in terraform
+    assert 'name = "eth3"' in terraform
+    assert '"cloud-init.network-config"' in terraform
+    assert '"user.canonical-ai-lab-assistant.cidr"' in terraform
+    assert "network_mode        = var.microcloud_network_mode" in terraform
+
+    assert "ovn_underlay_ip:" in playbook
+    assert "public_network: {{ microcloud_ceph_network_cidr }}" in playbook
+    assert "internal_network: {{ microcloud_ceph_network_cidr }}" in playbook
+    assert "lxd_ceph--disk--" in playbook
+
+    for content in (deploy, add_node):
+        assert "microcloud_network_mode" in content
+        assert "microcloud_ovn_underlay_cidr" in content
+        assert "microcloud_ceph_network_cidr" in content
+
+    assert "ovn-underlay" in health
+    assert "ceph-general" in health
+    assert "cluster_network" in health
+    assert "public_network" in health

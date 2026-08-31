@@ -99,6 +99,15 @@ def get_tool_definitions() -> dict[str, Any]:
                         "node_ram_gb": {"type": "integer", "minimum": 1},
                         "root_disk_gb": {"type": "integer", "minimum": 20},
                         "ceph_disk_gb": {"type": "integer", "minimum": 10},
+                        "network_mode": {
+                            "type": "string",
+                            "enum": ["standard-2nic", "fully-segregated-4nic"],
+                            "description": (
+                                "Proposed network layout. Use fully-segregated-4nic "
+                                "when the user requests distinct OVN and Ceph planes."
+                            ),
+                            "default": "standard-2nic",
+                        },
                         "reasoning": {"type": "string"},
                         "trade_offs": {"type": "string"},
                         "alternative": {"type": "string"},
@@ -136,7 +145,10 @@ def get_tool_definitions() -> dict[str, Any]:
                 "description": (
                     "Deploy a full MicroCloud lab cluster. Runs OpenTofu (creates VMs, "
                     "network, storage) then Ansible (installs snaps, initializes cluster). "
-                    "Both phases always execute together. Use after user explicitly confirms."
+                    "Both phases always execute together. Call this as soon as the requested "
+                    "plan is complete; the orchestrator validates it, displays the exact "
+                    "resolved plan, and obtains approval before anything executes. Do not ask "
+                    "for an informal confirmation first."
                 ),
                 "parameters": {
                     "type": "object",
@@ -191,6 +203,36 @@ def get_tool_definitions() -> dict[str, Any]:
                                 "Set >= 10 to add fast local storage alongside distributed Ceph."
                             ),
                             "default": 0,
+                        },
+                        "network_mode": {
+                            "type": "string",
+                            "enum": ["standard-2nic", "fully-segregated-4nic"],
+                            "description": (
+                                "Network plane layout. standard-2nic keeps management/cluster "
+                                "traffic together plus an IP-free OVN uplink. "
+                                "fully-segregated-4nic adds dedicated static-IP OVN underlay "
+                                "and Ceph public/internal planes. Use it when explicitly "
+                                "requested or when teaching network segregation."
+                            ),
+                            "default": "standard-2nic",
+                        },
+                        "ovn_underlay_cidr": {
+                            "type": "string",
+                            "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$",
+                            "description": (
+                                "Optional advanced override for the dedicated OVN Geneve "
+                                "underlay IPv4 subnet. The system selects a non-overlapping "
+                                "/24 when omitted."
+                            ),
+                        },
+                        "ceph_network_cidr": {
+                            "type": "string",
+                            "pattern": r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$",
+                            "description": (
+                                "Optional advanced override for the dedicated Ceph public "
+                                "and internal IPv4 subnet. The system selects a "
+                                "non-overlapping /24 when omitted."
+                            ),
                         },
                     },
                     "required": ["nodes"],

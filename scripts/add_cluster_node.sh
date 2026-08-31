@@ -169,6 +169,16 @@ SPEC_ROOT_DISK_GIB=$(spec_value root_disk_gib)
 SPEC_CEPH_DISK_GIB=$(spec_value ceph_disk_gib)
 SPEC_CEPH_DISKS_PER_NODE=$(spec_value ceph_disks_per_node)
 SPEC_LOCAL_DISK_GIB=$(spec_value local_disk_gib)
+SPEC_NETWORK_MODE=$(spec_value_optional network_mode)
+SPEC_OVN_UNDERLAY_CIDR=$(spec_value_optional ovn_underlay_cidr)
+SPEC_CEPH_NETWORK_CIDR=$(spec_value_optional ceph_network_cidr)
+
+[[ -z "${SPEC_NETWORK_MODE}" ]] && SPEC_NETWORK_MODE="standard-2nic"
+if [[ "${SPEC_NETWORK_MODE}" == "fully-segregated-4nic" \
+        && ( -z "${SPEC_OVN_UNDERLAY_CIDR}" || -z "${SPEC_CEPH_NETWORK_CIDR}" ) ]]; then
+    log_error "Saved fully segregated deployment is missing its network CIDRs"
+    exit 1
+fi
 
 if [[ -z "${SPEC_SSH_PUBLIC_KEY}" ]]; then
     SPEC_SSH_PUBLIC_KEY=$(lxc config get "${INITIATOR_NODE}" user.user-data 2>/dev/null \
@@ -252,6 +262,7 @@ echo "============================================================"
 echo "  Adding ${ADD_NODES} node(s) to ${WORKSPACE}"
 echo "  New total: ${NEW_TOTAL}"
 echo "  vCPU: ${NODE_CPU}  RAM: ${NODE_MEMORY_MB}MiB  Root: ${ROOT_DISK_GIB}GiB  Ceph: ${CEPH_DISK_GIB}GiB × ${CEPH_DISKS_PER_NODE}"
+echo "  Network: ${SPEC_NETWORK_MODE}"
 echo "============================================================"
 echo ""
 
@@ -271,7 +282,10 @@ tofu plan -input=false -parallelism=1 -out="${PLAN_FILE}" \
     -var="microcloud_root_disk_size_gib=${ROOT_DISK_GIB}" \
     -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}" \
     -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}" \
-    -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
+    -var="local_disk_size_gib=${LOCAL_DISK_GIB}" \
+    -var="microcloud_network_mode=${SPEC_NETWORK_MODE}" \
+    -var="microcloud_ovn_underlay_cidr=${SPEC_OVN_UNDERLAY_CIDR}" \
+    -var="microcloud_ceph_network_cidr=${SPEC_CEPH_NETWORK_CIDR}"
 tofu apply -auto-approve -parallelism=1 "${PLAN_FILE}"
 
 log_success "New VMs provisioned"
@@ -321,16 +335,33 @@ lookup_subnet: ${LOOKUP_SUBNET}
 session_passphrase: microcloud-lab-session-passphrase
 systems:"
 
+cidr_host_address() {
+    local cidr="$1"
+    local offset="$2"
+    python3 - "${cidr}" "${offset}" <<'PY'
+import ipaddress
+import sys
+
+print(ipaddress.ip_network(sys.argv[1], strict=True)[int(sys.argv[2])])
+PY
+}
+
 for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
     node_name="${LXD_PREFIX}-node-${i}"
 
-    OVN_IFACE=$(lxc exec "${node_name}" -- bash -c "
-        primary=\$(ip -4 route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
-        for iface in \$(ip -o link show | awk -F': ' '!/lo/ {print \$2}' | cut -d'@' -f1); do
-            [ \"\$iface\" = \"\$primary\" ] && continue
-            ip -4 addr show \"\$iface\" | grep -q 'inet ' || { echo \"\$iface\"; break; }
-        done
-    " 2>/dev/null | tr -d '[:space:]')
+    if [[ "${SPEC_NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+        OVN_IFACE="ovn-uplink"
+        OVN_UNDERLAY_IP=$(cidr_host_address "${SPEC_OVN_UNDERLAY_CIDR}" $((i + 9)))
+    else
+        OVN_IFACE=$(lxc exec "${node_name}" -- bash -c "
+            primary=\$(ip -4 route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
+            for iface in \$(ip -o link show | awk -F': ' '!/lo/ {print \$2}' | cut -d'@' -f1); do
+                [ \"\$iface\" = \"\$primary\" ] && continue
+                ip -4 addr show \"\$iface\" | grep -q 'inet ' || { echo \"\$iface\"; break; }
+            done
+        " 2>/dev/null | tr -d '[:space:]')
+        OVN_UNDERLAY_IP=""
+    fi
 
     if [[ "${LOCAL_DISK_GIB}" -gt 0 ]]; then
         LOCAL_DISK=$(lxc exec "${node_name}" -- bash -c "
@@ -362,6 +393,10 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
     ADD_PRESEED+="
   - name: ${node_name}
     ovn_uplink_interface: ${OVN_IFACE}"
+    if [[ -n "${OVN_UNDERLAY_IP}" ]]; then
+        ADD_PRESEED+="
+    ovn_underlay_ip: ${OVN_UNDERLAY_IP}"
+    fi
     if [[ ${#CEPH_DISK_LIST[@]} -gt 0 ]]; then
         ADD_PRESEED+="
     storage:
@@ -379,7 +414,7 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         fi
     fi
 
-    log_info "  ${node_name}: OVN=${OVN_IFACE:-?}  Ceph=${CEPH_DISK_LIST[*]:-none}  Local=${LOCAL_DISK:-none}"
+    log_info "  ${node_name}: OVN=${OVN_IFACE:-?}  Underlay=${OVN_UNDERLAY_IP:-shared}  Ceph=${CEPH_DISK_LIST[*]:-none}  Local=${LOCAL_DISK:-none}"
 done
 
 # Start preseed on joiner nodes first (they enter joining session)

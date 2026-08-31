@@ -15,6 +15,7 @@ is not a production deployment tool.
 - Host-aware topology and sizing recommendations
 - LXD virtual machines provisioned with OpenTofu
 - MicroCloud, LXD, MicroCeph, and MicroOVN configured with Ansible
+- Optional fully segregated four-NIC networking for training and data-plane labs
 - One to eight Ceph OSD disks per node
 - Optional local ZFS storage alongside distributed Ceph
 - Environment listing, expansion, health verification, and cleanup
@@ -254,11 +255,40 @@ Changing the plan, host capacity, or target state invalidates the approval.
 | Ceph OSD disk | 10 GiB or more |
 | Ceph disks per node | 1-8 |
 | Local ZFS disk | 0 to disable, otherwise 10 GiB or more |
-| Networking | MicroOVN with a dedicated virtual uplink |
+| Networking | Standard 2-NIC or fully segregated 4-NIC MicroOVN/Ceph planes |
 | Image | Ubuntu 24.04 by default |
 
 MicroCloud runs inside LXD VMs. Ceph and optional local disks are virtual block
 volumes created in the selected LXD storage pool.
+
+### Network layouts
+
+The default `standard-2nic` layout preserves the existing lightweight lab
+topology:
+
+1. Management, MicroCloud lookup, and Ceph traffic
+2. IP-free OVN uplink
+
+When explicitly requested, `fully-segregated-4nic` creates four interfaces on
+every MicroCloud VM:
+
+1. `mgmt0`: management and MicroCloud lookup traffic (DHCP)
+2. `ovn-uplink`: IP-free external OVN uplink
+3. `ovn-underlay`: static-IP OVN Geneve encapsulation traffic
+4. `ceph-general`: static-IP Ceph public/client and internal/replication traffic
+
+The assistant selects non-overlapping OVN and Ceph `/24` subnets and shows them
+in the approval-bound plan. Advanced users can request exact
+`ovn_underlay_cidr` and `ceph_network_cidr` values. Network mode and CIDRs are
+persisted in Terraform state, inherited during add/scale, and cannot be changed
+in place.
+
+Example request:
+
+```text
+Create a three-node MicroCloud network training lab with fully segregated
+networking. Use separate management, OVN uplink, OVN underlay, and Ceph planes.
+```
 
 ## Deployment Behavior
 
@@ -269,7 +299,8 @@ When you confirm a deployment, the assistant:
 3. Creates a new OpenTofu workspace and saved plan.
 4. Creates VMs, networks, and block volumes.
 5. Runs `ansible-playbook playbooks/microcloud.yml`.
-6. Verifies exact membership, Ceph health, and OSD count.
+6. Verifies exact membership, Ceph health, OSD count, and any dedicated network
+   planes.
 7. Reports node names, IP addresses, UI URLs, and health evidence.
 
 Supported node counts are 3-50. Even and odd sizes are supported; topology and
@@ -286,7 +317,9 @@ failure-tolerance requirements should still match the intended demonstration.
 - **Downscale:** not implemented because members and Ceph OSDs must be drained
   before VM destruction.
 - **Health:** verifies exact membership in MicroCloud, LXD, MicroCeph, and
-  MicroOVN, plus Ceph health and expected OSD count.
+  MicroOVN, plus Ceph health and expected OSD count. Fully segregated labs also
+  verify NIC presence, static addresses, management routing, ring connectivity,
+  and Ceph public/internal network configuration.
 - **Delete:** destroys the approved saved plan and removes the workspace and
   generated inventory.
 

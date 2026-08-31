@@ -30,6 +30,8 @@ fi
 
 # Derive node prefix (workspace name has underscores, LXD names use dashes)
 LXD_PREFIX="${WORKSPACE//_/-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TERRAFORM_DIR="${SCRIPT_DIR}/../terraform"
 
 # Find the initiator node (first node in workspace)
 INITIATOR_NODE="${LXD_PREFIX}-node-1"
@@ -48,6 +50,24 @@ echo ""
 run_on_node() {
     local node="$1"; shift
     lxc exec "${node}" -- bash -c "$*" 2>/dev/null || echo "(command failed)"
+}
+
+deployment_spec_value() {
+    local spec_json="$1"
+    local key="$2"
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' \
+        "${key}" <<< "${spec_json}"
+}
+
+cidr_host_address() {
+    local cidr="$1"
+    local offset="$2"
+    python3 - "${cidr}" "${offset}" <<'PY'
+import ipaddress
+import sys
+
+print(ipaddress.ip_network(sys.argv[1], strict=True)[int(sys.argv[2])])
+PY
 }
 
 OVERALL_OK=true
@@ -120,6 +140,104 @@ echo ""
 echo "--- LXD networks ---"
 run_on_node "${INITIATOR_NODE}" "lxc network list"
 echo ""
+
+# ---- 7. Fully segregated network planes ----
+DEPLOYMENT_SPEC_JSON=""
+if command -v tofu >/dev/null 2>&1 && [[ -d "${TERRAFORM_DIR}/.terraform" ]]; then
+    DEPLOYMENT_SPEC_JSON=$(
+        cd "${TERRAFORM_DIR}"
+        TF_WORKSPACE="${WORKSPACE}" tofu output -json deployment_spec 2>/dev/null || true
+    )
+fi
+
+NETWORK_MODE="standard-2nic"
+if [[ -n "${DEPLOYMENT_SPEC_JSON}" && "${DEPLOYMENT_SPEC_JSON}" != "null" ]]; then
+    NETWORK_MODE=$(deployment_spec_value "${DEPLOYMENT_SPEC_JSON}" network_mode)
+    [[ -z "${NETWORK_MODE}" ]] && NETWORK_MODE="standard-2nic"
+fi
+
+if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+    echo "--- Fully segregated network planes ---"
+    NODE_COUNT=$(deployment_spec_value "${DEPLOYMENT_SPEC_JSON}" node_count)
+    OVN_UNDERLAY_CIDR=$(deployment_spec_value "${DEPLOYMENT_SPEC_JSON}" ovn_underlay_cidr)
+    CEPH_NETWORK_CIDR=$(deployment_spec_value "${DEPLOYMENT_SPEC_JSON}" ceph_network_cidr)
+
+    for i in $(seq 1 "${NODE_COUNT}"); do
+        node="${LXD_PREFIX}-node-${i}"
+        if ! lxc info "${node}" >/dev/null 2>&1; then
+            log_warn "Missing segregated network member: ${node}"
+            OVERALL_OK=false
+            continue
+        fi
+
+        for iface in mgmt0 ovn-uplink ovn-underlay ceph-general; do
+            if ! lxc exec "${node}" -- ip link show dev "${iface}" >/dev/null 2>&1; then
+                log_warn "${node}: interface ${iface} is missing"
+                OVERALL_OK=false
+            fi
+        done
+
+        if lxc exec "${node}" -- ip -o address show dev ovn-uplink 2>/dev/null \
+                | grep -Eq 'inet6? '; then
+            log_warn "${node}: ovn-uplink must remain IP-free"
+            OVERALL_OK=false
+        fi
+
+        expected_ovn_ip=$(cidr_host_address "${OVN_UNDERLAY_CIDR}" $((i + 9)))
+        expected_ceph_ip=$(cidr_host_address "${CEPH_NETWORK_CIDR}" $((i + 9)))
+        actual_ovn_ip=$(lxc exec "${node}" -- sh -c \
+            "ip -4 -o address show dev ovn-underlay scope global | awk '{split(\$4,a,\"/\"); print a[1]; exit}'" \
+            2>/dev/null || true)
+        actual_ceph_ip=$(lxc exec "${node}" -- sh -c \
+            "ip -4 -o address show dev ceph-general scope global | awk '{split(\$4,a,\"/\"); print a[1]; exit}'" \
+            2>/dev/null || true)
+
+        if [[ "${actual_ovn_ip}" != "${expected_ovn_ip}" ]]; then
+            log_warn "${node}: OVN underlay IP is ${actual_ovn_ip:-missing}, expected ${expected_ovn_ip}"
+            OVERALL_OK=false
+        fi
+        if [[ "${actual_ceph_ip}" != "${expected_ceph_ip}" ]]; then
+            log_warn "${node}: Ceph network IP is ${actual_ceph_ip:-missing}, expected ${expected_ceph_ip}"
+            OVERALL_OK=false
+        fi
+        if ! lxc exec "${node}" -- ip -4 route show default 2>/dev/null \
+                | grep -q ' dev mgmt0'; then
+            log_warn "${node}: default route is not on mgmt0"
+            OVERALL_OK=false
+        fi
+
+        # The plane bridges are shared L2 domains. A ring probe validates every
+        # member as both source and destination without quadratic checks at 50 nodes.
+        peer_index=$((i % NODE_COUNT + 1))
+        peer_ovn_ip=$(cidr_host_address "${OVN_UNDERLAY_CIDR}" $((peer_index + 9)))
+        peer_ceph_ip=$(cidr_host_address "${CEPH_NETWORK_CIDR}" $((peer_index + 9)))
+        if ! lxc exec "${node}" -- ping -I ovn-underlay -c 1 -W 2 "${peer_ovn_ip}" \
+                >/dev/null 2>&1; then
+            log_warn "${node}: cannot reach ${peer_ovn_ip} over ovn-underlay"
+            OVERALL_OK=false
+        fi
+        if ! lxc exec "${node}" -- ping -I ceph-general -c 1 -W 2 "${peer_ceph_ip}" \
+                >/dev/null 2>&1; then
+            log_warn "${node}: cannot reach ${peer_ceph_ip} over ceph-general"
+            OVERALL_OK=false
+        fi
+    done
+
+    for option in cluster_network public_network; do
+        CEPH_CONFIG=$(run_on_node "${INITIATOR_NODE}" \
+            "microceph cluster config get ${option} 2>&1")
+        if ! echo "${CEPH_CONFIG}" \
+                | grep -Eq "${option}.*${CEPH_NETWORK_CIDR//./\\.}"; then
+            log_warn "Ceph ${option} is not ${CEPH_NETWORK_CIDR}"
+            OVERALL_OK=false
+        fi
+    done
+
+    if [[ "${OVERALL_OK}" == "true" ]]; then
+        log_success "Four-NIC OVN and Ceph planes are correctly segregated"
+    fi
+    echo ""
+fi
 
 echo "============================================================"
 if [[ "${OVERALL_OK}" == "true" ]]; then

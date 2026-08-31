@@ -454,3 +454,60 @@ def test_broken_stream_falls_back_to_a_normal_request(config) -> None:
 
     assert calls == [True, False], "a failed stream must be retried without streaming"
     assert result["content"] == "recovered answer"
+
+
+def test_labeled_tool_contract_from_small_model_is_parsed() -> None:
+    from lab_ai_assistant.ai_engine import _extract_structured_response
+
+    raw = """I recommend a segregated network training lab.
+
+action: deploy_microcloud
+parameters:
+  nodes: 3
+  network_mode: fully-segregated-4nic
+  sizing_tier: small
+  user_prefix: segnet
+reasoning: The user explicitly requested four isolated traffic planes.
+missing_params: []
+"""
+
+    result = _extract_structured_response(raw)
+
+    assert result["action"] == "deploy_microcloud"
+    assert result["parameters"] == {
+        "nodes": 3,
+        "network_mode": "fully-segregated-4nic",
+        "sizing_tier": "small",
+        "user_prefix": "segnet",
+    }
+    assert result["message"] == "I recommend a segregated network training lab."
+    assert "four isolated traffic planes" in result["reasoning"]
+
+
+def test_labeled_unknown_tool_is_not_executed() -> None:
+    from lab_ai_assistant.ai_engine import _extract_structured_response
+
+    raw = """action: destroy_everything
+parameters:
+  workspace: lab_microcloud
+"""
+
+    result = _extract_structured_response(raw)
+
+    assert result.get("action") is None
+    assert result["content"] == raw
+
+
+def test_labeled_parameterless_tool_is_parsed() -> None:
+    from lab_ai_assistant.ai_engine import _extract_structured_response
+
+    raw = """I will inspect the current host.
+
+action: inspect_host_environment
+parameters: {}
+"""
+
+    result = _extract_structured_response(raw)
+
+    assert result["action"] == "inspect_host_environment"
+    assert result["parameters"] == {}
