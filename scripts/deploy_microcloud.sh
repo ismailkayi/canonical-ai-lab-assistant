@@ -37,11 +37,6 @@ LOCAL_DISK_GIB=0
 NETWORK_MODE="standard-2nic"
 OVN_UNDERLAY_CIDR=""
 CEPH_NETWORK_CIDR=""
-LXD_PROJECT_NAME=""
-MANAGEMENT_NETWORK_NAME=""
-OVN_UPLINK_NETWORK_NAME=""
-OVN_UNDERLAY_NETWORK_NAME=""
-CEPH_NETWORK_NAME=""
 USER_PREFIX="lab"
 AUTO_APPROVE=false
 SSH_KEY_PATH="$HOME/.ssh/id_rsa_lab"
@@ -66,11 +61,6 @@ for arg in "$@"; do
         --network-mode=*)    NETWORK_MODE="${arg#*=}" ;;
         --ovn-underlay-cidr=*) OVN_UNDERLAY_CIDR="${arg#*=}" ;;
         --ceph-network-cidr=*) CEPH_NETWORK_CIDR="${arg#*=}" ;;
-        --lxd-project-name=*) LXD_PROJECT_NAME="${arg#*=}" ;;
-        --management-network-name=*) MANAGEMENT_NETWORK_NAME="${arg#*=}" ;;
-        --ovn-uplink-network-name=*) OVN_UPLINK_NETWORK_NAME="${arg#*=}" ;;
-        --ovn-underlay-network-name=*) OVN_UNDERLAY_NETWORK_NAME="${arg#*=}" ;;
-        --ceph-network-name=*) CEPH_NETWORK_NAME="${arg#*=}" ;;
         --network-interface=*) NETWORK_INTERFACE="${arg#*=}" ;;
         --ovn-uplink-interface=*) OVN_UPLINK_INTERFACE="${arg#*=}" ;;
         --ceph-osd-disk=*) CEPH_OSD_DISK="${arg#*=}" ;;
@@ -163,14 +153,34 @@ export TF_VAR_ssh_public_key
 TF_VAR_ssh_public_key="$(cat "${SSH_KEY_PATH}.pub")"
 
 # -----------------------------------------------------------------------
-# Detect LXD storage pool
+# Detect LXD network & storage pool
 # -----------------------------------------------------------------------
-detect_lxd_storage_pool() {
-    local detected_pool=""
+detect_lxd_defaults() {
+    local detected_network="" detected_pool="" candidate_name="" net_type="" ipv4_addr=""
 
     if ! command -v lxc &>/dev/null || ! lxc info >/dev/null 2>&1; then
         log_error "LXD not reachable. Run: lab-ai bootstrap"
         exit 1
+    fi
+
+    while IFS= read -r candidate_name; do
+        [[ -z "${candidate_name}" ]] && continue
+        net_type=$(lxc network show "${candidate_name}" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
+        [[ "${net_type}" != "bridge" ]] && continue
+        ipv4_addr=$(lxc network get "${candidate_name}" ipv4.address 2>/dev/null || true)
+        if [[ "${candidate_name}" == "lxdbr0" && -n "${ipv4_addr}" && "${ipv4_addr}" != "none" ]]; then
+            detected_network="${candidate_name}"; break
+        fi
+        if [[ -z "${detected_network}" && -n "${ipv4_addr}" && "${ipv4_addr}" != "none" ]]; then
+            detected_network="${candidate_name}"
+        fi
+    done < <(lxc network list --format csv | awk -F',' 'NF>0 {print $1}')
+
+    if [[ -z "${detected_network}" ]]; then
+        lxc network show labbr0 >/dev/null 2>&1 \
+            || lxc network create labbr0 ipv4.address=auto ipv6.address=none >/dev/null 2>&1 \
+            || true
+        detected_network="labbr0"
     fi
 
     if lxc storage show default >/dev/null 2>&1; then
@@ -181,72 +191,29 @@ detect_lxd_storage_pool() {
 
     [[ -z "${detected_pool}" ]] && { log_error "No LXD storage pool found"; exit 1; }
 
+    export TF_VAR_lxd_network_name="${detected_network}"
     export TF_VAR_lxd_storage_pool="${detected_pool}"
 
+    print_kv "LXD network" "${detected_network}"
     print_kv "LXD storage pool" "${detected_pool}"
 }
 
 validate_plane_subnet_availability() {
-    if [[ "${NETWORK_MODE}" != "fully-segregated-4nic" ]]; then
-        return 0
-    fi
+    [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]] || return
 
     local existing_subnets=""
-    local routes_json=""
-    local networks_json=""
-    local probe_rc=0
-    set +e
-    routes_json=$(ip -o -4 route show table all 2>&1)
-    probe_rc=$?
-    set -e
-    if [[ "${probe_rc}" -ne 0 ]]; then
-        log_error "Could not enumerate host IPv4 routes: ${routes_json}"
-        exit 1
-    fi
-    set +e
-    networks_json=$(lxc --project default network list --format=json 2>&1)
-    probe_rc=$?
-    set -e
-    if [[ "${probe_rc}" -ne 0 ]]; then
-        log_error "Could not enumerate global LXD networks: ${networks_json}"
-        exit 1
-    fi
-
-    if ! existing_subnets=$(
-        python3 - "${routes_json}" "${networks_json}" <<'PY'
-import ipaddress
-import json
-import sys
-
-values = []
-for token in sys.argv[1].split():
-    try:
-        values.append(ipaddress.ip_network(token, strict=False))
-    except ValueError:
-        pass
-try:
-    networks = json.loads(sys.argv[2])
-except ValueError as exc:
-    raise SystemExit(f"invalid LXD network JSON: {exc}")
-if not isinstance(networks, list):
-    raise SystemExit("LXD network JSON is not a list")
-for network in networks:
-    if not isinstance(network, dict) or not network.get("managed"):
-        continue
-    config = network.get("config", {})
-    for key in ("ipv4.address", "user.canonical-ai-lab-assistant.cidr"):
-        try:
-            values.append(ipaddress.ip_network(config.get(key, ""), strict=False))
-        except ValueError:
-            pass
-for value in sorted(set(values), key=lambda item: (item.version, int(item.network_address), item.prefixlen)):
-    if value.version == 4 and value.prefixlen:
-        print(value)
-PY
-    ); then
-        log_error "Could not parse host/LXD subnet inventory"
-        exit 1
-    fi
+    existing_subnets=$(
+        {
+            ip -o -4 route show table all 2>/dev/null \
+                | awk '$1 != "default" {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./ && $i ~ /\//) {print $i; break}}'
+            while IFS= read -r network; do
+                [[ -z "${network}" ]] && continue
+                lxc network get "${network}" ipv4.address 2>/dev/null || true
+                lxc network get "${network}" user.canonical-ai-lab-assistant.cidr \
+                    2>/dev/null || true
+            done < <(lxc network list --format csv 2>/dev/null | awk -F',' 'NF {print $1}')
+        } | sort -u
+    )
 
     if ! python3 - "${OVN_UNDERLAY_CIDR}" "${CEPH_NETWORK_CIDR}" \
             "${existing_subnets}" <<'PY'
@@ -409,7 +376,7 @@ print_microcloud_summary() {
     for i in $(seq 1 "${NODES}"); do
         local node="${lxd_prefix}-node-${i}"
         local ip
-        ip=$(lxc --project "${LXD_PROJECT_NAME}" exec "${node}" -- sh -c \
+        ip=$(lxc exec "${node}" -- sh -c \
             "ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if(\$i==\"src\"){print \$(i+1);exit}}'" \
             2>/dev/null || echo "N/A")
         ip="$(echo "${ip}" | tr -d '[:space:]')"
@@ -423,23 +390,10 @@ print_microcloud_summary() {
 # Main
 # -----------------------------------------------------------------------
 WORKSPACE_NAME="${USER_PREFIX}_microcloud"
-if [[ -z "${LXD_PROJECT_NAME}" ]]; then
-    project_slug=$(printf '%s' "${WORKSPACE_NAME//_/-}" \
-        | tr '[:upper:]' '[:lower:]' \
-        | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' \
-        | cut -c1-32)
-    project_hash=$(printf '%s' "${WORKSPACE_NAME}" | sha256sum | cut -c1-8)
-    LXD_PROJECT_NAME="cala-${project_slug:-environment}-${project_hash}"
-fi
-resource_hash=$(printf '%s' "${WORKSPACE_NAME}" | sha256sum | cut -c1-8)
-MANAGEMENT_NETWORK_NAME="${MANAGEMENT_NETWORK_NAME:-ca-${resource_hash}-mg}"
-OVN_UPLINK_NETWORK_NAME="${OVN_UPLINK_NETWORK_NAME:-ca-${resource_hash}-up}"
-OVN_UNDERLAY_NETWORK_NAME="${OVN_UNDERLAY_NETWORK_NAME:-ca-${resource_hash}-ov}"
-CEPH_NETWORK_NAME="${CEPH_NETWORK_NAME:-ca-${resource_hash}-ce}"
 
 print_section "MicroCloud Deployment — scenario: ${SCENARIO}"
 
-detect_lxd_storage_pool
+detect_lxd_defaults
 validate_plane_subnet_availability
 
 if [[ -z "${NODE_CPU}" || -z "${NODE_MEMORY_MB}" ]]; then
@@ -458,7 +412,6 @@ print_kv "Ceph disk / node" "${CEPH_DISK_GIB} GiB"
 print_kv "Ceph OSDs / node" "${CEPH_DISKS_PER_NODE}"
 print_kv "Local disk / node" "$([ "${LOCAL_DISK_GIB}" -gt 0 ] && echo "${LOCAL_DISK_GIB} GiB (ZFS)" || echo "disabled")"
 print_kv "Network mode" "${NETWORK_MODE}"
-print_kv "LXD project" "${LXD_PROJECT_NAME}"
 if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
     print_kv "OVN underlay" "${OVN_UNDERLAY_CIDR}"
     print_kv "Ceph public/internal" "${CEPH_NETWORK_CIDR}"
@@ -499,136 +452,11 @@ fi
 tofu workspace new "${WORKSPACE_NAME}" >/dev/null 2>&1
 tofu workspace select "${WORKSPACE_NAME}" >/dev/null 2>&1
 
-if lxc project show "${LXD_PROJECT_NAME}" >/dev/null 2>&1; then
-    project_manager=$(lxc project get "${LXD_PROJECT_NAME}" \
-        user.canonical-ai-lab-assistant.managed-by 2>/dev/null || true)
-    project_workspace=$(lxc project get "${LXD_PROJECT_NAME}" \
-        user.canonical-ai-lab-assistant.workspace 2>/dev/null || true)
-    if [[ "${project_manager}" == "canonical-ai-lab-assistant" \
-            && "${project_workspace}" == "${WORKSPACE_NAME}" ]]; then
-        log_error "Owned orphan LXD project '${LXD_PROJECT_NAME}' exists without usable Terraform state."
-        log_error "Inspect and clean the orphan before retrying; it will not be adopted automatically."
-    else
-        log_error "Foreign or unmanaged LXD project '${LXD_PROJECT_NAME}' already exists."
-        log_error "managed-by=${project_manager:-unset}, workspace=${project_workspace:-unset}"
-    fi
-    tofu workspace select default >/dev/null 2>&1
-    tofu workspace delete "${WORKSPACE_NAME}" >/dev/null 2>&1 || true
-    exit 1
-fi
-
-NETWORK_MANIFEST=(
-    "${MANAGEMENT_NETWORK_NAME}"
-    "${OVN_UPLINK_NETWORK_NAME}"
-)
-if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
-    NETWORK_MANIFEST+=("${OVN_UNDERLAY_NETWORK_NAME}" "${CEPH_NETWORK_NAME}")
-fi
-for network_name in "${NETWORK_MANIFEST[@]}"; do
-    lxc --project default network show "${network_name}" >/dev/null 2>&1 || continue
-    network_owner=$(lxc --project default network get "${network_name}" \
-        user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
-    network_project=$(lxc --project default network get "${network_name}" \
-        user.canonical-ai-lab-assistant.project 2>/dev/null || true)
-    if [[ "${network_owner}" == "${WORKSPACE_NAME}" \
-            && "${network_project}" == "${LXD_PROJECT_NAME}" ]]; then
-        log_error "Owned orphan LXD network '${network_name}' exists without usable Terraform state."
-    else
-        log_error "Foreign or unmanaged global LXD network '${network_name}' already exists."
-        log_error "owner=${network_owner:-unset}, project=${network_project:-unset}"
-    fi
-    tofu workspace select default >/dev/null 2>&1
-    tofu workspace delete "${WORKSPACE_NAME}" >/dev/null 2>&1 || true
-    exit 1
-done
-
-create_owned_network() {
-    local name="$1"
-    local role="$2"
-    local cidr="${3:-}"
-    local -a args=(
-        --type=bridge
-        "user.canonical-ai-lab-assistant.owner=${WORKSPACE_NAME}"
-        "user.canonical-ai-lab-assistant.project=${LXD_PROJECT_NAME}"
-        "user.canonical-ai-lab-assistant.role=${role}"
-    )
-    if [[ "${role}" == "management" ]]; then
-        args+=(ipv4.address=auto ipv4.nat=true ipv6.address=none)
-    else
-        args+=(ipv4.address=none ipv6.address=none)
-    fi
-    [[ -n "${cidr}" ]] && args+=(
-        "user.canonical-ai-lab-assistant.cidr=${cidr}"
-    )
-    lxc --project default network create "${name}" "${args[@]}"
-}
-
-CREATED_NETWORKS=()
-rollback_created_networks() {
-    for created in "${CREATED_NETWORKS[@]}"; do
-        lxc --project default network delete "${created}" >/dev/null 2>&1 || true
-    done
-}
-
-create_network_or_rollback() {
-    local name="$1"
-    local role="$2"
-    local cidr="${3:-}"
-    if create_owned_network "${name}" "${role}" "${cidr}"; then
-        CREATED_NETWORKS+=("${name}")
-        return
-    fi
-    log_error "Failed to create ${role} network '${name}'; removing networks created in this attempt"
-    rollback_created_networks
-    exit 1
-}
-
-create_network_or_rollback "${MANAGEMENT_NETWORK_NAME}" "management"
-MANAGEMENT_CIDR=$(lxc --project default network get \
-    "${MANAGEMENT_NETWORK_NAME}" ipv4.address 2>/dev/null || true)
-if [[ -z "${MANAGEMENT_CIDR}" || "${MANAGEMENT_CIDR}" == "none" ]]; then
-    log_error "Management network '${MANAGEMENT_NETWORK_NAME}' has no IPv4 subnet"
-    rollback_created_networks
-    exit 1
-fi
-lxc --project default network set "${MANAGEMENT_NETWORK_NAME}" \
-    user.canonical-ai-lab-assistant.cidr "${MANAGEMENT_CIDR}"
-if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
-    if ! python3 - "${MANAGEMENT_CIDR}" "${OVN_UNDERLAY_CIDR}" \
-            "${CEPH_NETWORK_CIDR}" <<'PY'
-import ipaddress
-import sys
-
-management = ipaddress.ip_network(sys.argv[1], strict=False)
-for label, value in (("OVN underlay", sys.argv[2]), ("Ceph", sys.argv[3])):
-    plane = ipaddress.ip_network(value, strict=True)
-    if management.overlaps(plane):
-        raise SystemExit(f"management subnet {management} overlaps {label} subnet {plane}")
-PY
-    then
-        log_error "LXD selected a management subnet that conflicts with a dedicated plane"
-        rollback_created_networks
-        exit 1
-    fi
-fi
-create_network_or_rollback "${OVN_UPLINK_NETWORK_NAME}" "ovn-uplink"
-if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
-    create_network_or_rollback \
-        "${OVN_UNDERLAY_NETWORK_NAME}" "ovn-underlay" "${OVN_UNDERLAY_CIDR}"
-    create_network_or_rollback \
-        "${CEPH_NETWORK_NAME}" "ceph" "${CEPH_NETWORK_CIDR}"
-fi
-
 log_info "Running tofu apply ..."
 APPLY_ARGS=(
     -auto-approve
     -parallelism=1
     -var="user_prefix=${USER_PREFIX}"
-    -var="lxd_project_name=${LXD_PROJECT_NAME}"
-    -var="management_network_name=${MANAGEMENT_NETWORK_NAME}"
-    -var="ovn_uplink_network_name=${OVN_UPLINK_NETWORK_NAME}"
-    -var="ovn_underlay_network_name=${OVN_UNDERLAY_NETWORK_NAME}"
-    -var="ceph_network_name=${CEPH_NETWORK_NAME}"
     -var="microcloud_node_count=${NODES}"
     -var="microcloud_node_cpu=${NODE_CPU}"
     -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}"
@@ -653,24 +481,10 @@ run_tofu_apply() {
 APPLY_LOG=$(mktemp)
 trap 'rm -f "${APPLY_LOG}"' EXIT
 if ! run_tofu_apply "${APPLY_LOG}"; then
-    if ! lxc project show "${LXD_PROJECT_NAME}" >/dev/null 2>&1; then
-        log_warn "Terraform did not create the LXD project; rolling back newly created networks"
-        for created in "${CREATED_NETWORKS[@]}"; do
-            owner=$(lxc --project default network get "${created}" \
-                user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
-            project=$(lxc --project default network get "${created}" \
-                user.canonical-ai-lab-assistant.project 2>/dev/null || true)
-            if [[ "${owner}" == "${WORKSPACE_NAME}" \
-                    && "${project}" == "${LXD_PROJECT_NAME}" ]]; then
-                lxc --project default network delete "${created}" >/dev/null 2>&1 || true
-            fi
-        done
-    fi
     if grep -q "Missing Resource State After Create" "${APPLY_LOG}"; then
-        log_error "The LXD provider created a resource but did not persist it in Terraform state."
-        log_error "Automatic retry is disabled because it can collide with that orphaned resource."
-        log_error "Inspect project '${LXD_PROJECT_NAME}' before retrying."
-        exit 1
+        log_warn "LXD provider returned transient missing state; reconciling with one retry..."
+        : > "${APPLY_LOG}"
+        run_tofu_apply "${APPLY_LOG}"
     else
         exit 1
     fi

@@ -81,7 +81,6 @@ def test_delete_plan_requires_and_hashes_exact_state_identity() -> None:
         current_nodes=3,
         target_nodes=0,
         storage_pool="default",
-        lxd_project_name="cala-lab-microcloud-12345678",
     )
     bound = unbound.model_copy(update={"environment": environment})
     changed = bound.model_copy(

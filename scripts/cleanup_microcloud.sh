@@ -56,12 +56,7 @@ if [[ -z "${EXPECTED_STATE_LINEAGE}" || -z "${EXPECTED_STATE_SERIAL}" \
     exit 1
 fi
 
-for tool in flock lxc tofu; do
-    command -v "${tool}" >/dev/null 2>&1 || {
-        log_error "${tool} not found"
-        exit 1
-    }
-done
+command -v flock >/dev/null 2>&1 || { log_error "flock not found"; exit 1; }
 LOCK_ROOT="${SNAP_USER_COMMON:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
 mkdir -p "${LOCK_ROOT}"
 TERRAFORM_LOCK_FILE="${LOCK_ROOT}/canonical-ai-lab-assistant-terraform-${UID}.lock"
@@ -108,8 +103,8 @@ else
     SSH_PUBLIC_KEY=$(cat "${SSH_KEY}")
 fi
 
+LXD_NETWORK="lxdbr0"
 LXD_STORAGE="default"
-LXD_PROJECT=""
 
 # -----------------------------------------------------------------------
 # Run terraform destroy
@@ -140,69 +135,28 @@ if [[ "${ACTUAL_STATE_LINEAGE}" != "${EXPECTED_STATE_LINEAGE}" \
 fi
 
 DEPLOYMENT_SPEC_JSON=$(tofu output -json deployment_spec 2>/dev/null || true)
-if [[ -z "${DEPLOYMENT_SPEC_JSON}" || "${DEPLOYMENT_SPEC_JSON}" == "null" ]]; then
-    log_error "Workspace '${WORKSPACE}' has no readable deployment_spec"
-    exit 1
+if [[ -n "${DEPLOYMENT_SPEC_JSON}" && "${DEPLOYMENT_SPEC_JSON}" != "null" ]]; then
+    spec_value_optional() {
+        local key="$1"
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' \
+            "${key}" <<< "${DEPLOYMENT_SPEC_JSON}"
+    }
+
+    SPEC_SSH_PUBLIC_KEY=$(spec_value_optional ssh_public_key)
+    SPEC_LXD_NETWORK=$(spec_value_optional lxd_network_name)
+    SPEC_LXD_STORAGE=$(spec_value_optional lxd_storage_pool)
+
+    [[ -n "${SPEC_SSH_PUBLIC_KEY}" ]] && SSH_PUBLIC_KEY="${SPEC_SSH_PUBLIC_KEY}"
+    [[ -n "${SPEC_LXD_NETWORK}" ]] && LXD_NETWORK="${SPEC_LXD_NETWORK}"
+    [[ -n "${SPEC_LXD_STORAGE}" ]] && LXD_STORAGE="${SPEC_LXD_STORAGE}"
 fi
-spec_value() {
-    local key="$1"
-    python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' \
-        "${key}" <<< "${DEPLOYMENT_SPEC_JSON}"
-}
-
-SPEC_SSH_PUBLIC_KEY=$(spec_value ssh_public_key)
-SPEC_LXD_STORAGE=$(spec_value lxd_storage_pool)
-LXD_PROJECT=$(spec_value lxd_project_name)
-MANAGEMENT_NETWORK=$(spec_value management_network)
-OVN_UPLINK_NETWORK=$(spec_value ovn_uplink_network)
-OVN_UNDERLAY_NETWORK=$(spec_value ovn_underlay_network)
-CEPH_NETWORK=$(spec_value ceph_network)
-
-[[ -n "${SPEC_SSH_PUBLIC_KEY}" ]] && SSH_PUBLIC_KEY="${SPEC_SSH_PUBLIC_KEY}"
-[[ -n "${SPEC_LXD_STORAGE}" ]] && LXD_STORAGE="${SPEC_LXD_STORAGE}"
-
-PROJECT_MANAGER=$(lxc project get "${LXD_PROJECT}" \
-    user.canonical-ai-lab-assistant.managed-by 2>/dev/null || true)
-PROJECT_WORKSPACE=$(lxc project get "${LXD_PROJECT}" \
-    user.canonical-ai-lab-assistant.workspace 2>/dev/null || true)
-if [[ "${PROJECT_MANAGER}" != "canonical-ai-lab-assistant" \
-        || "${PROJECT_WORKSPACE}" != "${WORKSPACE}" ]]; then
-    log_error "Refusing cleanup: LXD project ownership does not match the approved workspace"
-    log_error "project=${LXD_PROJECT}, managed-by=${PROJECT_MANAGER:-unset}, workspace=${PROJECT_WORKSPACE:-unset}"
-    exit 1
-fi
-
-NETWORKS=(
-    "${MANAGEMENT_NETWORK}"
-    "${OVN_UPLINK_NETWORK}"
-    "${OVN_UNDERLAY_NETWORK}"
-    "${CEPH_NETWORK}"
-)
-for network in "${NETWORKS[@]}"; do
-    [[ -z "${network}" ]] && continue
-    lxc --project default network show "${network}" >/dev/null 2>&1 || continue
-    NETWORK_OWNER=$(lxc --project default network get "${network}" \
-        user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
-    NETWORK_PROJECT=$(lxc --project default network get "${network}" \
-        user.canonical-ai-lab-assistant.project 2>/dev/null || true)
-    if [[ "${NETWORK_OWNER}" != "${WORKSPACE}" \
-            || "${NETWORK_PROJECT}" != "${LXD_PROJECT}" ]]; then
-        log_error "Refusing cleanup: network '${network}' ownership does not match"
-        log_error "owner=${NETWORK_OWNER:-unset}, project=${NETWORK_PROJECT:-unset}"
-        exit 1
-    fi
-done
 
 log_info "Running tofu destroy..."
 PLAN_FILE=$(mktemp)
 trap 'rm -f "${PLAN_FILE}"' EXIT
 tofu plan -destroy -input=false -out="${PLAN_FILE}" \
     -var="ssh_public_key=${SSH_PUBLIC_KEY}" \
-    -var="lxd_project_name=${LXD_PROJECT}" \
-    -var="management_network_name=${MANAGEMENT_NETWORK}" \
-    -var="ovn_uplink_network_name=${OVN_UPLINK_NETWORK}" \
-    -var="ovn_underlay_network_name=${OVN_UNDERLAY_NETWORK}" \
-    -var="ceph_network_name=${CEPH_NETWORK}" \
+    -var="lxd_network_name=${LXD_NETWORK}" \
     -var="lxd_storage_pool=${LXD_STORAGE}"
 tofu apply -auto-approve "${PLAN_FILE}"
 
@@ -210,27 +164,6 @@ if [[ $? -ne 0 ]]; then
     log_error "Terraform destroy failed"
     exit 1
 fi
-
-for network in "${NETWORKS[@]}"; do
-    [[ -z "${network}" ]] && continue
-    if lxc --project default network show "${network}" >/dev/null 2>&1; then
-        NETWORK_OWNER=$(lxc --project default network get "${network}" \
-            user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
-        NETWORK_PROJECT=$(lxc --project default network get "${network}" \
-            user.canonical-ai-lab-assistant.project 2>/dev/null || true)
-        if [[ "${NETWORK_OWNER}" != "${WORKSPACE}" \
-                || "${NETWORK_PROJECT}" != "${LXD_PROJECT}" ]]; then
-            log_error "Network '${network}' ownership changed during cleanup; refusing deletion"
-            log_error "owner=${NETWORK_OWNER:-unset}, project=${NETWORK_PROJECT:-unset}"
-            exit 1
-        fi
-        if lxc --project default network delete "${network}" >/dev/null 2>&1; then
-            log_info "Removed owned global LXD network: ${network}"
-        else
-            log_warn "Could not remove owned network ${network}; lab-ai orphans will report it"
-        fi
-    fi
-done
 
 # -----------------------------------------------------------------------
 # Delete the workspace after successful destroy

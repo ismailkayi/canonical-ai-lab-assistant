@@ -881,10 +881,6 @@ CORE FACTS:
 - Each MicroCloud node needs at least one Ceph disk (default: 1 OSD per node).
 - In this tool's default flow, MicroCloud runs inside LXD VMs created by
   OpenTofu (nested-lxd-lab mode).
-- Every environment owns a dedicated LXD project containing its VMs and custom
-  volumes. LXD bridge networks must remain global, so they use hash-based names,
-  ownership metadata, and collision preflight. This isolates all supported
-  project resources and protects the remaining global namespace.
 - Ceph disks are per-node virtual block volumes provisioned automatically
   by Terraform.
 - ceph_disks_per_node: 1 is the default; recommend 2 for higher IOPS or larger
@@ -912,11 +908,10 @@ tell users what is and isn't possible with the current automation.
 └─────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │ Layer 2: deploy_microcloud.sh (creates a full environment)  │
-│  Phase A — Detect: finds storage + reserves an LXD project │
+│  Phase A — Detect: finds LXD network + storage pool on host │
 │  Phase B — Size: auto-computes node resources from host     │
 │            capacity OR uses explicit --node-cpu etc.         │
 │  Phase C — Provision (OpenTofu):                            │
-│    • Creates owned bridges + an isolated LXD project        │
 │    • Creates LXD VMs (Ubuntu 24.04 virtual machines)        │
 │    • Creates an OVN uplink bridge (IP-free, for MicroOVN)   │
 │    • Optionally creates OVN-underlay + Ceph plane bridges   │
@@ -1078,11 +1073,6 @@ Confirm workspace name with user before deletion if not explicitly stated.
 
 ENVIRONMENT MANAGEMENT:
 - If user asks to list deployed labs/environments, call list_environments.
-- If the user asks about orphaned, leftover, or state-missing LXD resources,
-  call list_orphaned_projects. It is read-only.
-- Delete an orphan only after list_orphaned_projects identified an ORPHAN and
-  the user identifies the exact project. Call delete_orphaned_project; the
-  orchestrator displays the exact destructive plan and obtains approval.
 - If user asks to add nodes to a running cluster, call add_cluster_node.
 - If user asks to scale up to a larger total, call scale_environment.
 - Explain that downscale is unsupported rather than attempting it.
@@ -1232,9 +1222,7 @@ ENVIRONMENT MANAGEMENT:
         lifecycle_tools = {
             "deploy_microcloud",
             "list_environments",
-            "list_orphaned_projects",
             "delete_environment",
-            "delete_orphaned_project",
             "scale_environment",
             "add_cluster_node",
             "verify_cluster_health",

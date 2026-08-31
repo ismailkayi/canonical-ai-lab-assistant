@@ -117,14 +117,14 @@ ensure_lxd() {
     while IFS= read -r net_name; do
         [[ -z "$net_name" ]] && continue
 
-        net_type=$(sudo lxc --project default network show "$net_name" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
+        net_type=$(sudo lxc network show "$net_name" 2>/dev/null | awk -F': ' '$1=="type" {print $2; exit}')
         [[ "$net_type" != "bridge" ]] && continue
 
-        net_ipv4=$(sudo lxc --project default network get "$net_name" ipv4.address 2>/dev/null || true)
+        net_ipv4=$(sudo lxc network get "$net_name" ipv4.address 2>/dev/null || true)
         if [[ -n "$net_ipv4" && "$net_ipv4" != "none" ]]; then
             routable_bridge_count=$((routable_bridge_count + 1))
         fi
-    done < <(sudo lxc --project default network list --format csv | awk -F',' 'NF>0 {print $1}')
+    done < <(sudo lxc network list --format csv | awk -F',' 'NF>0 {print $1}')
 
     storage_count=$(sudo lxc storage list --format csv | awk -F',' 'NF>0 {count++} END {print count+0}')
 
@@ -137,9 +137,9 @@ ensure_lxd() {
     fi
 
     if [[ "$routable_bridge_count" -eq 0 ]]; then
-        if ! sudo lxc --project default network show labbr0 >/dev/null 2>&1; then
+        if ! sudo lxc network show labbr0 >/dev/null 2>&1; then
             log_info "Creating fallback LXD bridge network: labbr0"
-            sudo lxc --project default network create labbr0 ipv4.address=auto ipv6.address=none
+            sudo lxc network create labbr0 ipv4.address=auto ipv6.address=none
             add_done "Fallback LXD bridge labbr0 created"
         else
             add_skipped "Fallback LXD bridge labbr0 already exists"

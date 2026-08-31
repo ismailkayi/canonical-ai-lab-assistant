@@ -93,10 +93,6 @@ class LabOrchestrator:
                 raise RuntimeError(f"{script.name} failed (exit {result.returncode})")
         return "Bootstrap complete. Run 'lab-ai check' to verify the inference service."
 
-    def list_orphaned_projects(self) -> str:
-        """Return the read-only owned-project/state audit."""
-        return self._run_script(self.config.list_orphaned_projects_script)
-
     def start_chat(self):
         """Start interactive chat session."""
         if not self.ai_engine.is_available():
@@ -197,7 +193,7 @@ class LabOrchestrator:
             if action in MUTATING_ACTIONS:
                 try:
                     plan = self._build_execution_plan(action, parameters, message, reasoning)
-                except (TypeError, ValueError, RuntimeError) as exc:
+                except (TypeError, ValueError) as exc:
                     feedback = f"Error: execution plan could not be built: {exc}"
                     ai_response = self.ai_engine.feed_tool_result(action, feedback)
                     continue
@@ -392,50 +388,6 @@ class LabOrchestrator:
                     "before creating a fresh deployment."
                 )
 
-        project_name = self._project_name_for_workspace(workspace)
-        project_info = self.cluster_verifier.lxd_project_info(project_name)
-        if project_info is not None:
-            config = project_info.get("config", {})
-            managed_by = config.get("user.canonical-ai-lab-assistant.managed-by")
-            owner_workspace = config.get("user.canonical-ai-lab-assistant.workspace")
-            if managed_by == "canonical-ai-lab-assistant" and owner_workspace == workspace:
-                raise ValueError(
-                    f"LXD project '{project_name}' is an orphan owned by workspace "
-                    f"'{workspace}', but Terraform has no managed environment state for it. "
-                    "Inspect and clean the orphan before retrying; it will not be adopted "
-                    "or deleted automatically."
-                )
-            raise ValueError(
-                f"LXD project '{project_name}' already exists and is not owned by this "
-                f"environment (managed-by={managed_by or 'unset'}, "
-                f"workspace={owner_workspace or 'unset'}). Choose a different prefix."
-            )
-
-        network_mode = str(resolved.get("network_mode", STANDARD_NETWORK_MODE)).strip().lower()
-        network_names = self._network_names_for_workspace(workspace)
-        required_network_roles = ["management_network_name", "ovn_uplink_network_name"]
-        if network_mode == SEGREGATED_NETWORK_MODE:
-            required_network_roles.extend(["ovn_underlay_network_name", "ceph_network_name"])
-        for role in required_network_roles:
-            network_name = network_names[role]
-            network_info = self.cluster_verifier.lxd_network_info(network_name)
-            if network_info is None:
-                continue
-            config = network_info.get("config", {})
-            owner = config.get("user.canonical-ai-lab-assistant.owner")
-            owner_project = config.get("user.canonical-ai-lab-assistant.project")
-            if owner == workspace and owner_project == project_name:
-                raise ValueError(
-                    f"Global LXD network '{network_name}' is an orphan owned by "
-                    f"workspace '{workspace}' and project '{project_name}'. Inspect and "
-                    "clean orphaned resources before retrying."
-                )
-            raise ValueError(
-                f"Global LXD network '{network_name}' already exists and is not owned by "
-                f"this environment (owner={owner or 'unset'}, "
-                f"project={owner_project or 'unset'})."
-            )
-
         nodes = int(resolved.get("nodes", 3))
         sizing_tier = str(resolved.get("sizing_tier", "balanced"))
         profile = self._tier_to_profile(sizing_tier)
@@ -453,8 +405,6 @@ class LabOrchestrator:
 
         resolved.setdefault("scenario", "custom")
         resolved.setdefault("user_prefix", "lab")
-        resolved["lxd_project_name"] = project_name
-        resolved.update(network_names)
         resolved["nodes"] = nodes
         resolved.setdefault("sizing_tier", sizing_tier)
         resolved.setdefault("node_cpu", recommendation.node_cpu)
@@ -478,25 +428,6 @@ class LabOrchestrator:
             ceph_network_cidr=resolved.get("ceph_network_cidr"),
         )
         return resolved, topology
-
-    @staticmethod
-    def _project_name_for_workspace(workspace: str) -> str:
-        """Return a readable, collision-resistant LXD project name."""
-        slug = re.sub(r"[^a-z0-9-]+", "-", workspace.lower().replace("_", "-"))
-        slug = slug.strip("-")[:32] or "environment"
-        digest = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:8]
-        return f"cala-{slug}-{digest}"
-
-    @staticmethod
-    def _network_names_for_workspace(workspace: str) -> dict[str, str]:
-        """Return short global bridge names bound to the environment identity."""
-        digest = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:8]
-        return {
-            "management_network_name": f"ca-{digest}-mg",
-            "ovn_uplink_network_name": f"ca-{digest}-up",
-            "ovn_underlay_network_name": f"ca-{digest}-ov",
-            "ceph_network_name": f"ca-{digest}-ce",
-        }
 
     def _resolve_network_parameters(
         self,
@@ -560,38 +491,21 @@ class LabOrchestrator:
         resolved["ceph_network_cidr"] = str(ceph_network)
 
     def _occupied_ipv4_networks(self) -> list[ipaddress.IPv4Network]:
-        """Return host routes and global managed-network CIDRs, fail-closed."""
-        routes = self._run_host_cmd_checked(
-            "ip -o -4 route show table all",
+        """Return host routes and assistant-managed plane CIDRs."""
+        output = self._run_host_cmd(
+            """{
+                ip -o -4 route show table all 2>/dev/null |
+                    awk '$1 != "default" {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\\./ && $i ~ /\\//) {print $i; break}}'
+                while IFS= read -r network; do
+                    [ -z "$network" ] && continue
+                    lxc network get "$network" ipv4.address 2>/dev/null || true
+                    lxc network get "$network" user.canonical-ai-lab-assistant.cidr 2>/dev/null || true
+                done < <(lxc network list --format csv 2>/dev/null | awk -F',' 'NF {print $1}')
+            }""",
             timeout=20,
         )
-        network_json = self._run_host_cmd_checked(
-            "lxc --project default network list --format=json",
-            timeout=20,
-        )
-        try:
-            network_payload = json.loads(network_json)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("LXD returned invalid global network data") from exc
-        if not isinstance(network_payload, list):
-            raise RuntimeError("LXD returned no global network list")
-
-        tokens = routes.split()
-        for item in network_payload:
-            if not isinstance(item, dict) or not item.get("managed"):
-                continue
-            config = item.get("config", {})
-            if not isinstance(config, dict):
-                continue
-            tokens.extend(
-                (
-                    str(config.get("ipv4.address", "")),
-                    str(config.get("user.canonical-ai-lab-assistant.cidr", "")),
-                )
-            )
-
         networks: list[ipaddress.IPv4Network] = []
-        for token in tokens:
+        for token in output.split():
             try:
                 network = ipaddress.ip_network(token, strict=False)
             except ValueError:
@@ -750,7 +664,6 @@ class LabOrchestrator:
             current_nodes=current_nodes,
             target_nodes=target_nodes,
             storage_pool=str(spec["lxd_storage_pool"]),
-            lxd_project_name=str(spec["lxd_project_name"]),
         )
         return topology, environment
 
@@ -768,7 +681,6 @@ class LabOrchestrator:
             current_nodes=int(state["current_nodes"]),
             target_nodes=target_nodes,
             storage_pool=str(state.get("storage_pool", "unknown")),
-            lxd_project_name=str(state.get("lxd_project_name", "")),
         )
 
     @staticmethod
@@ -857,37 +769,6 @@ class LabOrchestrator:
                             "after this plan was prepared.",
                         ),
                     )
-            project_name = str(plan.parameters.get("lxd_project_name", ""))
-            try:
-                project_info = self.cluster_verifier.lxd_project_info(project_name)
-            except RuntimeError as exc:
-                return PlanValidation(valid=False, errors=(str(exc),))
-            if project_info is not None:
-                return PlanValidation(
-                    valid=False,
-                    errors=(
-                        f"LXD project '{project_name}' appeared after this plan was prepared; "
-                        "prepare and approve a new plan.",
-                    ),
-                )
-            network_mode = str(plan.parameters.get("network_mode", STANDARD_NETWORK_MODE))
-            network_roles = ["management_network_name", "ovn_uplink_network_name"]
-            if network_mode == SEGREGATED_NETWORK_MODE:
-                network_roles.extend(["ovn_underlay_network_name", "ceph_network_name"])
-            for role in network_roles:
-                network_name = str(plan.parameters.get(role, ""))
-                try:
-                    network_info = self.cluster_verifier.lxd_network_info(network_name)
-                except RuntimeError as exc:
-                    return PlanValidation(valid=False, errors=(str(exc),))
-                if network_info is not None:
-                    return PlanValidation(
-                        valid=False,
-                        errors=(
-                            f"LXD network '{network_name}' appeared after this plan was "
-                            "prepared; prepare and approve a new plan.",
-                        ),
-                    )
             if plan.topology.network_mode == SEGREGATED_NETWORK_MODE:
                 try:
                     ovn_network = self._validate_plane_cidr(
@@ -955,7 +836,6 @@ class LabOrchestrator:
                     f"serial={environment.state_serial}",
                     f"Node transition: {environment.current_nodes} -> {environment.target_nodes}",
                     f"Storage pool: {environment.storage_pool}",
-                    f"LXD project: {environment.lxd_project_name}",
                 ]
             )
 
@@ -1081,7 +961,6 @@ class LabOrchestrator:
             "scale_environment",
             "add_cluster_node",
             "verify_cluster_health",
-            "delete_orphaned_project",
         ):
             response = (
                 f"{action.replace('_', ' ').capitalize()} failed. No background work is running.\n\n"
@@ -1540,24 +1419,6 @@ class LabOrchestrator:
         except Exception:
             return ""
 
-    def _run_host_cmd_checked(self, cmd: str, timeout: int = 10) -> str:
-        """Run a safety-critical read-only probe and surface any failure."""
-        try:
-            result = subprocess.run(
-                ["bash", "-lc", cmd],
-                capture_output=True,
-                text=True,
-                cwd=self.config.repo_root,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"Host probe failed: {cmd}: {exc}") from exc
-        if result.returncode != 0:
-            detail = " ".join((result.stderr or result.stdout or "").split())
-            raise RuntimeError(f"Host probe failed: {cmd}: {detail or 'unknown error'}")
-        return (result.stdout or "").strip()
-
     def _collect_host_state(self, force: bool = False) -> dict[str, Any]:
         """Collect rich, structured host facts used for AI grounding.
 
@@ -1650,38 +1511,34 @@ class LabOrchestrator:
         return self._parse_int(df_out, default=0)
 
     def _collect_environment_usage(self) -> list[dict[str, Any]]:
-        """List owned LXD projects and their VM resource footprint."""
+        """List active lab environments and their resource footprint via lxc.
+
+        Lab VMs follow the naming pattern '<prefix>-node-<n>'. We group by prefix,
+        count nodes, and sum CPU/RAM limits so the AI knows real free headroom.
+        """
         csv_out = self._run_host_cmd(
-            """for project in $(lxc project list --format csv -c n 2>/dev/null); do
-                managed=$(lxc project get "$project" user.canonical-ai-lab-assistant.managed-by 2>/dev/null || true)
-                [ "$managed" = canonical-ai-lab-assistant ] || continue
-                workspace=$(lxc project get "$project" user.canonical-ai-lab-assistant.workspace 2>/dev/null || true)
-                lxc --project "$project" list --format csv -c n,s,config:limits.cpu,config:limits.memory 2>/dev/null |
-                    while IFS= read -r row; do printf '%s|%s|%s\n' "$project" "$workspace" "$row"; done
-            done""",
-            timeout=20,
+            "lxc list --format csv -c n,s,config:limits.cpu,config:limits.memory 2>/dev/null"
         )
         if not csv_out:
             return []
 
         groups: dict[str, dict[str, Any]] = {}
         for row in csv_out.splitlines():
-            project, separator, payload = row.partition("|")
-            workspace, second_separator, instance_csv = payload.partition("|")
-            if not separator or not second_separator or not workspace:
-                continue
-            cols = [c.strip() for c in instance_csv.split(",")]
+            cols = [c.strip() for c in row.split(",")]
             if not cols or not cols[0]:
                 continue
+            name = cols[0]
+            match = re.match(r"^(?P<prefix>.+)-node-\d+$", name)
+            if not match:
+                continue
+            prefix = match.group("prefix")
             cpu = self._parse_int(cols[2] if len(cols) > 2 else "", default=0)
             ram_gb = self._parse_memory_gb(cols[3] if len(cols) > 3 else "")
 
             env = groups.setdefault(
-                workspace,
+                prefix,
                 {
-                    "name": workspace.removesuffix("_microcloud"),
-                    "workspace": workspace,
-                    "lxd_project_name": project,
+                    "name": prefix,
                     "nodes": 0,
                     "node_cpu": cpu,
                     "node_ram_gb": ram_gb,
@@ -1843,11 +1700,6 @@ class LabOrchestrator:
             "network_mode",
             "ovn_underlay_cidr",
             "ceph_network_cidr",
-            "lxd_project_name",
-            "management_network_name",
-            "ovn_uplink_network_name",
-            "ovn_underlay_network_name",
-            "ceph_network_name",
             "user_prefix",
             "ssh_key",
         },
@@ -1859,8 +1711,6 @@ class LabOrchestrator:
             "expected_target_nodes",
         },
         "list_environments": set(),
-        "list_orphaned_projects": set(),
-        "delete_orphaned_project": {"project", "workspace"},
         "scale_environment": {
             "workspace",
             "target_nodes",
@@ -1889,8 +1739,6 @@ class LabOrchestrator:
                 "deploy_microcloud": self.config.deploy_microcloud_script,
                 "delete_environment": self.config.cleanup_microcloud_script,
                 "list_environments": self.config.list_environments_script,
-                "list_orphaned_projects": self.config.list_orphaned_projects_script,
-                "delete_orphaned_project": self.config.cleanup_orphaned_project_script,
                 "scale_environment": self.config.scale_microcloud_script,
                 "add_cluster_node": self.config.add_cluster_node_script,
                 "verify_cluster_health": self.config.verify_cluster_health_script,
@@ -1916,7 +1764,6 @@ class LabOrchestrator:
                 "delete_environment",
                 "scale_environment",
                 "add_cluster_node",
-                "delete_orphaned_project",
             ):
                 cmd.append("--auto-approve")
 
@@ -1927,7 +1774,6 @@ class LabOrchestrator:
                 "scale_environment",
                 "add_cluster_node",
                 "verify_cluster_health",
-                "delete_orphaned_project",
             )
             output_lines: list[str] = []
             status_label = {
@@ -1935,7 +1781,6 @@ class LabOrchestrator:
                 "delete_environment": "Cleanup",
                 "scale_environment": "Scaling",
                 "add_cluster_node": "Node Addition",
-                "delete_orphaned_project": "Orphan Cleanup",
                 "verify_cluster_health": "Health Check",
             }.get(action, "Operation")
 
@@ -2112,12 +1957,6 @@ class LabOrchestrator:
 
         env_match = re.search(r"^\s*Environment\s+(\S+)\s*$", tool_result, flags=re.MULTILINE)
         workspace = env_match.group(1) if env_match else ""
-        project_match = re.search(
-            r"^\s*LXD project\s+(\S+)\s*$",
-            tool_result,
-            flags=re.MULTILINE,
-        )
-        lxd_project = project_match.group(1) if project_match else ""
 
         node_rows = re.findall(
             r"^\s*(\S+-node-\d+)\s+(\d+\.\d+\.\d+\.\d+|N/A)\s+(https?://\S+|-)\s*$",
@@ -2131,8 +1970,6 @@ class LabOrchestrator:
         lines = ["Deployment access details:"]
         if workspace:
             lines.append(f"- Workspace: {workspace}")
-        if lxd_project:
-            lines.append(f"- LXD project: {lxd_project}")
 
         if node_rows:
             lines.append("- Nodes:")
@@ -2145,8 +1982,7 @@ class LabOrchestrator:
 
             first_node, first_ip, _ = node_rows[0]
             lines.append("- Quick access:")
-            project_arg = f"--project {lxd_project} " if lxd_project else ""
-            lines.append(f"  - LXD shell: lxc {project_arg}exec {first_node} -- bash")
+            lines.append(f"  - LXD shell: lxc exec {first_node} -- bash")
             if first_ip != "N/A":
                 lines.append(f"  - SSH: ssh ubuntu@{first_ip}")
 

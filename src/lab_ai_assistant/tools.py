@@ -269,43 +269,6 @@ def get_tool_definitions() -> dict[str, Any]:
                 },
             },
             {
-                "name": "list_orphaned_projects",
-                "description": (
-                    "Read-only audit of Canonical AI Lab Assistant LXD projects. "
-                    "Reports projects and tagged networks not represented by matching "
-                    "Terraform state, plus unowned legacy resources that require manual "
-                    "review. Never deletes or adopts resources."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
-            },
-            {
-                "name": "delete_orphaned_project",
-                "description": (
-                    "Delete one LXD project previously reported as ORPHAN and its "
-                    "owner-tagged global networks. Requires exact project and workspace; "
-                    "the script refuses unowned resources and projects still present in "
-                    "Terraform state. The orchestrator obtains approval before execution."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
-                        },
-                    },
-                    "required": ["project", "workspace"],
-                },
-            },
-            {
                 "name": "scale_environment",
                 "description": (
                     "Safely expand an existing MicroCloud environment to a larger target "

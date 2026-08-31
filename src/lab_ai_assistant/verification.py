@@ -9,7 +9,6 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict
 
@@ -78,79 +77,12 @@ class ClusterVerifier:
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-
         output = "\n".join((result.stdout, result.stderr))
         if result.returncode == 0:
             return len([line for line in result.stdout.splitlines() if line.strip()])
         if "No state file was found" in output:
             return 0
         return None
-
-    @staticmethod
-    def lxd_project_info(project: str) -> dict[str, Any] | None:
-        """Return one LXD project, distinguishing absence from query failure."""
-        try:
-            result = subprocess.run(
-                ["lxc", "query", f"/1.0/projects/{quote(project, safe='')}"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"Could not inspect LXD project '{project}': {exc}") from exc
-
-        if result.returncode != 0:
-            output = "\n".join((result.stdout, result.stderr)).lower()
-            if "not found" in output or 'status":404' in output:
-                return None
-            raise RuntimeError(
-                f"Could not inspect LXD project '{project}': " f"{ClusterVerifier._compact(output)}"
-            )
-
-        try:
-            payload = json.loads(result.stdout)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"LXD returned invalid project data for '{project}'") from exc
-        metadata = payload.get("metadata") if isinstance(payload, dict) else None
-        if not isinstance(metadata, dict):
-            raise RuntimeError(f"LXD returned no project metadata for '{project}'")
-        return metadata
-
-    @staticmethod
-    def lxd_network_info(network: str) -> dict[str, Any] | None:
-        """Return one global managed network from the default LXD project."""
-        try:
-            result = subprocess.run(
-                [
-                    "lxc",
-                    "query",
-                    f"/1.0/networks/{quote(network, safe='')}?project=default",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"Could not inspect LXD network '{network}': {exc}") from exc
-
-        if result.returncode != 0:
-            output = "\n".join((result.stdout, result.stderr)).lower()
-            if "not found" in output or 'status":404' in output:
-                return None
-            raise RuntimeError(
-                f"Could not inspect LXD network '{network}': " f"{ClusterVerifier._compact(output)}"
-            )
-
-        try:
-            payload = json.loads(result.stdout)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"LXD returned invalid network data for '{network}'") from exc
-        metadata = payload.get("metadata") if isinstance(payload, dict) else None
-        if not isinstance(metadata, dict):
-            raise RuntimeError(f"LXD returned no network metadata for '{network}'")
-        return metadata
 
     def verify(
         self,
@@ -171,22 +103,6 @@ class ClusterVerifier:
 
         prefix = workspace.replace("_", "-")
         initiator = f"{prefix}-node-1"
-        lxd_project = str(spec.get("lxd_project_name", ""))
-        if not lxd_project:
-            return VerificationReport(
-                workspace=workspace,
-                status="unhealthy",
-                expected_nodes=expected_nodes,
-                expected_osds=expected_osds,
-                checks=(
-                    ServiceCheck(
-                        name="lxd-project",
-                        status="unhealthy",
-                        command_ok=False,
-                        detail="deployment_spec is missing lxd_project_name",
-                    ),
-                ),
-            )
         expected_names = {f"{prefix}-node-{index}" for index in range(1, expected_nodes + 1)}
 
         checks: list[ServiceCheck] = []
@@ -197,7 +113,7 @@ class ClusterVerifier:
             "microovn": ["microovn", "cluster", "list"],
         }
         for name, command in commands.items():
-            returncode, output = self._run_in_node(lxd_project, initiator, command)
+            returncode, output = self._run_in_node(initiator, command)
             members = self._parse_member_statuses(output)
             observed_names = set(members) & expected_names
             observed = len(observed_names)
@@ -235,12 +151,11 @@ class ClusterVerifier:
                 )
             )
 
-        checks.append(self._check_ceph_health(lxd_project, initiator, expected_osds))
+        checks.append(self._check_ceph_health(initiator, expected_osds))
         if spec.get("network_mode") == "fully-segregated-4nic":
             checks.append(
                 self._check_segregated_networks(
                     prefix,
-                    lxd_project,
                     expected_nodes,
                     str(spec.get("ovn_underlay_cidr", "")),
                     str(spec.get("ceph_network_cidr", "")),
@@ -296,7 +211,6 @@ class ClusterVerifier:
             "state_serial": int(state.get("serial", 0) or 0),
             "current_nodes": len(nodes),
             "storage_pool": str(spec.get("lxd_storage_pool", "unknown")),
-            "lxd_project_name": str(spec.get("lxd_project_name", "")),
         }
 
     def deployment_spec(self, workspace: str) -> dict[str, Any]:
@@ -323,10 +237,10 @@ class ClusterVerifier:
             return {}
 
     @staticmethod
-    def _run_in_node(project: str, node: str, command: list[str]) -> tuple[int, str]:
+    def _run_in_node(node: str, command: list[str]) -> tuple[int, str]:
         try:
             result = subprocess.run(
-                ["lxc", "--project", project, "exec", node, "--", *command],
+                ["lxc", "exec", node, "--", *command],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -341,12 +255,10 @@ class ClusterVerifier:
 
     def _check_ceph_health(
         self,
-        project: str,
         initiator: str,
         expected_osds: int | None,
     ) -> ServiceCheck:
         returncode, output = self._run_in_node(
-            project,
             initiator,
             ["microceph.ceph", "-s"],
         )
@@ -384,7 +296,6 @@ class ClusterVerifier:
     def _check_segregated_networks(
         self,
         prefix: str,
-        project: str,
         expected_nodes: int,
         ovn_cidr: str,
         ceph_cidr: str,
@@ -440,7 +351,7 @@ class ClusterVerifier:
                     f"ping -I ceph-general -c 1 -W 2 {peer_ceph_ip} >/dev/null"
                 ),
             ]
-            returncode, output = self._run_in_node(project, node, command)
+            returncode, output = self._run_in_node(node, command)
             if returncode == 0:
                 observed += 1
             else:
@@ -449,7 +360,6 @@ class ClusterVerifier:
         initiator = f"{prefix}-node-1"
         for option in ("cluster_network", "public_network"):
             returncode, config_output = self._run_in_node(
-                project,
                 initiator,
                 ["microceph", "cluster", "config", "get", option],
             )

@@ -82,15 +82,6 @@ def setup():
     console.print("Then run `lab-ai chat` to start the MicroCloud assistant.")
 
 
-@app.command()
-def orphans():
-    """List owned LXD projects missing matching Terraform state."""
-    config = get_config()
-    orchestrator = LabOrchestrator(config)
-    result = orchestrator.list_orphaned_projects()
-    console.print(result)
-
-
 @app.callback()
 def main(debug: Optional[bool] = typer.Option(None, "--debug", help="Enable debug logging")):
     """Canonical AI Lab Assistant - MicroCloud-first infrastructure automation."""

@@ -191,7 +191,6 @@ recommended node count.
 | `lab-ai chat` | Start the interactive assistant |
 | `lab-ai bootstrap` | Prepare host tools and install the inference snap |
 | `lab-ai check` | Check the configured inference endpoint |
-| `lab-ai orphans` | Read-only audit of owned LXD projects missing Terraform state |
 | `lab-ai setup` | Show important runtime paths |
 | `lab-ai version` | Show installed version |
 
@@ -262,20 +261,6 @@ Changing the plan, host capacity, or target state invalidates the approval.
 MicroCloud runs inside LXD VMs. Ceph and optional local disks are virtual block
 volumes created in the selected LXD storage pool.
 
-### LXD project isolation
-
-Each environment's VMs and custom volumes are contained in their own LXD
-project. LXD does not support managed `bridge` networks inside a non-default
-project, so management and OVN/Ceph bridges remain global. They use short
-workspace hashes and carry exact owner/project metadata; preflight rejects a
-foreign or orphaned match before deployment. Other applications can therefore
-reuse VM and volume names in `default` or another project, while the remaining
-global bridge namespace is collision-checked explicitly.
-
-The exact project name is generated from the workspace plus a hash, displayed
-in the approval plan, and persisted in Terraform state. All add, scale, list,
-health, and delete operations use that saved project.
-
 ### Network layouts
 
 The default `standard-2nic` layout preserves the existing lightweight lab
@@ -309,11 +294,10 @@ networking. Use separate management, OVN uplink, OVN underlay, and Ceph planes.
 
 When you confirm a deployment, the assistant:
 
-1. Detects the LXD storage pool and verifies the dedicated project name is free.
+1. Detects the LXD bridge and storage pool.
 2. Resolves and validates all node resources.
 3. Creates a new OpenTofu workspace and saved plan.
-4. Creates owner-tagged global bridges, then a dedicated LXD project containing
-   its VMs and block volumes.
+4. Creates VMs, networks, and block volumes.
 5. Runs `ansible-playbook playbooks/microcloud.yml`.
 6. Verifies exact membership, Ceph health, OSD count, and any dedicated network
    planes.
@@ -337,18 +321,10 @@ failure-tolerance requirements should still match the intended demonstration.
   verify NIC presence, static addresses, management routing, ring connectivity,
   and Ceph public/internal network configuration.
 - **Delete:** destroys the approved saved plan and removes the workspace and
-  generated inventory. Cleanup verifies the LXD project ownership before acting.
-- **Orphan audit:** `lab-ai orphans` lists assistant-owned LXD projects that no
-  longer have matching Terraform state. It also labels untagged legacy
-  MicroCloud-looking networks and volumes as `UNOWNED` for manual review. It
-  never deletes or adopts resources.
-- **Orphan cleanup:** ask the assistant to delete one exact project reported as
-  `ORPHAN`. The normal immutable-plan approval is required, and execution
-  rechecks project/workspace/network ownership plus the absence of Terraform
-  state. `UNOWNED` legacy resources are always refused.
+  generated inventory.
 
-This project-isolated layout starts with deployment specification version 3.
-Older default-project labs should be cleaned up and created again.
+Environments created before versioned deployment specifications were introduced
+must be deleted and created fresh once before add/scale operations are available.
 
 ## Documentation Grounding
 
@@ -493,17 +469,14 @@ inference restart.
 ### `Missing Resource State After Create`
 
 Some LXD provider versions can return a transient state error after resource
-creation. The deployment does **not** retry blindly: the remote object may exist
-without state, and retrying would turn that drift into an `already exists`
-collision. The operation stops and identifies the dedicated LXD project for
-inspection with `lab-ai orphans`.
+creation. The deployment serializes creation and performs one controlled retry
+only for this known error.
 
 ### An environment name already exists
 
-Fresh deploys do not resize existing environments or adopt existing LXD
-projects. An assistant-owned project without matching state is reported as an
-orphan; an unowned project with the same generated name is reported as foreign.
-Neither is modified automatically.
+Fresh deploys do not resize existing environments. Add/scale the existing lab,
+choose another prefix, or delete it first. A workspace with no state or managed
+resources is stale and removed automatically.
 
 ### An operation failed
 
