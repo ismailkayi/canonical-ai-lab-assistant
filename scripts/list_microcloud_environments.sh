@@ -45,20 +45,29 @@ results=()
 for ws in "${WORKSPACES[@]}"; do
     [[ -z "${ws}" ]] && continue
     prefix="${ws//_/-}-node-"
-    nodes=$( (lxc list --format csv -c n 2>/dev/null | grep -E "^${prefix}[0-9]+$" || true) | wc -l | tr -d ' ')
-    running=$(lxc list --format csv -c ns 2>/dev/null | awk -F',' -v pfx="${prefix}" '$1 ~ ("^" pfx "[0-9]+$") && $2 == "RUNNING" {c++} END {print c+0}')
-    network_mode=$(
-        TF_WORKSPACE="${ws}" tofu output -json deployment_spec 2>/dev/null \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("network_mode", "standard-2nic"))' \
-            2>/dev/null || echo "standard-2nic"
+    deployment_spec=$(TF_WORKSPACE="${ws}" tofu output -json deployment_spec 2>/dev/null || true)
+    [[ -z "${deployment_spec}" || "${deployment_spec}" == "null" ]] && continue
+    readarray -t spec_values < <(
+        python3 -c 'import json,sys
+data=json.load(sys.stdin)
+print(data.get("lxd_project_name", ""))
+print(data.get("network_mode", "standard-2nic"))' <<< "${deployment_spec}"
     )
+    lxd_project="${spec_values[0]:-}"
+    network_mode="${spec_values[1]:-standard-2nic}"
+    [[ -z "${lxd_project}" ]] && continue
+
+    nodes=$( (lxc --project "${lxd_project}" list --format csv -c n 2>/dev/null \
+        | grep -E "^${prefix}[0-9]+$" || true) | wc -l | tr -d ' ')
+    running=$(lxc --project "${lxd_project}" list --format csv -c ns 2>/dev/null \
+        | awk -F',' -v pfx="${prefix}" '$1 ~ ("^" pfx "[0-9]+$") && $2 == "RUNNING" {c++} END {print c+0}')
 
     # Skip workspaces with zero nodes (destroyed but workspace not yet deleted)
     if [[ "${nodes}" -eq 0 ]]; then
         continue
     fi
 
-    results+=("${ws}|${nodes}|${running}|${network_mode}|${prefix}")
+    results+=("${ws}|${nodes}|${running}|${network_mode}|${lxd_project}|${prefix}")
     active_count=$((active_count + 1))
 done
 
@@ -67,10 +76,11 @@ if [[ ${active_count} -eq 0 ]]; then
     exit 0
 fi
 
-printf '%-24s %-8s %-10s %-25s %s\n' "Workspace" "Nodes" "Running" "Network Mode" "Node Prefix"
-printf '%-24s %-8s %-10s %-25s %s\n' "------------------------" "--------" "----------" "-------------------------" "--------------------------"
+printf '%-24s %-8s %-10s %-25s %-40s %s\n' "Workspace" "Nodes" "Running" "Network Mode" "LXD Project" "Node Prefix"
+printf '%-24s %-8s %-10s %-25s %-40s %s\n' "------------------------" "--------" "----------" "-------------------------" "----------------------------------------" "--------------------------"
 
 for entry in "${results[@]}"; do
-    IFS='|' read -r ws nodes running network_mode prefix <<< "${entry}"
-    printf '%-24s %-8s %-10s %-25s %s\n' "${ws}" "${nodes}" "${running}" "${network_mode}" "${prefix}"
+    IFS='|' read -r ws nodes running network_mode lxd_project prefix <<< "${entry}"
+    printf '%-24s %-8s %-10s %-25s %-40s %s\n' \
+        "${ws}" "${nodes}" "${running}" "${network_mode}" "${lxd_project}" "${prefix}"
 done

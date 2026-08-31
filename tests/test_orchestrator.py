@@ -179,6 +179,7 @@ def test_expansion_rejects_total_above_fifty_nodes(config) -> None:
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "lxd_project_name": "cala-lab-microcloud-12345678",
     }
     orchestrator.cluster_verifier.workspace_state = lambda _workspace: {
         "state_lineage": "lineage-1",
@@ -247,6 +248,7 @@ def test_expansion_revalidation_rejects_changed_geometry(config) -> None:
         current_nodes=3,
         target_nodes=4,
         storage_pool="default",
+        lxd_project_name="cala-lab-microcloud-12345678",
     )
     changed_environment = environment.model_copy(update={"state_serial": 8})
     orchestrator._workspace_snapshot = lambda *_args, **_kwargs: environment
@@ -395,6 +397,7 @@ def test_approval_revalidation_and_execution_share_infrastructure_lock(
             current_nodes=3,
             target_nodes=0,
             storage_pool="default",
+            lxd_project_name="cala-lab-microcloud-12345678",
         ),
     )
     orchestrator.approval_manager.request(plan)
@@ -686,6 +689,7 @@ def test_expansion_inherits_persisted_segregated_network_geometry(config) -> Non
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "lxd_project_name": "cala-lab-microcloud-12345678",
         "network_mode": "fully-segregated-4nic",
         "ovn_underlay_cidr": "172.28.42.0/24",
         "ceph_network_cidr": "172.29.42.0/24",
@@ -719,6 +723,7 @@ def test_expansion_rejects_segregated_cidr_too_small_for_target(config) -> None:
         "ceph_disks_per_node": 1,
         "local_disk_gib": 0,
         "lxd_storage_pool": "default",
+        "lxd_project_name": "cala-lab-microcloud-12345678",
         "network_mode": "fully-segregated-4nic",
         "ovn_underlay_cidr": "172.28.42.0/28",
         "ceph_network_cidr": "172.29.42.0/28",
@@ -794,3 +799,287 @@ def test_custom_topology_proposal_keeps_the_network_choice(config) -> None:
     assert "Network layout   : fully-segregated-4nic" in result
     assert "OVN underlay / Ceph public+internal" in result
     assert "collision-checked in the exact deploy plan" in result
+
+
+def test_project_name_is_readable_deterministic_and_collision_resistant(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    first = orchestrator._project_name_for_workspace("training_a_microcloud")
+    repeated = orchestrator._project_name_for_workspace("training_a_microcloud")
+    similar = orchestrator._project_name_for_workspace("training_b_microcloud")
+
+    assert first == repeated
+    assert first.startswith("cala-training-a-microcloud-")
+    assert first != similar
+    assert len(first) <= 63
+
+
+def test_global_network_names_are_short_hashed_and_workspace_specific(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    first = orchestrator._network_names_for_workspace("training_a_microcloud")
+    similar = orchestrator._network_names_for_workspace("training_b_microcloud")
+
+    assert first != similar
+    assert set(first) == {
+        "management_network_name",
+        "ovn_uplink_network_name",
+        "ovn_underlay_network_name",
+        "ceph_network_name",
+    }
+    assert all(len(name) <= 15 for name in first.values())
+
+
+def test_fresh_deploy_rejects_foreign_global_network(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    names = orchestrator._network_names_for_workspace("training-a_microcloud")
+    orchestrator.cluster_verifier.lxd_network_info = lambda name: (
+        {"config": {}} if name == names["management_network_name"] else None
+    )
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="not owned"):
+        orchestrator._resolve_deployment_parameters(
+            {"nodes": 3, "user_prefix": "training-a"},
+            capacity,
+        )
+
+
+def test_fresh_deploy_reports_owned_global_network_as_orphan(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    names = orchestrator._network_names_for_workspace("training-a_microcloud")
+    project = orchestrator._project_name_for_workspace("training-a_microcloud")
+    orchestrator.cluster_verifier.lxd_network_info = lambda name: (
+        {
+            "config": {
+                "user.canonical-ai-lab-assistant.owner": "training-a_microcloud",
+                "user.canonical-ai-lab-assistant.project": project,
+            }
+        }
+        if name == names["ovn_uplink_network_name"]
+        else None
+    )
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="is an orphan"):
+        orchestrator._resolve_deployment_parameters(
+            {"nodes": 3, "user_prefix": "training-a"},
+            capacity,
+        )
+
+
+def test_fresh_deploy_rejects_foreign_lxd_project(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator.cluster_verifier.lxd_project_info = lambda _project: {
+        "config": {
+            "user.canonical-ai-lab-assistant.managed-by": "another-tool",
+            "user.canonical-ai-lab-assistant.workspace": "foreign",
+        }
+    }
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="not owned"):
+        orchestrator._resolve_deployment_parameters(
+            {"nodes": 3, "user_prefix": "training-a"},
+            capacity,
+        )
+
+
+def test_fresh_deploy_reports_owned_project_without_state_as_orphan(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator.cluster_verifier.lxd_project_info = lambda _project: {
+        "config": {
+            "user.canonical-ai-lab-assistant.managed-by": ("canonical-ai-lab-assistant"),
+            "user.canonical-ai-lab-assistant.workspace": ("training-a_microcloud"),
+        }
+    }
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    with pytest.raises(ValueError, match="is an orphan"):
+        orchestrator._resolve_deployment_parameters(
+            {"nodes": 3, "user_prefix": "training-a"},
+            capacity,
+        )
+
+
+def test_resolved_plan_binds_exact_lxd_project(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = CapacitySnapshot(
+        cpu_available=32,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+    )
+
+    resolved, _ = orchestrator._resolve_deployment_parameters(
+        {"nodes": 3, "user_prefix": "training-a"},
+        capacity,
+    )
+
+    assert resolved["lxd_project_name"] == (
+        orchestrator._project_name_for_workspace("training-a_microcloud")
+    )
+
+
+def test_revalidation_blocks_project_created_after_approval(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator.cluster_verifier.lxd_project_info = lambda _project: {
+        "name": "cala-lab-microcloud-12345678",
+        "config": {},
+    }
+    plan = ExecutionPlan(
+        action="deploy_microcloud",
+        parameters={
+            "nodes": 3,
+            "lxd_project_name": "cala-lab-microcloud-12345678",
+        },
+        summary="Create a lab",
+        topology=TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+        ),
+        capacity=CapacitySnapshot(
+            cpu_available=8,
+            ram_available_mb=16 * 1024,
+            storage_available_gib=200,
+        ),
+    )
+
+    validation = orchestrator._revalidate_approved_plan(plan)
+
+    assert not validation.valid
+    assert "appeared after this plan" in validation.errors[0]
+
+
+def test_orphan_cleanup_requires_plan_confirmation(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    executed = []
+    orchestrator._refresh_ai_environment_context = lambda: None
+    orchestrator.ai_engine.chat = lambda _message: {
+        "action": "delete_orphaned_project",
+        "parameters": {
+            "project": "cala-orphan-12345678",
+            "workspace": "orphan_microcloud",
+        },
+        "message": "Delete the confirmed orphan.",
+    }
+    orchestrator._execute_action = lambda action, params: (
+        executed.append((action, params.copy())) or "orphan deleted"
+    )
+    orchestrator._record_deployment = lambda *args: None
+    orchestrator.ai_engine.feed_tool_result = lambda *_args: {
+        "action": None,
+        "message": "Orphan cleanup completed.",
+    }
+
+    pending = orchestrator._process_user_input("delete that orphan")
+
+    assert pending.startswith("__CONFIRM__:")
+    assert "cala-orphan-12345678" in pending
+    assert not executed
+
+    result = orchestrator._process_user_input("yes")
+
+    assert result == "Orphan cleanup completed."
+    assert executed[0][0] == "delete_orphaned_project"
+
+
+def test_deployment_access_details_include_project_aware_lxc_command(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    output = """
+  Environment                    lab_microcloud
+  LXD project                    cala-lab-microcloud-12345678
+  lab-microcloud-node-1          10.0.0.10       https://10.0.0.10:8443
+"""
+
+    details = orchestrator._extract_deployment_access_details(output)
+
+    assert "LXD project: cala-lab-microcloud-12345678" in details
+    assert (
+        "lxc --project cala-lab-microcloud-12345678 " "exec lab-microcloud-node-1 -- bash"
+    ) in details
+
+
+def test_lxd_project_query_failure_is_returned_to_model_not_raised(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._collect_host_state = lambda force=False: host_state()
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+
+    def fail_project_query(_project):
+        raise RuntimeError("LXD project API unavailable")
+
+    orchestrator.cluster_verifier.lxd_project_info = fail_project_query
+    captured = {}
+
+    def feedback(_tool, result):
+        captured["result"] = result
+        return {"action": None, "message": "Could not inspect LXD safely."}
+
+    orchestrator.ai_engine.feed_tool_result = feedback
+
+    response = orchestrator._run_agent_loop(
+        "create a lab",
+        {
+            "action": "deploy_microcloud",
+            "parameters": {"nodes": 3},
+            "message": "Create the lab.",
+        },
+    )
+
+    assert response == "Could not inspect LXD safely."
+    assert "LXD project API unavailable" in captured["result"]
+
+
+def test_occupied_network_inventory_includes_global_bridge_metadata(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    responses = iter(
+        [
+            "10.10.0.0/24 dev eth0",
+            (
+                '[{"name":"ca-12345678-ov","managed":true,'
+                '"config":{"ipv4.address":"none",'
+                '"user.canonical-ai-lab-assistant.cidr":"172.28.42.0/24"}},'
+                '{"name":"eth0","managed":false,"config":{}}]'
+            ),
+        ]
+    )
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: next(responses)
+
+    networks = orchestrator._occupied_ipv4_networks()
+
+    assert ipaddress.ip_network("10.10.0.0/24") in networks
+    assert ipaddress.ip_network("172.28.42.0/24") in networks
+
+
+def test_occupied_network_inventory_fails_closed_on_invalid_lxd_data(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    responses = iter(["10.10.0.0/24 dev eth0", "not-json"])
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: next(responses)
+
+    with pytest.raises(RuntimeError, match="invalid global network data"):
+        orchestrator._occupied_ipv4_networks()

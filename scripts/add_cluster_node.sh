@@ -159,7 +159,11 @@ spec_value_optional() {
 
 SPEC_USER_PREFIX=$(spec_value user_prefix)
 SPEC_UBUNTU_IMAGE=$(spec_value ubuntu_image)
-SPEC_LXD_NETWORK=$(spec_value lxd_network_name)
+SPEC_LXD_PROJECT=$(spec_value lxd_project_name)
+SPEC_MANAGEMENT_NETWORK=$(spec_value management_network)
+SPEC_OVN_UPLINK_NETWORK=$(spec_value ovn_uplink_network)
+SPEC_OVN_UNDERLAY_NETWORK=$(spec_value ovn_underlay_network)
+SPEC_CEPH_NETWORK=$(spec_value ceph_network)
 SPEC_LXD_POOL=$(spec_value lxd_storage_pool)
 SPEC_SSH_PUBLIC_KEY=$(spec_value_optional ssh_public_key)
 SPEC_NODE_COUNT=$(spec_value node_count)
@@ -180,8 +184,61 @@ if [[ "${SPEC_NETWORK_MODE}" == "fully-segregated-4nic" \
     exit 1
 fi
 
+PROJECT_MANAGER=$(lxc project get "${SPEC_LXD_PROJECT}" \
+    user.canonical-ai-lab-assistant.managed-by 2>/dev/null || true)
+PROJECT_WORKSPACE=$(lxc project get "${SPEC_LXD_PROJECT}" \
+    user.canonical-ai-lab-assistant.workspace 2>/dev/null || true)
+if [[ "${PROJECT_MANAGER}" != "canonical-ai-lab-assistant" \
+        || "${PROJECT_WORKSPACE}" != "${WORKSPACE}" ]]; then
+    log_error "LXD project ownership does not match the saved deployment"
+    log_error "project=${SPEC_LXD_PROJECT}, managed-by=${PROJECT_MANAGER:-unset}, workspace=${PROJECT_WORKSPACE:-unset}"
+    exit 1
+fi
+
+validate_owned_network() {
+    local network="$1"
+    local role="$2"
+    local expected_cidr="${3:-}"
+    local owner=""
+    local project=""
+    local actual_role=""
+    local actual_cidr=""
+
+    if ! lxc --project default network show "${network}" >/dev/null 2>&1; then
+        log_error "Saved ${role} network '${network}' is missing"
+        exit 1
+    fi
+    owner=$(lxc --project default network get "${network}" \
+        user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
+    project=$(lxc --project default network get "${network}" \
+        user.canonical-ai-lab-assistant.project 2>/dev/null || true)
+    actual_role=$(lxc --project default network get "${network}" \
+        user.canonical-ai-lab-assistant.role 2>/dev/null || true)
+    actual_cidr=$(lxc --project default network get "${network}" \
+        user.canonical-ai-lab-assistant.cidr 2>/dev/null || true)
+    if [[ "${owner}" != "${WORKSPACE}" || "${project}" != "${SPEC_LXD_PROJECT}" \
+            || "${actual_role}" != "${role}" ]]; then
+        log_error "Network '${network}' ownership/role does not match the saved deployment"
+        exit 1
+    fi
+    if [[ -n "${expected_cidr}" && "${actual_cidr}" != "${expected_cidr}" ]]; then
+        log_error "Network '${network}' CIDR metadata is ${actual_cidr:-unset}; expected ${expected_cidr}"
+        exit 1
+    fi
+}
+
+validate_owned_network "${SPEC_MANAGEMENT_NETWORK}" "management"
+validate_owned_network "${SPEC_OVN_UPLINK_NETWORK}" "ovn-uplink"
+if [[ "${SPEC_NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+    validate_owned_network \
+        "${SPEC_OVN_UNDERLAY_NETWORK}" "ovn-underlay" "${SPEC_OVN_UNDERLAY_CIDR}"
+    validate_owned_network \
+        "${SPEC_CEPH_NETWORK}" "ceph" "${SPEC_CEPH_NETWORK_CIDR}"
+fi
+
 if [[ -z "${SPEC_SSH_PUBLIC_KEY}" ]]; then
-    SPEC_SSH_PUBLIC_KEY=$(lxc config get "${INITIATOR_NODE}" user.user-data 2>/dev/null \
+    SPEC_SSH_PUBLIC_KEY=$(lxc --project "${SPEC_LXD_PROJECT}" config get \
+        "${INITIATOR_NODE}" user.user-data 2>/dev/null \
         | awk '/^[[:space:]]*-[[:space:]]+ssh-/ {sub(/^[[:space:]]*-[[:space:]]+/, ""); print; exit}')
 fi
 if [[ -z "${SPEC_SSH_PUBLIC_KEY}" ]]; then
@@ -253,7 +310,7 @@ ROOT_DISK_GIB="${SPEC_ROOT_DISK_GIB}"
 CEPH_DISK_GIB="${SPEC_CEPH_DISK_GIB}"
 CEPH_DISKS_PER_NODE="${SPEC_CEPH_DISKS_PER_NODE}"
 LOCAL_DISK_GIB="${SPEC_LOCAL_DISK_GIB}"
-export TF_VAR_lxd_network_name="${SPEC_LXD_NETWORK}"
+export TF_VAR_lxd_project_name="${SPEC_LXD_PROJECT}"
 export TF_VAR_lxd_storage_pool="${SPEC_LXD_POOL}"
 export TF_VAR_ssh_public_key="${SPEC_SSH_PUBLIC_KEY}"
 
@@ -263,6 +320,7 @@ echo "  Adding ${ADD_NODES} node(s) to ${WORKSPACE}"
 echo "  New total: ${NEW_TOTAL}"
 echo "  vCPU: ${NODE_CPU}  RAM: ${NODE_MEMORY_MB}MiB  Root: ${ROOT_DISK_GIB}GiB  Ceph: ${CEPH_DISK_GIB}GiB × ${CEPH_DISKS_PER_NODE}"
 echo "  Network: ${SPEC_NETWORK_MODE}"
+echo "  LXD project: ${SPEC_LXD_PROJECT}"
 echo "============================================================"
 echo ""
 
@@ -275,6 +333,11 @@ PLAN_FILE=$(mktemp)
 trap 'rm -f "${PLAN_FILE}"' EXIT
 tofu plan -input=false -parallelism=1 -out="${PLAN_FILE}" \
     -var="user_prefix=${USER_PREFIX}" \
+    -var="lxd_project_name=${SPEC_LXD_PROJECT}" \
+    -var="management_network_name=${SPEC_MANAGEMENT_NETWORK}" \
+    -var="ovn_uplink_network_name=${SPEC_OVN_UPLINK_NETWORK}" \
+    -var="ovn_underlay_network_name=${SPEC_OVN_UNDERLAY_NETWORK}" \
+    -var="ceph_network_name=${SPEC_CEPH_NETWORK}" \
     -var="ubuntu_image=${SPEC_UBUNTU_IMAGE}" \
     -var="microcloud_node_count=${NEW_TOTAL}" \
     -var="microcloud_node_cpu=${NODE_CPU}" \
@@ -324,7 +387,7 @@ log_success "New nodes prepared"
 log_info "[PHASE 3] Expanding cluster via 'microcloud preseed'..."
 
 # Derive lookup subnet from the initiator's primary IP
-LOOKUP_SUBNET=$(lxc exec "${INITIATOR_NODE}" -- bash -c \
+LOOKUP_SUBNET=$(lxc --project "${SPEC_LXD_PROJECT}" exec "${INITIATOR_NODE}" -- bash -c \
     "ip -4 route get 1.1.1.1 | awk '/src/ {for(i=1;i<=NF;i++) if(\$i==\"src\") print \$(i+1)}'" \
     2>/dev/null | head -1 | sed 's/\.[0-9]*$/.0\/24/')
 
@@ -353,7 +416,7 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         OVN_IFACE="ovn-uplink"
         OVN_UNDERLAY_IP=$(cidr_host_address "${SPEC_OVN_UNDERLAY_CIDR}" $((i + 9)))
     else
-        OVN_IFACE=$(lxc exec "${node_name}" -- bash -c "
+        OVN_IFACE=$(lxc --project "${SPEC_LXD_PROJECT}" exec "${node_name}" -- bash -c "
             primary=\$(ip -4 route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
             for iface in \$(ip -o link show | awk -F': ' '!/lo/ {print \$2}' | cut -d'@' -f1); do
                 [ \"\$iface\" = \"\$primary\" ] && continue
@@ -364,7 +427,7 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
     fi
 
     if [[ "${LOCAL_DISK_GIB}" -gt 0 ]]; then
-        LOCAL_DISK=$(lxc exec "${node_name}" -- bash -c "
+        LOCAL_DISK=$(lxc --project "${SPEC_LXD_PROJECT}" exec "${node_name}" -- bash -c "
             serial='lxd_local--disk'
             lsblk -dn -o NAME,SERIAL | awk -v serial=\"\$serial\" '\$2 == serial {print \"/dev/\" \$1; exit}'
         " 2>/dev/null | tr -d '[:space:]')
@@ -376,7 +439,7 @@ for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
         LOCAL_DISK=""
     fi
 
-    readarray -t CEPH_DISK_LIST < <(lxc exec "${node_name}" -- bash -c "
+    readarray -t CEPH_DISK_LIST < <(lxc --project "${SPEC_LXD_PROJECT}" exec "${node_name}" -- bash -c "
         expected=${CEPH_DISKS_PER_NODE}
         for index in \$(seq 1 \"\$expected\"); do
             serial=\"lxd_ceph--disk--\$index\"
@@ -421,7 +484,8 @@ done
 JOINER_PIDS=()
 for i in $(seq $(( CURRENT_NODES + 1 )) "${NEW_TOTAL}"); do
     node_name="${LXD_PREFIX}-node-${i}"
-    echo "${ADD_PRESEED}" | lxc exec "${node_name}" -- microcloud preseed &
+    echo "${ADD_PRESEED}" | lxc --project "${SPEC_LXD_PROJECT}" exec \
+        "${node_name}" -- microcloud preseed &
     JOINER_PIDS+=($!)
 done
 
@@ -430,7 +494,8 @@ sleep 3
 
 # Run preseed on the initiator (enters initiating/add session)
 log_info "Running microcloud preseed on ${INITIATOR_NODE} (add mode)..."
-echo "${ADD_PRESEED}" | lxc exec "${INITIATOR_NODE}" -- microcloud preseed
+echo "${ADD_PRESEED}" | lxc --project "${SPEC_LXD_PROJECT}" exec \
+    "${INITIATOR_NODE}" -- microcloud preseed
 
 # Wait for all joiner processes to complete
 JOINER_FAILED=false

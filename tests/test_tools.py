@@ -52,3 +52,17 @@ def test_deploy_tool_exposes_optional_fully_segregated_networking() -> None:
         "deploy_microcloud",
         {"nodes": 3, "network_mode": "four-nics"},
     )[0]
+
+
+def test_orphan_cleanup_tool_requires_exact_project_and_workspace() -> None:
+    assert validate_tool_parameters(
+        "delete_orphaned_project",
+        {
+            "project": "cala-lab-microcloud-12345678",
+            "workspace": "lab_microcloud",
+        },
+    )[0]
+    assert not validate_tool_parameters(
+        "delete_orphaned_project",
+        {"project": "default", "workspace": "lab;destroy"},
+    )[0]

@@ -15,6 +15,7 @@ MUTATING_ACTIONS = frozenset(
         "install_inference_snap",
         "deploy_microcloud",
         "delete_environment",
+        "delete_orphaned_project",
         "scale_environment",
         "add_cluster_node",
     }
@@ -50,6 +51,7 @@ class EnvironmentSnapshot(BaseModel):
     current_nodes: int = Field(ge=0, le=50)
     target_nodes: int = Field(ge=0, le=50)
     storage_pool: str
+    lxd_project_name: str
 
 
 class TopologySpec(BaseModel):
