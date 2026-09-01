@@ -361,16 +361,7 @@ class LabOrchestrator:
         if pending is None:
             return None
 
-        is_overcommit = (
-            pending.capacity is not None and pending.capacity.policy == LAB_OVERCOMMIT_POLICY
-        )
-        normalized = " ".join(user_message.lower().split())
-        if is_overcommit and normalized == "approve overcommit":
-            decision = "approve"
-        else:
-            decision = classify_confirmation(user_message)
-            if is_overcommit and decision == "approve":
-                decision = "other"
+        decision = classify_confirmation(user_message)
         if decision == "reject":
             cancelled = self.approval_manager.cancel()
             action = cancelled.action if cancelled else pending.action
@@ -378,13 +369,10 @@ class LabOrchestrator:
             return f"Cancelled the pending {action.replace('_', ' ')} plan. Nothing was changed."
 
         if decision != "approve":
-            notice = (
-                "This plan overcommits CPU/RAM. Type 'approve overcommit' to "
-                "accept the explicit risk.\n\n"
-                if is_overcommit
-                else "A plan is already awaiting approval.\n\n"
+            return (
+                "__CONFIRM__:A plan is already awaiting approval.\n\n"
+                f"{self._format_plan_for_confirmation(pending)}"
             )
-            return f"__CONFIRM__:{notice}" f"{self._format_plan_for_confirmation(pending)}"
 
         approved = self.approval_manager.consume(expected_digest=pending.digest)
         with self._infrastructure_lock():
@@ -1176,7 +1164,7 @@ class LabOrchestrator:
         if visible_params:
             lines.append(f"Exact parameters: {visible_params}")
         confirmation = (
-            "Type 'approve overcommit' to approve this exact risk-bound plan."
+            "Approve this exact overcommit risk-bound plan?"
             if plan.capacity is not None and plan.capacity.policy == LAB_OVERCOMMIT_POLICY
             else "Approve this exact plan?"
         )

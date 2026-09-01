@@ -255,8 +255,8 @@ The hard limits are 1.50x allocated vCPU and 1.25x allocated RAM. Exact limits
 from every LXD project are counted in vCPU/MiB, current `MemAvailable` must leave
 at least 8 GiB (or 25% of the requested RAM plus 4 GiB), and storage remains
 strict. If the AI recommends the candidate, the exact ratios and risks are
-shown and only `approve overcommit` can execute it. Host and allocation values
-are read again under the infrastructure lock.
+shown before the normal `yes` confirmation. Host and allocation values are read
+again under the infrastructure lock.
 
 ## Deployment Options
 

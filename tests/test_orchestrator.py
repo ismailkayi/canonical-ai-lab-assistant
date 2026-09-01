@@ -1006,7 +1006,8 @@ def test_ai_recommendation_creates_explicit_overcommit_confirmation(config) -> N
 
     assert result.startswith("__CONFIRM__:")
     assert "OVERCOMMIT WARNING" in result
-    assert "approve overcommit" in result
+    assert "Approve this exact overcommit risk-bound plan?" in result
+    assert "approve overcommit" not in result.lower()
     assert orchestrator.approval_manager.pending.capacity.policy == LAB_OVERCOMMIT_POLICY
 
 
@@ -1032,7 +1033,7 @@ def test_ai_decline_returns_safer_recommendation_without_pending_plan(config) ->
     assert orchestrator.approval_manager.pending is None
 
 
-def test_normal_yes_cannot_approve_overcommit_plan(config) -> None:
+def test_normal_yes_approves_overcommit_after_warning(config) -> None:
     orchestrator = LabOrchestrator(config)
     strict = lab_overcommit_plan()
     validation = orchestrator.plan_validator.validate(strict)
@@ -1042,11 +1043,7 @@ def test_normal_yes_cannot_approve_overcommit_plan(config) -> None:
     orchestrator._revalidate_approved_plan = lambda _plan: PlanValidation(valid=True)
     orchestrator._execute_approved_plan = lambda _plan: "executed"
 
-    result = orchestrator._process_user_input("yes")
-    assert result.startswith("__CONFIRM__:")
-    assert "approve overcommit" in result
-
-    assert orchestrator._process_user_input("approve overcommit") == "executed"
+    assert orchestrator._process_user_input("yes") == "executed"
 
 
 def test_overcommit_revalidation_rejects_changed_allocation(config) -> None:
