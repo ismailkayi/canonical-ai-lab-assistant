@@ -110,7 +110,11 @@ def test_fresh_deploy_preflights_every_default_project_resource_name() -> None:
     assert deploy.rindex("assert_lxd_names_available") < deploy.index(
         'tofu workspace new "${WORKSPACE_NAME}"'
     )
-    assert "Automatic retry is disabled" in deploy
+    assert "reconciling exact owned names" in deploy
+    assert "tofu import" in deploy
+    assert "ownership/role mismatch" in deploy
+    assert "expected bridge, found" in deploy
+    assert "Automatic recovery is limited to ownership-checked networks" in deploy
     assert "reconciling with one retry" not in deploy
     assert "SPEC_RESOURCE_NAMESPACE" in add_node
     assert "resource_namespace" in cleanup

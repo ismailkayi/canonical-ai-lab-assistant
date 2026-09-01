@@ -579,14 +579,94 @@ run_tofu_apply() {
     return "${apply_rc}"
 }
 
+reconcile_network_state() {
+    local state_list=""
+    local address=""
+    local name=""
+    local role=""
+    local expected_cidr=""
+    local owner=""
+    local actual_role=""
+    local actual_cidr=""
+    local actual_type=""
+    local -a import_vars=(
+        -input=false
+        -var="user_prefix=${USER_PREFIX}"
+        -var="resource_namespace=${RESOURCE_NAMESPACE}"
+        -var="microcloud_node_count=${NODES}"
+        -var="microcloud_node_cpu=${NODE_CPU}"
+        -var="microcloud_node_memory_mb=${NODE_MEMORY_MB}"
+        -var="microcloud_root_disk_size_gib=${ROOT_DISK_GIB}"
+        -var="microcloud_ceph_disk_size_gib=${CEPH_DISK_GIB}"
+        -var="ceph_disks_per_node=${CEPH_DISKS_PER_NODE}"
+        -var="local_disk_size_gib=${LOCAL_DISK_GIB}"
+        -var="microcloud_network_mode=${NETWORK_MODE}"
+        -var="microcloud_ovn_underlay_cidr=${OVN_UNDERLAY_CIDR}"
+        -var="microcloud_ceph_network_cidr=${CEPH_NETWORK_CIDR}"
+    )
+    local -a network_specs=(
+        "lxd_network.ovn_uplink|ca-${RESOURCE_NAMESPACE}-up|ovn-uplink|"
+    )
+    if [[ "${NETWORK_MODE}" == "fully-segregated-4nic" ]]; then
+        network_specs+=(
+            "lxd_network.ovn_underlay[0]|ca-${RESOURCE_NAMESPACE}-ov|ovn-underlay|${OVN_UNDERLAY_CIDR}"
+            "lxd_network.ceph[0]|ca-${RESOURCE_NAMESPACE}-ce|ceph|${CEPH_NETWORK_CIDR}"
+        )
+    fi
+
+    state_list=$(tofu state list 2>/dev/null || true)
+    for spec in "${network_specs[@]}"; do
+        IFS='|' read -r address name role expected_cidr <<< "${spec}"
+        grep -Fxq "${address}" <<< "${state_list}" && continue
+        lxc --project default network show "${name}" >/dev/null 2>&1 || continue
+
+        owner=$(lxc --project default network get "${name}" \
+            user.canonical-ai-lab-assistant.owner 2>/dev/null || true)
+        actual_role=$(lxc --project default network get "${name}" \
+            user.canonical-ai-lab-assistant.role 2>/dev/null || true)
+        actual_cidr=$(lxc --project default network get "${name}" \
+            user.canonical-ai-lab-assistant.cidr 2>/dev/null || true)
+        actual_type=$(lxc --project default network show "${name}" 2>/dev/null |
+            awk -F': ' '$1 == "type" {print $2; exit}')
+        if [[ "${owner}" != "${WORKSPACE_NAME}" || "${actual_role}" != "${role}" ]]; then
+            log_error "Refusing state reconciliation for '${name}': ownership/role mismatch"
+            return 1
+        fi
+        if [[ "${actual_type}" != "bridge" ]]; then
+            log_error "Refusing state reconciliation for '${name}': expected bridge, found ${actual_type:-unknown}"
+            return 1
+        fi
+        if [[ -n "${expected_cidr}" && "${actual_cidr}" != "${expected_cidr}" ]]; then
+            log_error "Refusing state reconciliation for '${name}': CIDR mismatch"
+            return 1
+        fi
+        if [[ "$(lxc --project default network get "${name}" ipv4.address)" != "none" \
+                || "$(lxc --project default network get "${name}" ipv6.address)" != "none" ]]; then
+            log_error "Refusing state reconciliation for '${name}': expected an IP-free bridge"
+            return 1
+        fi
+
+        log_warn "Importing provider-created network into Terraform state: ${address}"
+        if ! tofu import "${import_vars[@]}" "${address}" "${name}"; then
+            log_error "Could not import '${name}' into Terraform state"
+            return 1
+        fi
+    done
+}
+
 APPLY_LOG=$(mktemp)
 trap 'rm -f "${APPLY_LOG}"' EXIT
 if ! run_tofu_apply "${APPLY_LOG}"; then
     if grep -q "Missing Resource State After Create" "${APPLY_LOG}"; then
-        log_error "LXD created a resource that Terraform did not record in state."
-        log_error "Automatic retry is disabled because it could collide with that resource."
-        log_error "Inspect the names above before retrying with the same prefix."
-        exit 1
+        if grep -Eq 'with lxd_(instance|profile|volume)' "${APPLY_LOG}"; then
+            log_error "A non-network LXD resource is missing from Terraform state."
+            log_error "Automatic recovery is limited to ownership-checked networks."
+            exit 1
+        fi
+        log_warn "LXD created network resources without Terraform state; reconciling exact owned names..."
+        reconcile_network_state
+        : > "${APPLY_LOG}"
+        run_tofu_apply "${APPLY_LOG}"
     else
         exit 1
     fi

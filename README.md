@@ -485,10 +485,11 @@ inference restart.
 ### `Missing Resource State After Create`
 
 Some LXD provider versions can return a transient state error after resource
-creation. The deployment does not retry blindly: the remote object may exist
-without Terraform state, and retrying can turn that drift into an
-`already exists` collision. The operation stops and tells you to inspect the
-reported names before reusing that prefix.
+creation. The deployment does not retry blindly. For network resources only, it
+verifies the exact expected name, workspace owner, role, CIDR, and IP-free
+shape, imports that already-created network into Terraform state, and continues
+the same apply once. Foreign resources, mismatched networks, and missing-state
+VM/profile/volume errors remain fail-closed.
 
 ### An environment name already exists
 
