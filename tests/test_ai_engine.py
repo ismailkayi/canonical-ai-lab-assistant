@@ -511,3 +511,30 @@ parameters: {}
 
     assert result["action"] == "inspect_host_environment"
     assert result["parameters"] == {}
+
+
+def test_overcommit_assessment_accepts_only_typed_json(config) -> None:
+    engine = AIEngine(config)
+    captured = {}
+
+    def valid_call(messages, include_tools=True):
+        captured["messages"] = messages
+        captured["include_tools"] = include_tools
+        return {
+            "recommend": True,
+            "rationale": "Short training with no simultaneous peak.",
+        }
+
+    engine._call_inference = valid_call
+    result = engine.assess_lab_overcommit("training lab", "bounded evidence")
+
+    assert result["recommend"] is True
+    assert captured["include_tools"] is False
+    assert "bounded evidence" in captured["messages"][-1]["content"]
+
+    engine._call_inference = lambda *_args, **_kwargs: {
+        "recommend": "yes",
+        "rationale": "invalid type",
+    }
+    result = engine.assess_lab_overcommit("training lab", "bounded evidence")
+    assert result["recommend"] is False

@@ -244,6 +244,20 @@ Every infrastructure-changing action uses this flow:
 
 Changing the plan, host capacity, or target state invalidates the approval.
 
+### Lab overcommit fallback
+
+Overcommit is not shown as an initial option. Every deployment first uses the
+normal conservative policy. If a fresh lab fails only because of CPU/RAM
+allocation, a bounded fallback can be evaluated by the AI for short-lived
+lab/demo/training use.
+
+The hard limits are 1.50x allocated vCPU and 1.25x allocated RAM. Exact limits
+from every LXD project are counted in vCPU/MiB, current `MemAvailable` must leave
+at least 8 GiB (or 25% of the requested RAM plus 4 GiB), and storage remains
+strict. If the AI recommends the candidate, the exact ratios and risks are
+shown and only `approve overcommit` can execute it. Host and allocation values
+are read again under the infrastructure lock.
+
 ## Deployment Options
 
 | Option | Supported values |

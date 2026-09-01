@@ -178,7 +178,9 @@ def get_tool_definitions() -> dict[str, Any]:
                                 "medium",
                                 "large",
                                 "conservative",
+                                "balanced",
                                 "performance",
+                                "custom",
                             ],
                         },
                         "node_cpu": {"type": "integer", "minimum": 1},
@@ -394,5 +396,18 @@ def validate_tool_parameters(tool_name: str, parameters: dict[str, Any]) -> tupl
     local_disk = parameters.get("local_disk_gib")
     if isinstance(local_disk, int) and 0 < local_disk < 10:
         return False, "Parameter 'local_disk_gib' must be 0 or >= 10"
+
+    if tool_name == "deploy_microcloud" and parameters.get("sizing_tier") == "custom":
+        required_custom = {
+            "node_cpu",
+            "node_memory_mb",
+            "root_disk_gib",
+            "ceph_disk_gib",
+        }
+        missing = sorted(required_custom - set(parameters))
+        if missing:
+            return False, (
+                "Parameter 'sizing_tier=custom' requires explicit values for: " + ", ".join(missing)
+            )
 
     return True, ""

@@ -52,3 +52,21 @@ def test_deploy_tool_exposes_optional_fully_segregated_networking() -> None:
         "deploy_microcloud",
         {"nodes": 3, "network_mode": "four-nics"},
     )[0]
+
+
+def test_custom_sizing_requires_all_explicit_resource_values() -> None:
+    assert validate_tool_parameters(
+        "deploy_microcloud",
+        {
+            "nodes": 3,
+            "sizing_tier": "custom",
+            "node_cpu": 2,
+            "node_memory_mb": 4096,
+            "root_disk_gib": 30,
+            "ceph_disk_gib": 20,
+        },
+    )[0]
+    assert not validate_tool_parameters(
+        "deploy_microcloud",
+        {"nodes": 3, "sizing_tier": "custom", "node_cpu": 2},
+    )[0]

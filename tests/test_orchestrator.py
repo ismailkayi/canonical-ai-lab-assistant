@@ -6,6 +6,7 @@ import pytest
 
 from lab_ai_assistant.orchestrator import LabOrchestrator
 from lab_ai_assistant.planning import (
+    LAB_OVERCOMMIT_POLICY,
     CapacitySnapshot,
     EnvironmentSnapshot,
     ExecutionPlan,
@@ -370,7 +371,7 @@ def test_host_state_prefers_exact_default_storage_pool(config) -> None:
     selected_pools = []
     orchestrator._run_host_cmd = fake_host_command
     orchestrator._get_pool_available_gib = lambda pool: selected_pools.append(pool) or 500
-    orchestrator._collect_environment_usage = lambda: []
+    orchestrator._collect_environment_usage = lambda: ([], 0, 0, True)
 
     state = orchestrator._collect_host_state(force=True)
 
@@ -900,3 +901,194 @@ def test_deployment_plan_persists_resolved_resource_namespace(config) -> None:
     )
 
     assert resolved["resource_namespace"] == orchestrator._resource_namespace("training_microcloud")
+
+
+def lab_overcommit_plan(
+    *,
+    storage_available_gib: int = 500,
+    runtime_ram_available_mb: int = 32 * 1024,
+    allocations_complete: bool = True,
+) -> ExecutionPlan:
+    return ExecutionPlan(
+        action="deploy_microcloud",
+        parameters={
+            "nodes": 3,
+            "user_prefix": "secondlab",
+            "resource_namespace": "1234abcd",
+        },
+        summary="Create a second training lab",
+        topology=TopologySpec(
+            nodes=3,
+            node_cpu=2,
+            node_memory_mb=4096,
+            root_disk_gib=30,
+            ceph_disk_gib=20,
+            ceph_disks_per_node=1,
+        ),
+        capacity=CapacitySnapshot(
+            cpu_available=2,
+            ram_available_mb=8 * 1024,
+            storage_available_gib=storage_available_gib,
+            cpu_total=32,
+            cpu_allocated=24,
+            ram_total_mb=58 * 1024,
+            ram_allocated_mb=50 * 1024,
+            runtime_ram_available_mb=runtime_ram_available_mb,
+            allocations_complete=allocations_complete,
+        ),
+    )
+
+
+def test_cpu_and_ram_shortage_can_build_bounded_lab_overcommit(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    strict = lab_overcommit_plan()
+    validation = orchestrator.plan_validator.validate(strict)
+
+    candidate = orchestrator._build_lab_overcommit_plan(strict, validation.errors)
+
+    assert candidate is not None
+    assert candidate.capacity.policy == LAB_OVERCOMMIT_POLICY
+    assert candidate.capacity.cpu_available == 24  # 32 * 1.5 - 24
+    assert candidate.capacity.ram_available_mb == int(58 * 1024 * 1.25) - 50 * 1024
+    assert candidate.topology == strict.topology
+    assert candidate.parameters == strict.parameters
+
+
+def test_storage_or_incomplete_allocations_never_use_overcommit(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    storage_short = lab_overcommit_plan(storage_available_gib=100)
+    storage_validation = orchestrator.plan_validator.validate(storage_short)
+    assert any("Insufficient storage:" in error for error in storage_validation.errors)
+    assert (
+        orchestrator._build_lab_overcommit_plan(
+            storage_short,
+            storage_validation.errors,
+        )
+        is None
+    )
+
+    incomplete = lab_overcommit_plan(allocations_complete=False)
+    incomplete_validation = orchestrator.plan_validator.validate(incomplete)
+    assert (
+        orchestrator._build_lab_overcommit_plan(
+            incomplete,
+            incomplete_validation.errors,
+        )
+        is None
+    )
+
+
+def test_ram_runtime_headroom_blocks_candidate(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    plan = lab_overcommit_plan(runtime_ram_available_mb=4 * 1024)
+    validation = orchestrator.plan_validator.validate(plan)
+
+    assert orchestrator._build_lab_overcommit_plan(plan, validation.errors) is None
+
+
+def test_ai_recommendation_creates_explicit_overcommit_confirmation(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    strict = lab_overcommit_plan()
+    orchestrator._build_execution_plan = lambda *_args, **_kwargs: strict
+    orchestrator.ai_engine.assess_lab_overcommit = lambda *_args: {
+        "recommend": True,
+        "rationale": "Short training with no simultaneous peak load.",
+    }
+
+    result = orchestrator._run_agent_loop(
+        "create a short training lab",
+        {
+            "action": "deploy_microcloud",
+            "parameters": {"nodes": 3},
+            "message": "Create the lab.",
+        },
+    )
+
+    assert result.startswith("__CONFIRM__:")
+    assert "OVERCOMMIT WARNING" in result
+    assert "approve overcommit" in result
+    assert orchestrator.approval_manager.pending.capacity.policy == LAB_OVERCOMMIT_POLICY
+
+
+def test_ai_decline_returns_safer_recommendation_without_pending_plan(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    strict = lab_overcommit_plan()
+    orchestrator._build_execution_plan = lambda *_args, **_kwargs: strict
+    orchestrator.ai_engine.assess_lab_overcommit = lambda *_args: {
+        "recommend": False,
+        "rationale": "Stop another lab before this benchmark.",
+    }
+
+    result = orchestrator._run_agent_loop(
+        "create a benchmark lab",
+        {
+            "action": "deploy_microcloud",
+            "parameters": {"nodes": 3},
+            "message": "Create it.",
+        },
+    )
+
+    assert "Stop another lab" in result
+    assert orchestrator.approval_manager.pending is None
+
+
+def test_normal_yes_cannot_approve_overcommit_plan(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    strict = lab_overcommit_plan()
+    validation = orchestrator.plan_validator.validate(strict)
+    plan = orchestrator._build_lab_overcommit_plan(strict, validation.errors)
+    assert plan is not None
+    orchestrator.approval_manager.request(plan)
+    orchestrator._revalidate_approved_plan = lambda _plan: PlanValidation(valid=True)
+    orchestrator._execute_approved_plan = lambda _plan: "executed"
+
+    result = orchestrator._process_user_input("yes")
+    assert result.startswith("__CONFIRM__:")
+    assert "approve overcommit" in result
+
+    assert orchestrator._process_user_input("approve overcommit") == "executed"
+
+
+def test_overcommit_revalidation_rejects_changed_allocation(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    strict = lab_overcommit_plan()
+    validation = orchestrator.plan_validator.validate(strict)
+    plan = orchestrator._build_lab_overcommit_plan(strict, validation.errors)
+    assert plan is not None
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    state = host_state()
+    state.update(
+        {
+            "cpu_cores": 32,
+            "ram_total_mb": 58 * 1024,
+            "ram_available_mb": 32 * 1024,
+            "consumed_cpu": 25,
+            "consumed_ram_mb": 50 * 1024,
+            "allocations_complete": True,
+        }
+    )
+    orchestrator._collect_host_state = lambda force=False: state
+
+    result = orchestrator._revalidate_approved_plan(plan)
+
+    assert not result.valid
+    assert "changed after" in result.errors[0]
+
+
+def test_all_project_allocations_are_exact_and_fail_closed(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: (
+        "default,lab-node-1,RUNNING,2,2047MiB\n" 'other,"unrelated,instance",RUNNING,"0-3,6",1.5GiB'
+    )
+
+    environments, cpu, ram_mb, complete = orchestrator._collect_environment_usage()
+
+    assert complete
+    assert cpu == 7
+    assert ram_mb == 2047 + 1536
+    assert environments[0]["name"] == "lab"
+    assert orchestrator._parse_memory_mb("50%") is None
+
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: ("default,unbounded,RUNNING,,")
+    _, _, _, complete = orchestrator._collect_environment_usage()
+    assert not complete

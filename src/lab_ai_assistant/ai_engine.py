@@ -1025,6 +1025,10 @@ TOOL DECISION RULES:
 - Explaining a proposed deployment is not a substitute for the tool call. Put
   the short rationale in message/reasoning and request deploy_microcloud in the
   same response so the user receives the exact validated plan.
+- Do not mention or offer overcommit proactively. Every request starts with the
+  normal strict capacity policy. If strict validation later supplies a bounded
+  CPU/RAM candidate, the orchestrator asks you for a separate structured
+  recommendation. Storage is never overcommitted.
 
 PLANNING MODE SUMMARY:
 {scenario_catalog}
@@ -1173,6 +1177,48 @@ ENVIRONMENT MANAGEMENT:
         )
         self._pending_tool_call_id = None
         self._trim_conversation_history()
+
+    def assess_lab_overcommit(
+        self,
+        user_request: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        """Decide whether a bounded overcommit candidate fits the stated lab use."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are deciding whether to recommend a pre-validated CPU/RAM "
+                    "overcommit candidate. Return only JSON with boolean 'recommend' "
+                    "and short string 'rationale'. Recommend only for short-lived "
+                    "lab/demo/training use where simultaneous peak load is unlikely. "
+                    "Decline for benchmarks, performance testing, heavy Ceph I/O, "
+                    "production-like use, or when safer downsizing/cleanup is preferable. "
+                    "The deterministic system owns all ratios and limits; do not invent "
+                    "or modify any numbers."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Original request:\n{user_request}\n\n" f"Pre-validated candidate:\n{evidence}"
+                ),
+            },
+        ]
+        try:
+            response = self._call_inference(messages, include_tools=False)
+        except Exception as exc:
+            logger.error("Overcommit assessment failed: %s", exc)
+            return {"recommend": False, "rationale": "AI assessment was unavailable."}
+
+        recommend = response.get("recommend")
+        rationale = response.get("rationale")
+        if not isinstance(recommend, bool) or not isinstance(rationale, str):
+            return {
+                "recommend": False,
+                "rationale": "AI did not return a valid overcommit assessment.",
+            }
+        return {"recommend": recommend, "rationale": rationale.strip()}
 
     def diagnose_tool_failure(self, tool_name: str, result: str) -> str:
         """Ask the model to explain why a tool failed and what to try next.

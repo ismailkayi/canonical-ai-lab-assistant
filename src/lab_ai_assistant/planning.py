@@ -25,6 +25,10 @@ NEGATIVE_RESPONSES = frozenset({"no", "n", "cancel", "abort", "hayır", "hayir",
 
 STANDARD_NETWORK_MODE = "standard-2nic"
 SEGREGATED_NETWORK_MODE = "fully-segregated-4nic"
+STRICT_CAPACITY_POLICY = "strict"
+LAB_OVERCOMMIT_POLICY = "lab-overcommit"
+CPU_OVERCOMMIT_RATIO = 1.5
+RAM_OVERCOMMIT_RATIO = 1.25
 
 
 class CapacitySnapshot(BaseModel):
@@ -37,6 +41,13 @@ class CapacitySnapshot(BaseModel):
     storage_available_gib: int = Field(ge=0)
     storage_pool: str = "default"
     source: str = "live-host-observation"
+    policy: Literal["strict", "lab-overcommit"] = STRICT_CAPACITY_POLICY
+    cpu_total: int = Field(default=0, ge=0)
+    cpu_allocated: int = Field(default=0, ge=0)
+    ram_total_mb: int = Field(default=0, ge=0)
+    ram_allocated_mb: int = Field(default=0, ge=0)
+    runtime_ram_available_mb: int = Field(default=0, ge=0)
+    allocations_complete: bool = True
 
 
 class LXDResourceManifest(BaseModel):
@@ -252,6 +263,9 @@ class PlanValidator:
         capacity: CapacitySnapshot,
         errors: list[str],
     ) -> None:
+        if not capacity.allocations_complete:
+            errors.append("LXD CPU/RAM allocation inventory could not be read safely.")
+            return
         if topology.total_cpu > capacity.cpu_available:
             errors.append(
                 "Insufficient CPU: "
