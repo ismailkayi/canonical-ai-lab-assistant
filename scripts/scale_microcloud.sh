@@ -65,7 +65,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
-TF_DIR="${REPO_ROOT}/terraform"
+TF_DIR="${LAB_AI_TERRAFORM_DIR:-${REPO_ROOT}/terraform}"
 ADD_SCRIPT="${SCRIPT_DIR}/add_cluster_node.sh"
 
 if [[ ! -f "${ADD_SCRIPT}" ]]; then

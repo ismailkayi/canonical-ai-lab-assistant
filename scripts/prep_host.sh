@@ -200,7 +200,7 @@ ensure_ssh_key() {
 
 initialize_tofu() {
     local terraform_dir
-    terraform_dir="$(dirname "${BASH_SOURCE[0]}")/../terraform"
+    terraform_dir="${LAB_AI_TERRAFORM_DIR:-$(dirname "${BASH_SOURCE[0]}")/../terraform}"
 
     if [[ -d "$terraform_dir" ]]; then
         log_info "Running OpenTofu init in terraform/..."

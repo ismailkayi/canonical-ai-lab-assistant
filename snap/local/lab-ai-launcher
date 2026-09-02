@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -eu
+
+mkdir -p "${SNAP_USER_COMMON}"
+
+tofu_config="${SNAP_USER_COMMON}/tofu.rc"
+tofu_config_tmp="${tofu_config}.$$"
+cat >"${tofu_config_tmp}" <<EOF
+provider_installation {
+  filesystem_mirror {
+    path    = "${SNAP}/providers"
+    include = ["hashicorp/local", "terraform-lxd/lxd"]
+  }
+}
+EOF
+mv "${tofu_config_tmp}" "${tofu_config}"
+export TF_CLI_CONFIG_FILE="${tofu_config}"
+
+exec python3 -m lab_ai_assistant.cli "$@"

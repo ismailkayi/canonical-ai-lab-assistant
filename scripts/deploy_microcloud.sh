@@ -117,8 +117,9 @@ fi
 # -----------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TERRAFORM_DIR="${REPO_ROOT}/terraform"
+TERRAFORM_DIR="${LAB_AI_TERRAFORM_DIR:-${REPO_ROOT}/terraform}"
 PLAYBOOKS_DIR="${REPO_ROOT}/playbooks"
+RUNTIME_DIR="$(dirname "${TERRAFORM_DIR}")"
 
 [[ ! -d "${TERRAFORM_DIR}" ]] && { log_error "terraform/ not found"; exit 1; }
 
@@ -675,7 +676,7 @@ fi
 log_success "LXD VMs provisioned"
 
 # --- Ansible bootstrap ---
-INVENTORY_FILE="${REPO_ROOT}/inventory_${WORKSPACE_NAME}.yaml"
+INVENTORY_FILE="${RUNTIME_DIR}/inventory_${WORKSPACE_NAME}.yaml"
 
 if [[ ! -f "${INVENTORY_FILE}" ]]; then
     log_error "Ansible inventory not found: ${INVENTORY_FILE}"

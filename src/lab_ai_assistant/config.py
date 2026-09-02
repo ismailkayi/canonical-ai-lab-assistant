@@ -1,6 +1,7 @@
 """Configuration management for the MicroCloud-first assistant."""
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,8 @@ class Config:
     scale_microcloud_script: Path = scripts_dir / "scale_microcloud.sh"
     verify_cluster_health_script: Path = scripts_dir / "verify_cluster_health.sh"
     add_cluster_node_script: Path = scripts_dir / "add_cluster_node.sh"
+    terraform_assets_dir: Path = repo_root / "terraform"
+    terraform_dir: Path = repo_root / "terraform"
 
     inference_engine: str = field(default_factory=lambda: os.getenv("INFERENCE_ENGINE", "gemma4"))
     inference_auto_discovery: bool = field(
@@ -98,6 +101,8 @@ class Config:
         self.scale_microcloud_script = self.scripts_dir / "scale_microcloud.sh"
         self.verify_cluster_health_script = self.scripts_dir / "verify_cluster_health.sh"
         self.add_cluster_node_script = self.scripts_dir / "add_cluster_node.sh"
+        self.terraform_assets_dir = self.repo_root / "terraform"
+        self.terraform_dir = self.terraform_assets_dir
 
         self.history_file = self.state_dir / "deployment_history.json"
         self.context_file = self.state_dir / "conversation_context.json"
@@ -105,6 +110,36 @@ class Config:
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        if snap_root:
+            self.terraform_dir = self.state_dir / "terraform"
+            self._sync_terraform_assets()
+
+    def _sync_terraform_assets(self) -> None:
+        """Copy immutable Terraform configuration into the writable snap state."""
+        if not self.terraform_assets_dir.is_dir():
+            raise FileNotFoundError(
+                f"Terraform assets directory not found: {self.terraform_assets_dir}"
+            )
+
+        assets = sorted(self.terraform_assets_dir.rglob("*.tf"))
+        lock_file = self.terraform_assets_dir / ".terraform.lock.hcl"
+        if lock_file.is_file():
+            assets.append(lock_file)
+        if not assets:
+            raise FileNotFoundError(
+                f"No Terraform configuration found in {self.terraform_assets_dir}"
+            )
+
+        for source in assets:
+            relative_path = source.relative_to(self.terraform_assets_dir)
+            destination = self.terraform_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.is_file() and destination.read_bytes() == source.read_bytes():
+                continue
+            temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+            shutil.copy2(source, temporary)
+            temporary.replace(destination)
 
 
 def get_config() -> Config:

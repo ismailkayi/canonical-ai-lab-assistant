@@ -140,6 +140,43 @@ def test_fresh_deploy_allows_empty_stale_workspace(config) -> None:
     assert topology.nodes == 3
 
 
+def test_explicit_small_tier_with_two_osds_uses_promised_sizes(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = CapacitySnapshot(
+        cpu_available=26,
+        ram_available_mb=34 * 1024,
+        storage_available_gib=782,
+    )
+
+    resolved, topology = orchestrator._resolve_deployment_parameters(
+        {
+            "user_prefix": "live-migration-lab",
+            "nodes": 3,
+            "sizing_tier": "small",
+            "ceph_disks_per_node": 2,
+            "local_disk_gib": 0,
+            "network_mode": "standard-2nic",
+        },
+        capacity,
+    )
+    plan = ExecutionPlan(
+        action="deploy_microcloud",
+        parameters=resolved,
+        summary="Deploy the live migration lab",
+        topology=topology,
+        capacity=capacity,
+    )
+
+    assert topology.node_cpu == 4
+    assert topology.node_memory_mb == 8 * 1024
+    assert topology.root_disk_gib == 40
+    assert topology.ceph_disk_gib == 50
+    assert topology.ceph_disks_per_node == 2
+    assert topology.total_storage_gib == 420
+    assert orchestrator.plan_validator.validate(plan).valid
+
+
 def test_confirmation_displays_environment_target_and_exact_parameters(config) -> None:
     orchestrator = LabOrchestrator(config)
     plan = ExecutionPlan(
@@ -1089,3 +1126,50 @@ def test_all_project_allocations_are_exact_and_fail_closed(config) -> None:
     orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: ("default,unbounded,RUNNING,,")
     _, _, _, complete = orchestrator._collect_environment_usage()
     assert not complete
+
+
+def test_stopped_unbounded_instances_do_not_block_capacity_inventory(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: (
+        "snapcraft,build-vm,STOPPED,,\n"
+        "default,lab-node-1,RUNNING,2,4GiB\n"
+        "default,frozen-service,FROZEN,1,512MiB"
+    )
+
+    environments, cpu, ram_mb, complete = orchestrator._collect_environment_usage()
+
+    assert complete
+    assert cpu == 3
+    assert ram_mb == (4 * 1024) + 512
+    assert environments[0]["name"] == "lab"
+
+
+def test_pool_available_uses_lxd_byte_metrics(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    commands: list[str] = []
+
+    def fake_run(command: str, timeout: int = 10) -> str:
+        commands.append(command)
+        return 'info:\n  space used: "141988421632"\n' '  total space: "1003736440832"\n'
+
+    orchestrator._run_host_cmd = fake_run
+
+    assert orchestrator._get_pool_available_gib("default") == 802
+    assert commands == ["lxc storage info default --bytes 2>/dev/null"]
+
+
+def test_pool_available_falls_back_to_configured_source(config) -> None:
+    orchestrator = LabOrchestrator(config)
+
+    def fake_run(command: str, timeout: int = 10) -> str:
+        if command.startswith("lxc storage info"):
+            return ""
+        if command.startswith("lxc storage get"):
+            return "/var/snap/lxd/common/lxd/storage-pools/default"
+        if command.startswith("df -BG --"):
+            return "756"
+        raise AssertionError(f"unexpected command: {command}")
+
+    orchestrator._run_host_cmd = fake_run
+
+    assert orchestrator._get_pool_available_gib("default") == 756

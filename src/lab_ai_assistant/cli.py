@@ -1,6 +1,7 @@
 """CLI entry point for the MicroCloud-first Lab AI Assistant."""
 
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -10,6 +11,7 @@ from rich.console import Console
 from lab_ai_assistant import __version__
 from lab_ai_assistant.ai_engine import AIEngine
 from lab_ai_assistant.config import get_config
+from lab_ai_assistant.doctor import run_doctor
 from lab_ai_assistant.orchestrator import LabOrchestrator
 
 app = typer.Typer(help="AI-powered Lab Automation Assistant for Canonical Infrastructure")
@@ -62,8 +64,32 @@ def version():
 
 
 @app.command()
-def bootstrap():
+def doctor():
+    """Check tools and services without changing the host."""
+    config = get_config()
+    checks = run_doctor(config)
+    for check_result in checks:
+        marker = "[green]✓[/green]" if check_result.ok else "[red]✗[/red]"
+        console.print(f"{marker} {check_result.name}: {check_result.detail}")
+    if not all(check_result.ok for check_result in checks):
+        raise typer.Exit(1)
+
+
+@app.command()
+def bootstrap(
+    host_setup: bool = typer.Option(
+        False,
+        "--host-setup",
+        help="Explicitly allow host package, snap, LXD, and group changes.",
+    ),
+):
     """Prepare the host and install the inference snap."""
+    if os.getenv("SNAP") and not host_setup:
+        console.print("[yellow]Snap bootstrap does not change the host by default.[/yellow]")
+        console.print("Run `lab-ai doctor` for read-only checks.")
+        console.print("Run `lab-ai bootstrap --host-setup` to explicitly allow host setup.")
+        return
+
     config = get_config()
     orchestrator = LabOrchestrator(config)
     result = orchestrator.bootstrap_host()
@@ -78,7 +104,10 @@ def setup():
     console.print(f"[cyan]Host prep script:[/cyan] {config.prep_host_script}")
     console.print(f"[cyan]Install script:[/cyan] {config.install_inference_script}")
     console.print(f"[cyan]Deploy script:[/cyan] {config.deploy_microcloud_script}")
-    console.print("\nRun `lab-ai bootstrap` to prepare the host and install the inference snap.")
+    bootstrap_command = "lab-ai bootstrap --host-setup" if os.getenv("SNAP") else "lab-ai bootstrap"
+    console.print(
+        f"\nRun `{bootstrap_command}` to prepare the host and install the inference snap."
+    )
     console.print("Then run `lab-ai chat` to start the MicroCloud assistant.")
 
 

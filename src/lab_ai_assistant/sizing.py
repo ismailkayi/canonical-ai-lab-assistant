@@ -228,6 +228,8 @@ class SizingAdvisor:
         nodes: int,
         profile: str = "balanced",
         residual_capacity: bool = False,
+        ceph_disks_per_node: int = 1,
+        local_disk_gib: int = 0,
     ) -> "HostAwareSizing":
         """Compute per-node resources from REAL host capacity.
 
@@ -241,6 +243,8 @@ class SizingAdvisor:
         cpu_total = max(int(host_state.get("cpu_cores", 0) or 0), cpu_floor)
         ram_mb = max(int(host_state.get("ram_total_mb", 0) or 0), ram_floor)
         storage_gib = max(int(host_state.get("storage_available_gib", 0) or 0), 0)
+        ceph_disks_per_node = max(int(ceph_disks_per_node or 1), 1)
+        local_disk_gib = max(int(local_disk_gib or 0), 0)
         host_ram_gb = (ram_mb + 1023) // 1024
 
         if residual_capacity:
@@ -262,7 +266,10 @@ class SizingAdvisor:
 
         bal_cpu = _round_down_even(usable_cpu // nodes, 2)
         bal_ram = _pick_floor_tier(usable_ram_gb // nodes, ram_tiers)
-        raw_ceph = max((usable_disk // nodes) - 40, 20)
+        raw_ceph = max(
+            ((usable_disk // nodes) - 40 - local_disk_gib) // ceph_disks_per_node,
+            20,
+        )
         bal_ceph = _pick_floor_tier(raw_ceph, ceph_tiers)
 
         profile = (profile or "balanced").lower()
@@ -276,7 +283,10 @@ class SizingAdvisor:
             ram_limit = _pick_floor_tier(host_ram_gb // nodes, ram_tiers)
             node_ram_gb = _pick_next_tier(bal_ram, ram_limit, ram_tiers)
             root_disk_gb = 50
-            ceph_limit = _pick_floor_tier((storage_gib // nodes) - 50, ceph_tiers)
+            ceph_limit = _pick_floor_tier(
+                ((storage_gib // nodes) - 50 - local_disk_gib) // ceph_disks_per_node,
+                ceph_tiers,
+            )
             ceph_disk_gb = _pick_next_tier(bal_ceph, ceph_limit, ceph_tiers)
         else:  # balanced / small / medium / large
             node_cpu = bal_cpu
@@ -297,6 +307,8 @@ class SizingAdvisor:
             node_memory_mb=node_ram_gb * 1024,
             root_disk_gb=root_disk_gb,
             ceph_disk_gb=ceph_disk_gb,
+            ceph_disks_per_node=ceph_disks_per_node,
+            local_disk_gib=local_disk_gib,
             host_cpu=cpu_total,
             host_ram_gb=host_ram_gb,
             host_storage_gib=storage_gib,
@@ -354,6 +366,8 @@ class HostAwareSizing:
     host_cpu: int
     host_ram_gb: int
     host_storage_gib: int
+    ceph_disks_per_node: int = 1
+    local_disk_gib: int = 0
 
     def total_cpu(self) -> int:
         return self.node_cpu * self.nodes
@@ -362,10 +376,12 @@ class HostAwareSizing:
         return self.node_ram_gb * self.nodes
 
     def total_ceph_gb(self) -> int:
-        return self.ceph_disk_gb * self.nodes
+        return self.ceph_disk_gb * self.ceph_disks_per_node * self.nodes
 
     def total_storage_gb(self) -> int:
-        return (self.root_disk_gb + self.ceph_disk_gb) * self.nodes
+        return (
+            self.root_disk_gb + self.ceph_disk_gb * self.ceph_disks_per_node + self.local_disk_gib
+        ) * self.nodes
 
     def fits_host(self) -> bool:
         return (
@@ -383,6 +399,8 @@ class HostAwareSizing:
                 "ram_gb": self.node_ram_gb,
                 "root_disk_gb": self.root_disk_gb,
                 "ceph_disk_gb": self.ceph_disk_gb,
+                "ceph_disks_per_node": self.ceph_disks_per_node,
+                "local_disk_gib": self.local_disk_gib,
             },
             "totals": {
                 "cpu": self.total_cpu(),
@@ -404,7 +422,8 @@ class HostAwareSizing:
             f"Host-aware sizing ({self.profile} profile) — matches what deploy provisions\n"
             f"  Nodes    : {self.nodes}\n"
             f"  Per node : {self.node_cpu} vCPU / {self.node_ram_gb} GB RAM / "
-            f"{self.root_disk_gb} GB root / {self.ceph_disk_gb} GB Ceph disk\n"
+            f"{self.root_disk_gb} GB root / {self.ceph_disks_per_node} x "
+            f"{self.ceph_disk_gb} GB Ceph / {self.local_disk_gib} GB local disk\n"
             f"  Totals   : {self.total_cpu()} vCPU / {self.total_ram_gb()} GB RAM / "
             f"{self.total_storage_gb()} GB storage ({self.total_ceph_gb()} GB Ceph)\n"
             f"  Available: {self.host_cpu} vCPU / {self.host_ram_gb} GB RAM / "

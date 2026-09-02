@@ -1,0 +1,100 @@
+name: lab-ai
+version: 0.1.0-prototype.2
+summary: AI-assisted Canonical infrastructure lab automation
+description: |
+  A classic-confinement feasibility prototype of the Canonical AI Lab
+  Assistant. LXD and the gemma4 inference runtime remain separate snaps.
+base: core24
+grade: devel
+confinement: classic
+
+platforms:
+  amd64:
+
+apps:
+  lab-ai:
+    command: bin/lab-ai-launcher
+    environment:
+      PATH: $SNAP/bin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/usr/sbin:$PATH
+      PYTHONPATH: $SNAP/lib/python3.12/site-packages:$SNAP/usr/lib/python3/dist-packages
+      ANSIBLE_COLLECTIONS_PATH: $SNAP/usr/share/ansible/collections
+      LC_ALL: C.UTF-8
+
+parts:
+  application:
+    plugin: python
+    source: snap/python
+    build-packages:
+      - python3.12-venv
+    python-requirements:
+      - requirements.txt
+    python-packages:
+      - ansible-core==2.20.1
+    stage-packages:
+      - libpython3.12-minimal
+      - libpython3.12-stdlib
+      - openssh-client
+      - python3-minimal
+      - python3.12-minimal
+      - python3.12-venv
+      - util-linux
+    override-build: |
+      craftctl default
+      "$CRAFT_PART_INSTALL/bin/ansible-galaxy" collection install \
+        community.general:==12.1.0 \
+        --collections-path "$CRAFT_PART_INSTALL/usr/share/ansible/collections"
+
+  application-code:
+    plugin: nil
+    source: src
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/lib/python3.12/site-packages"
+      cp -a \
+        "$CRAFT_PART_SRC/lab_ai_assistant" \
+        "$CRAFT_PART_INSTALL/lib/python3.12/site-packages/lab_ai_assistant"
+
+  launcher:
+    plugin: nil
+    source: snap/local
+    override-build: |
+      install -D -m 0755 \
+        "$CRAFT_PART_SRC/lab-ai-launcher" \
+        "$CRAFT_PART_INSTALL/bin/lab-ai-launcher"
+
+  playbooks:
+    plugin: nil
+    source: playbooks
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/playbooks"
+      cp -a "$CRAFT_PART_SRC/." "$CRAFT_PART_INSTALL/playbooks/"
+
+  scripts:
+    plugin: nil
+    source: scripts
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/scripts"
+      cp -a "$CRAFT_PART_SRC/." "$CRAFT_PART_INSTALL/scripts/"
+
+  opentofu:
+    plugin: dump
+    source: https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip
+    source-type: zip
+    source-checksum: sha256/5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8
+    organize:
+      tofu: bin/tofu
+    stage:
+      - bin/tofu
+
+  providers:
+    plugin: nil
+    source: terraform
+    after:
+      - opentofu
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/providers"
+      mkdir -p "$CRAFT_PART_INSTALL/terraform"
+      cp -a "$CRAFT_PART_SRC/." "$CRAFT_PART_INSTALL/terraform/"
+      cd "$CRAFT_PART_SRC"
+      "$CRAFT_STAGE/bin/tofu" providers mirror \
+        -platform=linux_amd64 \
+        "$CRAFT_PART_INSTALL/providers"

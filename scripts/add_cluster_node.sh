@@ -89,8 +89,9 @@ fi
 # -----------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TERRAFORM_DIR="${REPO_ROOT}/terraform"
+TERRAFORM_DIR="${LAB_AI_TERRAFORM_DIR:-${REPO_ROOT}/terraform}"
 PLAYBOOKS_DIR="${REPO_ROOT}/playbooks"
+RUNTIME_DIR="$(dirname "${TERRAFORM_DIR}")"
 
 LXD_PREFIX="${WORKSPACE//_/-}"
 INITIATOR_NODE="${LXD_PREFIX}-node-1"
@@ -301,7 +302,7 @@ log_success "New VMs provisioned"
 # -----------------------------------------------------------------------
 log_info "[PHASE 2] Preparing new node(s) (snaps, boot wait)..."
 
-INVENTORY_FILE="${REPO_ROOT}/inventory_${WORKSPACE}.yaml"
+INVENTORY_FILE="${RUNTIME_DIR}/inventory_${WORKSPACE}.yaml"
 if [[ ! -f "${INVENTORY_FILE}" ]]; then
     log_error "Ansible inventory not found: ${INVENTORY_FILE}"
     exit 1

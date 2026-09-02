@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
-TF_DIR="${REPO_ROOT}/terraform"
+TF_DIR="${LAB_AI_TERRAFORM_DIR:-${REPO_ROOT}/terraform}"
 
 if [[ ! -d "${TF_DIR}" ]]; then
     echo "Terraform directory not found: ${TF_DIR}"

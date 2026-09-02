@@ -31,7 +31,7 @@ fi
 # Derive node prefix (workspace name has underscores, LXD names use dashes)
 LXD_PREFIX="${WORKSPACE//_/-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TERRAFORM_DIR="${SCRIPT_DIR}/../terraform"
+TERRAFORM_DIR="${LAB_AI_TERRAFORM_DIR:-${SCRIPT_DIR}/../terraform}"
 
 # Find the initiator node (first node in workspace)
 INITIATOR_NODE="${LXD_PREFIX}-node-1"

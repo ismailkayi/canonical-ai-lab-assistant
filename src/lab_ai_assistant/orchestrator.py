@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import select
+import shlex
 import signal
 import subprocess
 import textwrap
@@ -40,6 +41,7 @@ from lab_ai_assistant.planning import (
     TopologySpec,
     classify_confirmation,
 )
+from lab_ai_assistant.scenarios import SIZING_TIERS
 from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
 from lab_ai_assistant.tools import get_tool_definitions, validate_tool_parameters
 from lab_ai_assistant.ui import ChatUI
@@ -68,7 +70,7 @@ class LabOrchestrator:
         self.ai_engine.stream_callback = self.ui.stream_preview
         self.plan_validator = PlanValidator()
         self.approval_manager = ApprovalManager()
-        self.cluster_verifier = ClusterVerifier(config.repo_root / "terraform")
+        self.cluster_verifier = ClusterVerifier(config.terraform_dir)
         # Cache for host-state grounding so we don't re-shell out every turn.
         self._host_state_cache: dict[str, Any] | None = None
         self._host_state_cache_ts: float = 0.0
@@ -94,6 +96,7 @@ class LabOrchestrator:
             result = subprocess.run(
                 ["bash", str(script), *script_args.get(script, [])],
                 cwd=self.config.repo_root,
+                env=self._script_environment(),
                 # No capture_output — output goes directly to the terminal
             )
             if result.returncode != 0:
@@ -505,6 +508,8 @@ class LabOrchestrator:
 
         nodes = int(resolved.get("nodes", 3))
         sizing_tier = str(resolved.get("sizing_tier", "balanced"))
+        ceph_disks_per_node = int(resolved.get("ceph_disks_per_node", 1))
+        local_disk_gib = int(resolved.get("local_disk_gib", 0))
         profile = self._tier_to_profile(sizing_tier)
         sizing_state = {
             "cpu_cores": capacity.cpu_available,
@@ -516,18 +521,50 @@ class LabOrchestrator:
             nodes=nodes,
             profile=profile,
             residual_capacity=True,
+            ceph_disks_per_node=ceph_disks_per_node,
+            local_disk_gib=local_disk_gib,
         )
+        try:
+            explicit_tier = SizingTier(sizing_tier)
+        except ValueError:
+            tier_defaults = None
+        else:
+            tier_defaults = SIZING_TIERS[explicit_tier]
 
         resolved.setdefault("scenario", "custom")
         resolved.setdefault("user_prefix", "lab")
         resolved["nodes"] = nodes
         resolved.setdefault("sizing_tier", sizing_tier)
-        resolved.setdefault("node_cpu", recommendation.node_cpu)
-        resolved.setdefault("node_memory_mb", recommendation.node_memory_mb)
-        resolved.setdefault("root_disk_gib", recommendation.root_disk_gb)
-        resolved.setdefault("ceph_disk_gib", recommendation.ceph_disk_gb)
-        resolved.setdefault("ceph_disks_per_node", 1)
-        resolved.setdefault("local_disk_gib", 0)
+        resolved.setdefault(
+            "node_cpu",
+            tier_defaults.cpu if tier_defaults is not None else recommendation.node_cpu,
+        )
+        resolved.setdefault(
+            "node_memory_mb",
+            (
+                tier_defaults.ram_gb * 1024
+                if tier_defaults is not None
+                else recommendation.node_memory_mb
+            ),
+        )
+        resolved.setdefault(
+            "root_disk_gib",
+            (
+                tier_defaults.root_disk_gb
+                if tier_defaults is not None
+                else recommendation.root_disk_gb
+            ),
+        )
+        resolved.setdefault(
+            "ceph_disk_gib",
+            (
+                tier_defaults.storage_disk_gb
+                if tier_defaults is not None
+                else recommendation.ceph_disk_gb
+            ),
+        )
+        resolved.setdefault("ceph_disks_per_node", ceph_disks_per_node)
+        resolved.setdefault("local_disk_gib", local_disk_gib)
         resolved["resource_namespace"] = self._resource_namespace(workspace)
         self._resolve_network_parameters(resolved, workspace, nodes)
 
@@ -1804,27 +1841,31 @@ class LabOrchestrator:
         return state
 
     def _get_pool_available_gib(self, pool: str) -> int:
-        """Best-effort free space (GiB) in an LXD storage pool, with df fallback."""
-        info = self._run_host_cmd(f"lxc storage info {pool} 2>/dev/null")
-        line = ""
+        """Return free space in an LXD storage pool, with a source-path fallback."""
+        quoted_pool = shlex.quote(pool)
+        info = self._run_host_cmd(f"lxc storage info {quoted_pool} --bytes 2>/dev/null")
+        total_bytes: int | None = None
+        used_bytes: int | None = None
         for raw in info.splitlines():
-            if "Space available:" in raw:
-                line = raw.split("Space available:", 1)[1].strip()
-                break
-        if line:
-            num_match = re.search(r"[0-9]+(?:\.[0-9]+)?", line)
-            unit_match = re.search(r"[A-Za-z]+", line)
-            if num_match:
-                num = float(num_match.group(0))
-                unit = (unit_match.group(0) if unit_match else "GiB").upper()
-                if unit.startswith("T"):
-                    return int(num * 1024)
-                if unit.startswith("G"):
-                    return int(num)
-                if unit.startswith("M"):
-                    return int(num / 1024)
+            key, separator, value = raw.strip().partition(":")
+            if not separator:
+                continue
+            numeric_value = value.strip().strip('"')
+            if not numeric_value.isdigit():
+                continue
+            if key.lower() == "total space":
+                total_bytes = int(numeric_value)
+            elif key.lower() == "space used":
+                used_bytes = int(numeric_value)
+        if total_bytes is not None and used_bytes is not None:
+            return max((total_bytes - used_bytes) // (1024**3), 0)
+
+        source = self._run_host_cmd(f"lxc storage get {quoted_pool} source 2>/dev/null")
+        if not source.startswith("/"):
+            return 0
         df_out = self._run_host_cmd(
-            "df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'"
+            f"df -BG -- {shlex.quote(source)} 2>/dev/null "
+            "| awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'"
         )
         return self._parse_int(df_out, default=0)
 
@@ -1857,6 +1898,9 @@ class LabOrchestrator:
             if len(cols) < 5 or not cols[1]:
                 continue
             name = cols[1]
+            status = cols[2].upper()
+            if status not in {"RUNNING", "FROZEN"}:
+                continue
             cpu = self._parse_cpu_limit(cols[3])
             ram_mb = self._parse_memory_mb(cols[4])
             if cpu is None or ram_mb is None:
@@ -2157,7 +2201,7 @@ class LabOrchestrator:
 
             operation_started = time.monotonic()
             operation_timed_out = False
-            child_env = os.environ.copy()
+            child_env = self._script_environment()
             inherited_fds: tuple[int, ...] = ()
             if self._infrastructure_lock_fd is not None:
                 child_env["LAB_AI_TERRAFORM_LOCK_FD"] = str(self._infrastructure_lock_fd)
@@ -2270,10 +2314,17 @@ class LabOrchestrator:
             text=True,
             timeout=self.config.response_timeout,
             cwd=self.config.repo_root,
+            env=self._script_environment(),
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr or result.stdout)
         return result.stdout.strip()
+
+    def _script_environment(self) -> dict[str, str]:
+        """Return the environment contract shared by all lifecycle scripts."""
+        child_env = os.environ.copy()
+        child_env["LAB_AI_TERRAFORM_DIR"] = str(self.config.terraform_dir)
+        return child_env
 
     def _record_deployment(self, action, parameters, result):
         record = {
