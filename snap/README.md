@@ -37,14 +37,30 @@ for every Ceph OSD and local disk during host-aware sizing. For example, a
 three-node small tier with two 50 GiB OSDs per node is consistently planned and
 validated as 420 GiB rather than silently increasing each OSD to 200 GiB.
 
+Revision `0.1.0-prototype.3` makes concurrent lab naming deterministic. A
+workspace-like deployment name is normalized into a unique prefix (for example,
+`lab_microcloud_2` becomes `lab-2_microcloud`) instead of being rejected or
+silently reusing the first lab's `lab` prefix.
+
+Revision `0.1.0-prototype.4` answers explicit CPU/RAM overcommit capability
+questions from deterministic policy rather than model recall. Deployments still
+start strict and only receive a bounded, AI-gated candidate for CPU/RAM-only
+capacity failures; storage remains strict. Performance, database benchmark,
+heavy Ceph I/O, and production-like workloads are expected to be declined.
+
 ## Build and install
 
 ```bash
 snapcraft
-sudo snap install ./lab-ai_0.1.0-prototype.2_amd64.snap \
+sudo snap install ./lab-ai_0.1.0-prototype.4_amd64.snap \
   --dangerous --classic
 lab-ai doctor
 ```
+
+Do not use `snap remove --purge lab-ai` while managed labs exist: purge deletes
+the Terraform state under `$SNAP_USER_COMMON` but cannot delete the external LXD
+resources. Save or back up snap state before replacing a locally installed
+prototype.
 
 LXD and `gemma4` remain separately installed platform services. Do not reuse
 staging lab prefixes or Terraform state when testing this prototype.

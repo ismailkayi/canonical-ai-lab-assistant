@@ -984,6 +984,13 @@ WHAT THIS MEANS FOR USER REQUESTS:
 - "Check if cluster is healthy" → Use verify_cluster_health tool.
 - "More Ceph disks per node" → Use ceph_disks_per_node parameter in deploy_microcloud.
 - "Add local fast storage" → Use local_disk_gib >= 10 in deploy_microcloud.
+- Multiple labs can run concurrently. Give each new deployment a unique user_prefix;
+  its workspace is always <user_prefix>_microcloud. Never pass workspace to
+  deploy_microcloud. If a user proposes a workspace-like name, derive a short unique
+  user_prefix (for example lab_microcloud_2 becomes lab-2).
+- Never claim an existing lab must be deleted before creating another unless the
+  deterministic validation result explicitly reports insufficient capacity or an
+  exact resource-name collision.
 - If a user asks for something the pipeline can't do, explain which layer
   handles it, why it's coupled, and suggest the closest achievable alternative.
 
@@ -1029,6 +1036,12 @@ TOOL DECISION RULES:
   normal strict capacity policy. If strict validation later supplies a bounded
   CPU/RAM candidate, the orchestrator asks you for a separate structured
   recommendation. Storage is never overcommitted.
+- If the user explicitly asks whether memory/CPU overcommit is supported, never
+  claim it is unavailable. Explain that new deployments use a strict-first,
+  bounded, AI-gated CPU/RAM fallback with an explicit warning. It is intended for
+  short-lived lab/demo/training workloads; benchmark, database performance, heavy
+  Ceph I/O, and production-like workloads are normally declined. Exact ratios and
+  runtime headroom remain deterministic, and storage cannot be overcommitted.
 
 PLANNING MODE SUMMARY:
 {scenario_catalog}

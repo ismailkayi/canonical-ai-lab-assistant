@@ -54,6 +54,13 @@ def test_deploy_tool_exposes_optional_fully_segregated_networking() -> None:
     )[0]
 
 
+def test_deploy_tool_describes_concurrent_lab_prefixes() -> None:
+    deploy = get_tool_by_name("deploy_microcloud")
+
+    assert "Multiple labs may run concurrently" in deploy["description"]
+    assert "unique" in deploy["parameters"]["properties"]["user_prefix"]["description"].lower()
+
+
 def test_custom_sizing_requires_all_explicit_resource_values() -> None:
     assert validate_tool_parameters(
         "deploy_microcloud",

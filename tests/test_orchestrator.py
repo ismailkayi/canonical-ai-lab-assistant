@@ -88,6 +88,71 @@ def test_mutation_requires_exact_confirmation(config) -> None:
     assert executed[0][1]["nodes"] == 3
 
 
+@pytest.mark.parametrize(
+    "question",
+    (
+        "What about memory overcommit?",
+        "Can you do memory overcommit for the environment?",
+        "CPU over-commit destekleniyor mu?",
+    ),
+)
+def test_overcommit_capability_questions_are_answered_deterministically(config, question) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.ai_engine.chat = lambda _message: pytest.fail("model must not answer policy")
+
+    result = orchestrator._process_user_input(question)
+
+    assert "support bounded CPU/RAM overcommit" in result
+    assert "1.50x CPU" in result
+    assert "1.25x RAM" in result
+    assert "database performance" in result
+    assert "Storage is never overcommitted" in result
+    assert "OVERCOMMIT WARNING" in result
+
+
+def test_concrete_overcommit_deploy_request_reaches_planning(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._refresh_ai_environment_context = lambda: None
+    orchestrator.ai_engine.chat = lambda message: {
+        "action": None,
+        "message": message,
+    }
+
+    result = orchestrator._process_user_input(
+        "Deploy a short-lived training lab with memory overcommit"
+    )
+
+    assert result == "Deploy a short-lived training lab with memory overcommit"
+
+
+def test_deploy_workspace_alias_becomes_unique_canonical_prefix(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator._collect_host_state = lambda force=False: host_state()
+
+    result = orchestrator._run_agent_loop(
+        "Create another lab named lab_microcloud_2",
+        {
+            "action": "deploy_microcloud",
+            "parameters": {
+                "workspace": "lab_microcloud_2",
+                "user_prefix": "lab",
+                "nodes": 3,
+                "sizing_tier": "minimal",
+                "ceph_disks_per_node": 2,
+            },
+            "message": "Create the second lab",
+        },
+    )
+
+    assert result.startswith("__CONFIRM__:")
+    pending = orchestrator.approval_manager.pending
+    assert pending is not None
+    assert pending.parameters["user_prefix"] == "lab-2"
+    assert "workspace" not in pending.parameters
+    assert "Environment: lab-2_microcloud" in result
+
+
 def test_residual_capacity_subtracts_active_allocations(config) -> None:
     orchestrator = LabOrchestrator(config)
     capacity = orchestrator._capacity_snapshot(

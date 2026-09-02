@@ -147,8 +147,9 @@ def get_tool_definitions() -> dict[str, Any]:
                     "network, storage) then Ansible (installs snaps, initializes cluster). "
                     "Both phases always execute together. Call this as soon as the requested "
                     "plan is complete; the orchestrator validates it, displays the exact "
-                    "resolved plan, and obtains approval before anything executes. Do not ask "
-                    "for an informal confirmation first."
+                    "resolved plan, and obtains approval before anything executes. Multiple "
+                    "labs may run concurrently; give every new lab a unique user_prefix. Do "
+                    "not ask for an informal confirmation first."
                 ),
                 "parameters": {
                     "type": "object",
@@ -161,7 +162,7 @@ def get_tool_definitions() -> dict[str, Any]:
                         "user_prefix": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,31}$",
-                            "description": "Short word prefix for resource naming, e.g. 'lab' or 'alice'. Do NOT include 'microcloud' — the system appends that automatically. Default: 'lab'.",
+                            "description": "Unique short prefix for this lab, e.g. 'lab', 'lab-2', or 'alice'. Do NOT include 'microcloud' and do NOT reuse an active lab's prefix; the system appends '_microcloud' automatically. Default: 'lab'.",
                             "default": "lab",
                         },
                         "nodes": {

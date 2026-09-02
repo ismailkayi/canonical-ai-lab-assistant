@@ -150,12 +150,48 @@ class LabOrchestrator:
         if pending_response is not None:
             return pending_response
 
+        overcommit_response = self._overcommit_capability_response(user_message)
+        if overcommit_response is not None:
+            return overcommit_response
+
         # Ground the model in real host capacity + active environments before it
         # reasons. Cached for a short TTL so this is cheap on every turn.
         self._refresh_ai_environment_context()
 
         ai_response = self.ai_engine.chat(user_message)
         return self._run_agent_loop(user_message, ai_response)
+
+    @staticmethod
+    def _overcommit_capability_response(user_message: str) -> str | None:
+        """Answer explicit policy questions without relying on model recall."""
+        text = user_message.strip().lower()
+        if not re.search(r"\b(?:overcommit|over-commit)\b", text):
+            return None
+        if any(
+            action in text
+            for action in (
+                "deploy ",
+                "create ",
+                "provision ",
+                "kur ",
+                "oluştur",
+            )
+        ):
+            return None
+
+        return (
+            "Yes. New lab deployments support bounded CPU/RAM overcommit, including "
+            "memory overcommit. Every plan is checked against strict capacity first. "
+            "Only when the exact plan fails solely on CPU or RAM can the assistant "
+            f"consider up to {CPU_OVERCOMMIT_RATIO:.2f}x CPU and "
+            f"{RAM_OVERCOMMIT_RATIO:.2f}x RAM allocation, while also requiring live "
+            "runtime RAM headroom. A separate AI risk assessment may recommend it for "
+            "short-lived lab, demo, or training use; benchmark, database performance, "
+            "heavy Ceph I/O, and production-like requests are normally declined. "
+            "Storage is never overcommitted. To test the path, request a new lab with "
+            "an exact node count, per-node RAM, unique prefix, and short-lived lab purpose; "
+            "if eligible, you will receive an explicit OVERCOMMIT WARNING before approval."
+        )
 
     def _run_agent_loop(self, user_message: str, ai_response: dict[str, Any]) -> str:
         """Run bounded AI/tool iterations, requiring a validated plan for mutations."""
@@ -193,6 +229,9 @@ class LabOrchestrator:
                     "Unknown or unsupported tool action",
                 )
                 return self._compose_user_facing_response(message, reasoning)
+
+            if action == "deploy_microcloud":
+                parameters = self._normalize_deployment_target(parameters)
 
             is_valid, error_msg = validate_tool_parameters(action, parameters)
             if not is_valid:
@@ -603,6 +642,28 @@ class LabOrchestrator:
     @staticmethod
     def _resource_namespace(workspace: str) -> str:
         return hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:8]
+
+    @staticmethod
+    def _normalize_deployment_target(parameters: dict[str, Any]) -> dict[str, Any]:
+        """Convert a model-supplied workspace alias into a canonical user prefix."""
+        resolved = dict(parameters)
+        workspace = resolved.pop("workspace", None)
+        if not isinstance(workspace, str) or not workspace.strip():
+            return resolved
+
+        tokens = [
+            token
+            for token in re.split(r"[_-]+", workspace.strip())
+            if token and token.lower() != "microcloud"
+        ]
+        prefix = re.sub(r"[^A-Za-z0-9-]+", "-", "-".join(tokens)).strip("-")
+        if not prefix:
+            prefix = "lab"
+        if len(prefix) > 32:
+            digest = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:6]
+            prefix = f"{prefix[:25].rstrip('-')}-{digest}"
+        resolved["user_prefix"] = prefix
+        return resolved
 
     @staticmethod
     def _build_lxd_resource_manifest(
