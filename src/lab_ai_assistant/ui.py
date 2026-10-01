@@ -263,7 +263,8 @@ class ChatUI:
         help_table.add_column("Command", style="bold bright_cyan", min_width=12)
         help_table.add_column("Description")
 
-        help_table.add_row("sizing", "Show sizing tier reference")
+        help_table.add_row("sizing", "Size a three-node lab against live host budgets")
+        help_table.add_row("sizing tiers", "Show workload sizing reference targets")
         help_table.add_row("help", "Show this help")
         help_table.add_row("quit", "Exit the assistant")
 

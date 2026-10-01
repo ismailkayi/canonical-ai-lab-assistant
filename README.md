@@ -290,6 +290,56 @@ Use the workspace name for list, health, scale, add, and delete requests.
 Ceph and optional local disks are LXD block volumes in the selected host storage
 pool.
 
+Sizing is driven by your workload and the host's current allocation budget.
+`small`, `medium`, and `large` describe intent, not fixed deployment sizes.
+The assistant adapts omitted resources to the budget and preserves explicit
+CPU, memory, and disk values. If an explicit plan does not fit, it is rejected
+rather than silently downsized.
+
+In chat, `sizing` shows a live three-node recommendation; `sizing tiers` shows
+reference targets. The recommendation and deployment use the same calculator,
+and Python renders the resource figures directly instead of asking the model
+to recalculate them. Automatic memory sizing starts at 4 GiB per member;
+smaller explicit values remain available for advanced experiments.
+
+Without a dataset target, automatic Ceph sizing uses a modest per-member raw
+storage target, capped at 100 GiB, shared across the requested OSDs. Adding OSDs
+does not automatically multiply that target. Specify a larger dataset or exact
+per-disk sizes when more capacity is needed:
+
+```text
+Recommend a three-node storage lab with two Ceph OSDs per member.
+I expect about 100 GiB of data. Explain the trade-offs.
+```
+
+Dataset-based sizing estimates three replicas and leaves 20% free space inside
+Ceph. The report separates root storage, raw Ceph, local storage, estimated
+Ceph usable capacity, and the suggested dataset budget. These estimates do not
+guarantee application capacity or account for every metadata/workload overhead.
+
+For example, three members with 8 vCPU, 16 GiB RAM, a 60 GiB root disk, and two
+100 GiB Ceph disks **per member** require:
+
+| Resource | Total |
+|---|---:|
+| CPU | 24 vCPU |
+| RAM | 48 GiB |
+| Root storage | 180 GiB |
+| Raw Ceph storage | 600 GiB |
+| Total host storage | 780 GiB |
+| Estimated Ceph usable capacity, before overhead | 200 GiB |
+| Suggested dataset budget with 20% Ceph headroom | 160 GiB |
+
+All virtual OSDs share the underlying host storage pool. More OSDs are useful
+for learning and testing Ceph behavior, but do not guarantee more physical
+IOPS. Replicas inside VMs on one host do not provide host-level fault tolerance.
+
+The direct deployment script's auto-sizing also uses this calculator through
+the assistant Python environment. It preserves partially supplied resource
+values, fills all omitted fields, and fails before provisioning if sizing
+cannot be validated. Bounded RAM fallback assessment is available through chat,
+not the non-interactive sizing helper.
+
 ### Network layouts
 
 #### Standard two-NIC layout
@@ -332,23 +382,51 @@ CIDRs become immutable deployment geometry and are reused during expansion.
 
 ### Host-aware capacity and lab overcommit
 
-The normal policy is conservative and uses allocated VM limits, live host
-memory, a host reserve, and available storage.
+CPU, RAM, and storage have independent policies. No initial policy-selection
+menu is required.
 
-Overcommit is never offered as an initial option. If a fresh lab fails **only**
-because of CPU or RAM allocation, the assistant may evaluate a bounded fallback
-for a short-lived lab, demo, or training workload:
+**CPU:** active LXD vCPU allocation, including the proposed resource delta,
+may reach **3:1 of the host's accessible logical CPU count** (`nproc`). For
+example, 32 logical CPUs allow at most 96 allocated vCPU; if 24 are already
+allocated, the remaining allocation budget is 72 vCPU. This is a ceiling, not
+an automatic sizing target or a throughput guarantee. The same rule applies
+to fresh deployments, add-node operations, and scaling. An AI assessment does
+not veto a CPU-only overcommit plan.
 
-- allocated vCPU must remain at or below 1.50x physical CPU
-- allocated RAM must remain at or below 1.25x physical RAM
-- every LXD instance in every project must have readable CPU and RAM limits
-- live `MemAvailable` must retain a deterministic minimum
-- storage is never overcommitted
+**RAM:** the normal budget keeps a host reserve of the greater of 20% of
+measured total memory or 4 GiB, and considers both active VM limits and live
+`MemAvailable`. If a plan fails only the RAM budget, the assistant may assess
+a separate bounded lab fallback. Total active RAM allocation must remain at
+or below **1.25:1 of measured host RAM**, and `MemAvailable` must be at least
+the greater of 8 GiB or one quarter of the new RAM request plus 4 GiB. This
+check reduces risk; it cannot guarantee that later workload peaks will avoid
+swapping or OOM.
 
-If the AI recommends the fallback, the approval panel shows the exact current
-allocation, after-plan allocation, ratios, and risks. Reply `yes` only after
-reviewing that warning. Capacity is measured again immediately before
-execution.
+**Storage:** root disks, every Ceph OSD, and optional local disks are included
+in the total. The selected storage pool keeps a 20 GiB host reserve. Storage
+requests cannot exceed its measured free-space budget. The selected pool is
+bound to the approved plan and passed explicitly to provisioning; unavailable
+pool metrics block sizing rather than using an unrelated filesystem's free space.
+Existing thin-provisioned volumes can still grow later, so monitor pool usage
+and retain headroom rather than treating the check as a future disk-space guarantee.
+
+Active and frozen instances in **all LXD projects**, including instances not
+created by this assistant, must have readable CPU and RAM limits. Unreadable
+active allocations block planning. Stopped instances are excluded from active
+CPU/RAM commitments and their known potential allocations are shown separately.
+Unknown limits on a stopped build instance do not block a new lab. Its disks
+still occupy storage, and restarting it changes the active budget: recheck
+capacity before starting stopped instances alongside a new lab.
+
+The approval panel shows exact current and after-plan allocations, remaining
+budgets, and warnings for CPU contention or a RAM fallback. Reply `yes` only
+after reviewing the plan; `no` cancels it. Capacity and allocation visibility
+are measured again under the infrastructure lock immediately before execution.
+Changed overcommit commitments require a new plan and approval.
+
+CPU-overcommitted labs can run benchmarks, but shared CPU, storage, and virtual
+networking affect the results. Stop competing labs when reproducible comparisons
+matter; this setup is not a substitute for isolated hardware performance tests.
 
 ### LXD name-collision protection
 

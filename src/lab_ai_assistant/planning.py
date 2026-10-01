@@ -23,11 +23,11 @@ MUTATING_ACTIONS = frozenset(
 AFFIRMATIVE_RESPONSES = frozenset({"yes", "y", "confirm", "proceed", "evet", "e"})
 NEGATIVE_RESPONSES = frozenset({"no", "n", "cancel", "abort", "hayır", "hayir", "iptal"})
 
-STANDARD_NETWORK_MODE = "standard-2nic"
-SEGREGATED_NETWORK_MODE = "fully-segregated-4nic"
-STRICT_CAPACITY_POLICY = "strict"
-LAB_OVERCOMMIT_POLICY = "lab-overcommit"
-CPU_OVERCOMMIT_RATIO = 1.5
+STANDARD_NETWORK_MODE: Literal["standard-2nic"] = "standard-2nic"
+SEGREGATED_NETWORK_MODE: Literal["fully-segregated-4nic"] = "fully-segregated-4nic"
+STRICT_CAPACITY_POLICY: Literal["strict"] = "strict"
+LAB_OVERCOMMIT_POLICY: Literal["lab-overcommit"] = "lab-overcommit"
+CPU_OVERCOMMIT_RATIO = 3.0
 RAM_OVERCOMMIT_RATIO = 1.25
 
 
@@ -48,6 +48,10 @@ class CapacitySnapshot(BaseModel):
     ram_allocated_mb: int = Field(default=0, ge=0)
     runtime_ram_available_mb: int = Field(default=0, ge=0)
     allocations_complete: bool = True
+    stopped_instances: int = Field(default=0, ge=0)
+    stopped_cpu_allocated: int = Field(default=0, ge=0)
+    stopped_ram_allocated_mb: int = Field(default=0, ge=0)
+    stopped_allocations_complete: bool = True
 
 
 class LXDResourceManifest(BaseModel):
@@ -114,6 +118,7 @@ class TopologySpec(BaseModel):
             ("ovn_underlay_cidr", self.ovn_underlay_cidr),
             ("ceph_network_cidr", self.ceph_network_cidr),
         ):
+            assert value is not None
             try:
                 network = ipaddress.ip_network(value, strict=True)
             except ValueError as exc:
@@ -141,11 +146,47 @@ class TopologySpec(BaseModel):
         return self.nodes * self.node_memory_mb
 
     @property
+    def total_root_gib(self) -> int:
+        return self.nodes * self.root_disk_gib
+
+    @property
+    def total_ceph_gib(self) -> int:
+        return self.nodes * self.ceph_disks_per_node * self.ceph_disk_gib
+
+    @property
+    def total_local_gib(self) -> int:
+        return self.nodes * self.local_disk_gib
+
+    @property
+    def estimated_ceph_usable_gib(self) -> int:
+        return self.total_ceph_gib // 3
+
+    @property
+    def ceph_dataset_budget_gib(self) -> int:
+        """Leave 20% Ceph headroom after estimating three-replica capacity."""
+        return self.total_ceph_gib * 4 // 15
+
+    @property
     def total_storage_gib(self) -> int:
-        per_node = (
-            self.root_disk_gib + self.ceph_disks_per_node * self.ceph_disk_gib + self.local_disk_gib
+        return self.total_root_gib + self.total_ceph_gib + self.total_local_gib
+
+    def resource_summary(self, node_label: str = "Nodes") -> str:
+        """Render the same exact resource figures for advice and approval."""
+        return (
+            f"{node_label}: {self.nodes}\n"
+            f"Per node: {self.node_cpu} vCPU / {self.node_memory_mb / 1024:g} GiB RAM "
+            f"({self.node_memory_mb} MiB) / {self.root_disk_gib} GiB root\n"
+            f"Storage per node: {self.ceph_disks_per_node} x {self.ceph_disk_gib} GiB Ceph / "
+            f"{self.local_disk_gib} GiB local\n"
+            f"Totals: {self.total_cpu} vCPU / {self.total_ram_mb / 1024:g} GiB RAM / "
+            f"{self.total_storage_gib} GiB storage\n"
+            f"Storage totals: {self.total_root_gib} GiB root / "
+            f"{self.total_ceph_gib} GiB Ceph raw / {self.total_local_gib} GiB local\n"
+            f"Estimated Ceph usable: {self.estimated_ceph_usable_gib} GiB "
+            "(3 replicas, before metadata overhead)\n"
+            f"Suggested dataset budget: {self.ceph_dataset_budget_gib} GiB "
+            "(20% Ceph free-space headroom)"
         )
-        return self.nodes * per_node
 
 
 class PlanValidation(BaseModel):
@@ -270,13 +311,15 @@ class PlanValidator:
             errors.append(
                 "Insufficient CPU: "
                 f"plan requires {topology.total_cpu} vCPU, "
-                f"but {capacity.cpu_available} vCPU is safely available."
+                f"but the lab allocation budget has {capacity.cpu_available} vCPU available."
             )
         if topology.total_ram_mb > capacity.ram_available_mb:
             errors.append(
                 "Insufficient RAM: "
-                f"plan requires {topology.total_ram_mb // 1024} GiB, "
-                f"but {capacity.ram_available_mb // 1024} GiB is safely available."
+                f"plan requires {topology.total_ram_mb} MiB "
+                f"({topology.total_ram_mb / 1024:g} GiB), "
+                f"but {capacity.ram_available_mb} MiB "
+                f"({capacity.ram_available_mb / 1024:g} GiB) is safely available."
             )
         if topology.total_storage_gib > capacity.storage_available_gib:
             errors.append(

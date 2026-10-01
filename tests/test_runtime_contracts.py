@@ -1,4 +1,8 @@
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,3 +123,121 @@ def test_fresh_deploy_preflights_every_default_project_resource_name() -> None:
     assert "SPEC_RESOURCE_NAMESPACE" in add_node
     assert "resource_namespace" in cleanup
     assert "using a destroy-only fallback" in cleanup
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_shell_auto_sizing_uses_shared_helper_and_preserves_supplied_fields(
+    tmp_path, succeeds
+) -> None:
+    script = (REPO_ROOT / "scripts" / "deploy_microcloud.sh").read_text()
+    start = script.index("auto_size_nodes() {")
+    end = script.index(
+        "\n# -----------------------------------------------------------------------", start
+    )
+    auto_size_function = script[start:end]
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" > "$CAPTURE_FILE"\n'
+        + ("printf '6 16384 60 100\\n'\n" if succeeds else "exit 1\n")
+    )
+    python.chmod(0o755)
+    captured_args = tmp_path / "arguments"
+    environment = {
+        **os.environ,
+        "REPO_ROOT": str(tmp_path),
+        "CAPTURE_FILE": str(captured_args),
+        "NODES": "3",
+        "NODE_CPU": "6",
+        "NODE_MEMORY_MB": "",
+        "ROOT_DISK_GIB": "",
+        "CEPH_DISK_GIB": "",
+        "CEPH_DISKS_PER_NODE": "2",
+        "LOCAL_DISK_GIB": "10",
+        "SIZING_TIER": "medium",
+        "WORKLOAD_DESCRIPTION": "storage benchmark training",
+        "DATASET_SIZE_GIB": "100",
+        "TF_VAR_lxd_storage_pool": "fastpool",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -eu\n"
+            "log_error() { printf '%s\\n' \"$1\" >&2; }\n"
+            + auto_size_function
+            + "\nauto_size_nodes\n"
+            'printf \'%s %s %s %s\\n\' "$NODE_CPU" "$NODE_MEMORY_MB" "$ROOT_DISK_GIB" "$CEPH_DISK_GIB"\n',
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    arguments = captured_args.read_text().splitlines()
+    assert arguments[:3] == ["-m", "lab_ai_assistant.cli", "resolve-sizing"]
+    assert "--node-cpu=6" in arguments
+    assert "--ceph-disks-per-node=2" in arguments
+    assert "--local-disk-gib=10" in arguments
+    assert "--dataset-size-gib=100" in arguments
+    assert "--workload-description=storage benchmark training" in arguments
+    assert "--storage-pool=fastpool" in arguments
+    assert "usable_disk=120" not in script
+    if succeeds:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "6 16384 60 100"
+    else:
+        assert result.returncode == 1
+        assert "Could not resolve safe sizing" in result.stderr
+
+
+@pytest.mark.parametrize("pool_exists", [True, False])
+def test_shell_deploy_cannot_switch_away_from_approved_pool(tmp_path, pool_exists) -> None:
+    script = (REPO_ROOT / "scripts" / "deploy_microcloud.sh").read_text()
+    start = script.index("detect_lxd_defaults() {")
+    end = script.index("\nvalidate_plane_subnet_availability()", start)
+    detect_function = script[start:end]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    lxc = bin_dir / "lxc"
+    lxc.write_text(
+        "#!/bin/sh\n"
+        'case "$1 $2" in\n'
+        "  'network list') printf 'lxdbr0\\n';;\n"
+        "  'network show') printf 'type: bridge\\n';;\n"
+        "  'network get') printf '10.1.1.1/24\\n';;\n"
+        f"  'storage show') exit {0 if pool_exists else 1};;\n"
+        "esac\n"
+    )
+    lxc.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -eu\n"
+            "log_error() { printf '%s\\n' \"$1\" >&2; }\n"
+            "print_kv() { :; }\n"
+            + detect_function
+            + "\ndetect_lxd_defaults\nprintf '%s\\n' \"$TF_VAR_lxd_storage_pool\"\n",
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "STORAGE_POOL": "approved-pool",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert "--storage-pool=*)" in script
+    if pool_exists:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "approved-pool"
+    else:
+        assert result.returncode == 1
+        assert "refusing to select another pool" in result.stderr

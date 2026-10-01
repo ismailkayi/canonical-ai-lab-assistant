@@ -10,6 +10,36 @@ from typing import Any
 
 def get_tool_definitions() -> dict[str, Any]:
     """Return the full tool catalog used by the AI assistant."""
+    resource_properties = {
+        "node_cpu": {"type": "integer", "minimum": 1},
+        "node_memory_mb": {"type": "integer", "minimum": 1024},
+        "root_disk_gib": {"type": "integer", "minimum": 20},
+        "ceph_disk_gib": {"type": "integer", "minimum": 10},
+        "ceph_disks_per_node": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": (
+                "Virtual Ceph OSD disks per node, default 1. Multiple OSDs are useful "
+                "for learning; they share the host pool and do not guarantee higher physical IOPS."
+            ),
+            "default": 1,
+        },
+        "local_disk_gib": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Local ZFS disk per node in GiB: 0 disables it; otherwise use >= 10.",
+            "default": 0,
+        },
+        "dataset_size_gib": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Optional expected Ceph dataset size in GiB. Automatic disk sizing accounts "
+                "for three replicas and 20% Ceph free-space headroom."
+            ),
+        },
+    }
     return {
         "tools": [
             {
@@ -99,6 +129,9 @@ def get_tool_definitions() -> dict[str, Any]:
                         "node_ram_gb": {"type": "integer", "minimum": 1},
                         "root_disk_gb": {"type": "integer", "minimum": 20},
                         "ceph_disk_gb": {"type": "integer", "minimum": 10},
+                        "ceph_disks_per_node": resource_properties["ceph_disks_per_node"],
+                        "local_disk_gib": resource_properties["local_disk_gib"],
+                        "dataset_size_gib": resource_properties["dataset_size_gib"],
                         "network_mode": {
                             "type": "string",
                             "enum": ["standard-2nic", "fully-segregated-4nic"],
@@ -124,7 +157,10 @@ def get_tool_definitions() -> dict[str, Any]:
             {
                 "name": "get_sizing_recommendation",
                 "description": (
-                    "Return per-node and total resource recommendation for a given workload."
+                    "Return exact host-aware per-node resources, full storage totals, and "
+                    "remaining budgets. Choose a workload intent and explain trade-offs; "
+                    "the deterministic layer calculates and displays all numbers. Preserve "
+                    "explicit user resources and include all OSDs/local disks."
                 ),
                 "parameters": {
                     "type": "object",
@@ -134,8 +170,21 @@ def get_tool_definitions() -> dict[str, Any]:
                         "workload_description": {"type": "string"},
                         "tier": {
                             "type": "string",
-                            "enum": ["minimal", "small", "medium", "large"],
+                            "enum": [
+                                "minimal",
+                                "small",
+                                "medium",
+                                "large",
+                                "conservative",
+                                "balanced",
+                                "performance",
+                            ],
+                            "description": "Workload intent, not a promise of fixed resource values.",
                         },
+                        **resource_properties,
+                        "reasoning": {"type": "string"},
+                        "trade_offs": {"type": "string"},
+                        "alternative": {"type": "string"},
                     },
                     "required": [],
                 },
@@ -183,28 +232,10 @@ def get_tool_definitions() -> dict[str, Any]:
                                 "custom",
                             ],
                         },
-                        "node_cpu": {"type": "integer", "minimum": 1},
-                        "node_memory_mb": {"type": "integer", "minimum": 1024},
-                        "root_disk_gib": {"type": "integer", "minimum": 20},
-                        "ceph_disk_gib": {"type": "integer", "minimum": 10},
-                        "ceph_disks_per_node": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 8,
-                            "description": (
-                                "Number of Ceph OSD disks per node. Default: 1. "
-                                "Recommend 2 for higher storage throughput or larger clusters."
-                            ),
-                            "default": 1,
-                        },
-                        "local_disk_gib": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": (
-                                "Size in GiB of a local ZFS disk per node. Default: 0 (disabled). "
-                                "Set >= 10 to add fast local storage alongside distributed Ceph."
-                            ),
-                            "default": 0,
+                        **resource_properties,
+                        "workload_description": {
+                            "type": "string",
+                            "description": "Lab purpose used to choose intent when sizing_tier is omitted.",
                         },
                         "network_mode": {
                             "type": "string",

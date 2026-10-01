@@ -538,3 +538,41 @@ def test_overcommit_assessment_accepts_only_typed_json(config) -> None:
     }
     result = engine.assess_lab_overcommit("training lab", "bounded evidence")
     assert result["recommend"] is False
+
+
+def test_sizing_prompt_uses_tools_instead_of_fixed_tier_arithmetic(config) -> None:
+    prompt = AIEngine(config)._get_default_system_prompt()
+
+    assert "Python renders the authoritative per-node table" in prompt
+    assert "call get_sizing_recommendation" in prompt
+    assert "Lab CPU allocation up to 3:1" in prompt
+    assert "Do not veto it solely because the user wants a benchmark" in prompt
+    assert "4 vCPU / 8 GB RAM / 40 GB root" not in prompt
+    assert "Shall I proceed?" not in prompt
+
+
+def test_ram_assessment_does_not_veto_lab_cpu_policy(config) -> None:
+    engine = AIEngine(config)
+    captured = {}
+
+    def assessment(messages, include_tools=True):
+        captured["prompt"] = messages[0]["content"]
+        return {"recommend": True, "rationale": "Peak memory contention is unlikely."}
+
+    engine._call_inference = assessment
+    engine.assess_lab_overcommit("storage benchmark lab", "validated RAM evidence")
+
+    assert "RAM reservation fallback" in captured["prompt"]
+    assert "do not veto CPU overcommit" in captured["prompt"]
+    assert "Assess simultaneous peak memory risk" in captured["prompt"]
+
+
+def test_observations_are_retained_without_a_native_tool_call(config) -> None:
+    engine = AIEngine(config)
+    engine.record_tool_observation("get_sizing_recommendation", "Totals: 24 vCPU")
+
+    assert engine.conversation_history[-1]["role"] == "user"
+    assert "Totals: 24 vCPU" in engine.conversation_history[-1]["content"]
+    count = len(engine.conversation_history)
+    engine.cancel_pending_tool_call("unknown", "Normal final response")
+    assert len(engine.conversation_history) == count
