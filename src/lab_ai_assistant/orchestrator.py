@@ -177,8 +177,15 @@ class LabOrchestrator:
                 "deploy ",
                 "create ",
                 "provision ",
+                "scale ",
+                "expand ",
+                "add node",
+                "add a node",
+                "add more node",
                 "kur ",
                 "oluştur",
+                "ölçekle",
+                "genişlet",
             )
         ):
             return None

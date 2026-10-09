@@ -113,7 +113,16 @@ def test_overcommit_capability_questions_are_answered_deterministically(config, 
     assert "OVERCOMMIT WARNING" in result
 
 
-def test_concrete_overcommit_deploy_request_reaches_planning(config) -> None:
+@pytest.mark.parametrize(
+    "user_request",
+    (
+        "Deploy a short-lived training lab with memory overcommit",
+        "Scale the training lab to 4 nodes with memory overcommit",
+        "Add a node to the training lab with memory overcommit",
+        "Expand the training lab using CPU overcommit",
+    ),
+)
+def test_concrete_overcommit_lifecycle_request_reaches_planning(config, user_request) -> None:
     orchestrator = LabOrchestrator(config)
     orchestrator._refresh_ai_environment_context = lambda: None
     orchestrator.ai_engine.chat = lambda message: {
@@ -121,11 +130,9 @@ def test_concrete_overcommit_deploy_request_reaches_planning(config) -> None:
         "message": message,
     }
 
-    result = orchestrator._process_user_input(
-        "Deploy a short-lived training lab with memory overcommit"
-    )
+    result = orchestrator._process_user_input(user_request)
 
-    assert result == "Deploy a short-lived training lab with memory overcommit"
+    assert result == user_request
 
 
 def test_deploy_workspace_alias_becomes_unique_canonical_prefix(config) -> None:
