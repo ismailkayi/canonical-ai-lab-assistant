@@ -1,5 +1,5 @@
 name: lab-ai
-version: 0.1.0-prototype.4
+version: 0.1.0-prototype.5
 summary: AI-assisted Canonical infrastructure lab automation
 description: |
   A classic-confinement feasibility prototype of the Canonical AI Lab
@@ -7,6 +7,7 @@ description: |
 base: core24
 grade: devel
 confinement: classic
+license: GPL-3.0-or-later
 
 platforms:
   amd64:
@@ -74,6 +75,7 @@ parts:
     override-build: |
       mkdir -p "$CRAFT_PART_INSTALL/scripts"
       cp -a "$CRAFT_PART_SRC/." "$CRAFT_PART_INSTALL/scripts/"
+      chmod 0755 "$CRAFT_PART_INSTALL/scripts/"*.sh
 
   opentofu:
     plugin: dump

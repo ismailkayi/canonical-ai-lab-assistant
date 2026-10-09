@@ -34,6 +34,9 @@ ROOT_DISK_GIB=""
 CEPH_DISK_GIB=""
 CEPH_DISKS_PER_NODE=1
 LOCAL_DISK_GIB=0
+WORKLOAD_DESCRIPTION=""
+DATASET_SIZE_GIB=""
+STORAGE_POOL=""
 NETWORK_MODE="standard-2nic"
 OVN_UNDERLAY_CIDR=""
 CEPH_NETWORK_CIDR=""
@@ -59,6 +62,9 @@ for arg in "$@"; do
         --ceph-disk-gib=*)  CEPH_DISK_GIB="${arg#*=}" ;;
         --ceph-disks-per-node=*) CEPH_DISKS_PER_NODE="${arg#*=}" ;;
         --local-disk-gib=*)  LOCAL_DISK_GIB="${arg#*=}" ;;
+        --workload-description=*) WORKLOAD_DESCRIPTION="${arg#*=}" ;;
+        --dataset-size-gib=*) DATASET_SIZE_GIB="${arg#*=}" ;;
+        --storage-pool=*)    STORAGE_POOL="${arg#*=}" ;;
         --network-mode=*)    NETWORK_MODE="${arg#*=}" ;;
         --ovn-underlay-cidr=*) OVN_UNDERLAY_CIDR="${arg#*=}" ;;
         --ceph-network-cidr=*) CEPH_NETWORK_CIDR="${arg#*=}" ;;
@@ -186,7 +192,13 @@ detect_lxd_defaults() {
         detected_network="labbr0"
     fi
 
-    if lxc storage show default >/dev/null 2>&1; then
+    if [[ -n "${STORAGE_POOL}" ]]; then
+        if ! lxc storage show "${STORAGE_POOL}" >/dev/null 2>&1; then
+            log_error "Requested storage pool '${STORAGE_POOL}' is unavailable; refusing to select another pool."
+            exit 1
+        fi
+        detected_pool="${STORAGE_POOL}"
+    elif lxc storage show default >/dev/null 2>&1; then
         detected_pool="default"
     else
         detected_pool=$(lxc storage list --format csv | awk -F',' 'NR==1 {print $1}')
@@ -245,122 +257,39 @@ PY
 }
 
 # -----------------------------------------------------------------------
-# Auto-sizing (ported from orchestrate.sh configure_microcloud_sizing)
+# Auto-sizing uses the same helper as chat recommendations and deployment plans.
 # -----------------------------------------------------------------------
-pick_floor_tier() {
-    local limit="$1"; shift; local selected="$1"
-    for tier in "$@"; do
-        if (( tier <= limit )); then
-            selected="${tier}"
-        else
-            break
-        fi
-    done
-    echo "${selected}"
-}
-pick_previous_tier() {
-    local current="$1"; shift; local previous="$1"
-    for tier in "$@"; do
-        if (( tier >= current )); then
-            break
-        fi
-        previous="${tier}"
-    done
-    echo "${previous}"
-}
-pick_next_tier() {
-    local current="$1" limit="$2"; shift 2
-    for tier in "$@"; do
-        if (( tier > current && tier <= limit )); then
-            echo "${tier}"
-            return
-        fi
-    done
-    echo "${current}"
-}
-round_down_even() {
-    local v="$1" min="${2:-2}"
-    if (( v < min )); then
-        echo "${min}"
-        return
-    fi
-    if (( v % 2 != 0 )); then
-        v=$(( v - 1 ))
-    fi
-    echo "${v}"
-}
-
-get_storage_available_gib() {
-    local pool="${TF_VAR_lxd_storage_pool:-default}"
-    local info line gib num unit
-    info=$(lxc storage info "${pool}" 2>/dev/null || true)
-    line=$(echo "${info}" | awk -F': ' '/Space available:/ {print $2; exit}')
-    if [[ -n "${line}" ]]; then
-        num=$(echo "${line}" | grep -Eo '[0-9]+([.][0-9]+)?' | head -1)
-        unit=$(echo "${line}" | grep -Eo '[A-Za-z]+' | tail -1)
-        gib=$(awk -v n="${num}" -v u="${unit}" 'BEGIN {
-            if (u=="TiB") print int(n*1024)
-            else if (u=="GiB") print int(n)
-            else if (u=="MiB") print int(n/1024)
-            else print ""
-        }')
-        [[ -n "${gib}" ]] && echo "${gib}" && return
-    fi
-    df -BG . 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$4); print $4}' || echo "200"
-}
-
 auto_size_nodes() {
-    local cpu_total ram_mb storage_gib host_ram_gb
-    cpu_total=$(nproc 2>/dev/null || echo 4)
-    ram_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    storage_gib=$(get_storage_available_gib)
-    host_ram_gb=$(( (ram_mb + 1023) / 1024 ))
-
-    local reserve_cpu=$(( cpu_total / 5 ))
-    if (( reserve_cpu < 2 )); then reserve_cpu=2; fi
-    local usable_cpu=$(( cpu_total - reserve_cpu ))
-    if (( usable_cpu < NODES )); then usable_cpu=${NODES}; fi
-
-    local reserve_mb=$(( ram_mb / 5 ))
-    if (( reserve_mb < 4096 )); then reserve_mb=4096; fi
-    local usable_mb=$(( ram_mb - reserve_mb ))
-    if (( usable_mb < NODES * 4096 )); then usable_mb=$(( NODES * 4096 )); fi
-    local usable_ram_gb=$(( usable_mb / 1024 ))
-
-    local usable_disk=$(( storage_gib - 20 ))
-    if (( usable_disk < 120 )); then usable_disk=120; fi
-
-    local bal_cpu; bal_cpu=$(round_down_even $(( usable_cpu / NODES )) 2)
-    local bal_ram; bal_ram=$(pick_floor_tier $(( usable_ram_gb / NODES )) 8 12 16 24 32 48 64 96 128)
-    local raw_ceph=$(( (usable_disk / NODES) - 40 ))
-    if (( raw_ceph < 20 )); then raw_ceph=20; fi
-    local bal_ceph; bal_ceph=$(pick_floor_tier "${raw_ceph}" 20 50 100 150 200 250 300 400 500)
-
-    case "${SIZING_TIER:-balanced}" in
-        minimal|conservative)
-            NODE_CPU=$(round_down_even $(( bal_cpu - 2 )) 2)
-            NODE_MEMORY_MB=$(( $(pick_previous_tier "${bal_ram}" 4 8 12 16 24 32 48 64 96 128) * 1024 ))
-            ROOT_DISK_GIB=30
-            CEPH_DISK_GIB=$(pick_previous_tier "${bal_ceph}" 20 50 100 150 200 250 300 400 500)
-            ;;
-        performance)
-            NODE_CPU=$(( bal_cpu + 2 ))
-            NODE_MEMORY_MB=$(( $(pick_next_tier "${bal_ram}" "$(pick_floor_tier $(( host_ram_gb / NODES )) 8 12 16 24 32 48 64 96 128)" 8 12 16 24 32 48 64 96 128) * 1024 ))
-            ROOT_DISK_GIB=50
-            CEPH_DISK_GIB=$(pick_next_tier "${bal_ceph}" "$(pick_floor_tier $(( storage_gib / NODES - 50 )) 20 50 100 150 200 250 300 400 500)" 20 50 100 150 200 250 300 400 500)
-            ;;
-        *)  # balanced / small / medium / large
-            NODE_CPU="${bal_cpu}"
-            NODE_MEMORY_MB=$(( bal_ram * 1024 ))
-            ROOT_DISK_GIB=40
-            CEPH_DISK_GIB="${bal_ceph}"
-            ;;
-    esac
-
-    if (( NODE_CPU < 1 )); then NODE_CPU=1; fi
-    if (( NODE_MEMORY_MB < 1024 )); then NODE_MEMORY_MB=1024; fi
-    if (( ROOT_DISK_GIB < 20 )); then ROOT_DISK_GIB=20; fi
-    if (( CEPH_DISK_GIB < 10 )); then CEPH_DISK_GIB=10; fi
+    local python_cmd="${REPO_ROOT}/.venv/bin/python"
+    if [[ -n "${SNAP:-}" && "${REPO_ROOT}" == "${SNAP}" ]]; then
+        python_cmd="${SNAP}/bin/python3"
+    elif [[ ! -x "${python_cmd}" ]]; then
+        python_cmd=python3
+    fi
+    local args=(
+        -m lab_ai_assistant.cli resolve-sizing
+        "--nodes=${NODES}"
+        "--ceph-disks-per-node=${CEPH_DISKS_PER_NODE}"
+        "--local-disk-gib=${LOCAL_DISK_GIB}"
+        "--storage-pool=${TF_VAR_lxd_storage_pool:-default}"
+        "--workload-description=${WORKLOAD_DESCRIPTION}"
+    )
+    [[ -z "${SIZING_TIER}" ]] || args+=("--sizing-tier=${SIZING_TIER}")
+    [[ -z "${NODE_CPU}" ]] || args+=("--node-cpu=${NODE_CPU}")
+    [[ -z "${NODE_MEMORY_MB}" ]] || args+=("--node-memory-mb=${NODE_MEMORY_MB}")
+    [[ -z "${ROOT_DISK_GIB}" ]] || args+=("--root-disk-gib=${ROOT_DISK_GIB}")
+    [[ -z "${CEPH_DISK_GIB}" ]] || args+=("--ceph-disk-gib=${CEPH_DISK_GIB}")
+    [[ -z "${DATASET_SIZE_GIB}" ]] || args+=("--dataset-size-gib=${DATASET_SIZE_GIB}")
+    local module_path="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+    if [[ -n "${SNAP:-}" && "${REPO_ROOT}" == "${SNAP}" ]]; then
+        module_path="${SNAP}/lib/python3.12/site-packages:${SNAP}/usr/lib/python3/dist-packages"
+    fi
+    local sizing
+    if ! sizing=$(PYTHONPATH="${module_path}" "${python_cmd}" "${args[@]}"); then
+        log_error "Could not resolve safe sizing. Check host capacity and the assistant Python environment."
+        return 1
+    fi
+    read -r NODE_CPU NODE_MEMORY_MB ROOT_DISK_GIB CEPH_DISK_GIB <<< "${sizing}"
 }
 
 # -----------------------------------------------------------------------
@@ -408,7 +337,8 @@ print_section "MicroCloud Deployment — scenario: ${SCENARIO}"
 detect_lxd_defaults
 validate_plane_subnet_availability
 
-if [[ -z "${NODE_CPU}" || -z "${NODE_MEMORY_MB}" ]]; then
+if [[ -z "${NODE_CPU}" || -z "${NODE_MEMORY_MB}" \
+        || -z "${ROOT_DISK_GIB}" || -z "${CEPH_DISK_GIB}" || -n "${DATASET_SIZE_GIB}" ]]; then
     log_info "Auto-sizing nodes (tier: ${SIZING_TIER:-balanced}) ..."
     auto_size_nodes
 fi

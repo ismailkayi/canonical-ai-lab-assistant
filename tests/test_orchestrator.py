@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import os
 import time
 
@@ -25,6 +26,7 @@ def host_state():
         "storage_available_gib": 1000,
         "consumed_cpu": 0,
         "consumed_ram_gb": 0,
+        "consumed_ram_mb": 0,
         "environments": [],
     }
 
@@ -103,9 +105,10 @@ def test_overcommit_capability_questions_are_answered_deterministically(config, 
     result = orchestrator._process_user_input(question)
 
     assert "support bounded CPU/RAM overcommit" in result
-    assert "1.50x CPU" in result
-    assert "1.25x RAM" in result
-    assert "database performance" in result
+    assert "3.00x host logical CPUs" in result
+    assert "1.25x physical RAM" in result
+    assert "CPU overcommit does not need an AI assessment" in result
+    assert "not rejected solely for benchmarks" in result
     assert "Storage is never overcommitted" in result
     assert "OVERCOMMIT WARNING" in result
 
@@ -162,11 +165,11 @@ def test_residual_capacity_subtracts_active_allocations(config) -> None:
             "ram_available_mb": 4 * 1024,
             "storage_available_gib": 500,
             "consumed_cpu": 30,
-            "consumed_ram_gb": 60,
+            "consumed_ram_mb": 60 * 1024,
         }
     )
 
-    assert capacity.cpu_available == 0
+    assert capacity.cpu_available == 66
     assert capacity.ram_available_mb == 0
     assert capacity.storage_available_gib == 480
 
@@ -205,7 +208,7 @@ def test_fresh_deploy_allows_empty_stale_workspace(config) -> None:
     assert topology.nodes == 3
 
 
-def test_explicit_small_tier_with_two_osds_uses_promised_sizes(config) -> None:
+def test_explicit_small_resources_with_two_osds_remain_unchanged(config) -> None:
     orchestrator = LabOrchestrator(config)
     orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
     capacity = CapacitySnapshot(
@@ -219,6 +222,10 @@ def test_explicit_small_tier_with_two_osds_uses_promised_sizes(config) -> None:
             "user_prefix": "live-migration-lab",
             "nodes": 3,
             "sizing_tier": "small",
+            "node_cpu": 4,
+            "node_memory_mb": 8192,
+            "root_disk_gib": 40,
+            "ceph_disk_gib": 50,
             "ceph_disks_per_node": 2,
             "local_disk_gib": 0,
             "network_mode": "standard-2nic",
@@ -473,7 +480,7 @@ def test_host_state_prefers_exact_default_storage_pool(config) -> None:
     selected_pools = []
     orchestrator._run_host_cmd = fake_host_command
     orchestrator._get_pool_available_gib = lambda pool: selected_pools.append(pool) or 500
-    orchestrator._collect_environment_usage = lambda: ([], 0, 0, True)
+    orchestrator._collect_environment_usage = lambda: ([], 0, 0, True, {})
 
     state = orchestrator._collect_host_state(force=True)
 
@@ -600,8 +607,8 @@ def test_explicit_tier_is_not_overridden_by_workload_text(config) -> None:
     orchestrator = LabOrchestrator(config)
 
     # "dev" in the workload used to silently downgrade an explicit "large".
-    assert orchestrator._tier_to_profile("large", "dev sandbox") == "performance"
-    assert orchestrator._tier_to_profile("medium", "poc") == "balanced"
+    assert orchestrator._tier_to_profile("large", "dev sandbox") == "large"
+    assert orchestrator._tier_to_profile("medium", "poc") == "medium"
     assert orchestrator._tier_to_profile("minimal", "production HA") == "conservative"
 
 
@@ -617,6 +624,8 @@ def test_every_advertised_tier_maps_to_a_profile(config) -> None:
             "conservative",
             "balanced",
             "performance",
+            "medium",
+            "large",
         }
 
 
@@ -918,7 +927,7 @@ def test_custom_topology_proposal_keeps_the_network_choice(config) -> None:
         },
     )
 
-    assert "Network layout   : fully-segregated-4nic" in result
+    assert "Network layout: fully-segregated-4nic" in result
     assert "OVN underlay / Ceph public+internal" in result
     assert "collision-checked in the exact deploy plan" in result
 
@@ -1028,7 +1037,7 @@ def lab_overcommit_plan(
             ceph_disks_per_node=1,
         ),
         capacity=CapacitySnapshot(
-            cpu_available=2,
+            cpu_available=72,
             ram_available_mb=8 * 1024,
             storage_available_gib=storage_available_gib,
             cpu_total=32,
@@ -1041,7 +1050,7 @@ def lab_overcommit_plan(
     )
 
 
-def test_cpu_and_ram_shortage_can_build_bounded_lab_overcommit(config) -> None:
+def test_ram_shortage_can_build_bounded_lab_overcommit(config) -> None:
     orchestrator = LabOrchestrator(config)
     strict = lab_overcommit_plan()
     validation = orchestrator.plan_validator.validate(strict)
@@ -1050,7 +1059,7 @@ def test_cpu_and_ram_shortage_can_build_bounded_lab_overcommit(config) -> None:
 
     assert candidate is not None
     assert candidate.capacity.policy == LAB_OVERCOMMIT_POLICY
-    assert candidate.capacity.cpu_available == 24  # 32 * 1.5 - 24
+    assert candidate.capacity.cpu_available == 72
     assert candidate.capacity.ram_available_mb == int(58 * 1024 * 1.25) - 50 * 1024
     assert candidate.topology == strict.topology
     assert candidate.parameters == strict.parameters
@@ -1092,10 +1101,16 @@ def test_ai_recommendation_creates_explicit_overcommit_confirmation(config) -> N
     orchestrator = LabOrchestrator(config)
     strict = lab_overcommit_plan()
     orchestrator._build_execution_plan = lambda *_args, **_kwargs: strict
-    orchestrator.ai_engine.assess_lab_overcommit = lambda *_args: {
-        "recommend": True,
-        "rationale": "Short training with no simultaneous peak load.",
-    }
+    assessed = []
+
+    def assess(_request, evidence):
+        assessed.append(evidence)
+        return {
+            "recommend": True,
+            "rationale": "Short training with no simultaneous peak load.",
+        }
+
+    orchestrator.ai_engine.assess_lab_overcommit = assess
 
     result = orchestrator._run_agent_loop(
         "create a short training lab",
@@ -1111,6 +1126,8 @@ def test_ai_recommendation_creates_explicit_overcommit_confirmation(config) -> N
     assert "Approve this exact overcommit risk-bound plan?" in result
     assert "approve overcommit" not in result.lower()
     assert orchestrator.approval_manager.pending.capacity.policy == LAB_OVERCOMMIT_POLICY
+    assert "Per node: 2 vCPU / 4 GiB RAM" in assessed[0]
+    assert "Storage per node: 1 x 20 GiB Ceph" in assessed[0]
 
 
 def test_ai_decline_returns_safer_recommendation_without_pending_plan(config) -> None:
@@ -1180,16 +1197,17 @@ def test_all_project_allocations_are_exact_and_fail_closed(config) -> None:
         "default,lab-node-1,RUNNING,2,2047MiB\n" 'other,"unrelated,instance",RUNNING,"0-3,6",1.5GiB'
     )
 
-    environments, cpu, ram_mb, complete = orchestrator._collect_environment_usage()
+    environments, cpu, ram_mb, complete, stopped = orchestrator._collect_environment_usage()
 
     assert complete
     assert cpu == 7
     assert ram_mb == 2047 + 1536
     assert environments[0]["name"] == "lab"
+    assert stopped["stopped_instances"] == 0
     assert orchestrator._parse_memory_mb("50%") is None
 
     orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: ("default,unbounded,RUNNING,,")
-    _, _, _, complete = orchestrator._collect_environment_usage()
+    _, _, _, complete, _ = orchestrator._collect_environment_usage()
     assert not complete
 
 
@@ -1201,40 +1219,457 @@ def test_stopped_unbounded_instances_do_not_block_capacity_inventory(config) -> 
         "default,frozen-service,FROZEN,1,512MiB"
     )
 
-    environments, cpu, ram_mb, complete = orchestrator._collect_environment_usage()
+    environments, cpu, ram_mb, complete, stopped = orchestrator._collect_environment_usage()
 
     assert complete
     assert cpu == 3
     assert ram_mb == (4 * 1024) + 512
     assert environments[0]["name"] == "lab"
+    assert stopped["stopped_instances"] == 1
+    assert not stopped["stopped_allocations_complete"]
 
 
-def test_pool_available_uses_lxd_byte_metrics(config) -> None:
+def test_pool_available_uses_lxd_resource_bytes(config) -> None:
     orchestrator = LabOrchestrator(config)
     commands: list[str] = []
 
     def fake_run(command: str, timeout: int = 10) -> str:
         commands.append(command)
-        return 'info:\n  space used: "141988421632"\n' '  total space: "1003736440832"\n'
+        return '{"space":{"used":141988421632,"total":1003736440832}}'
 
-    orchestrator._run_host_cmd = fake_run
+    orchestrator._run_host_cmd_checked = fake_run
 
     assert orchestrator._get_pool_available_gib("default") == 802
-    assert commands == ["lxc storage info default --bytes 2>/dev/null"]
+    assert commands == ["lxc query /1.0/storage-pools/default/resources"]
 
 
-def test_pool_available_falls_back_to_configured_source(config) -> None:
+@pytest.mark.parametrize("action", ["deploy_microcloud", "add_cluster_node", "scale_environment"])
+def test_cpu_overcommit_is_allowed_without_ai_veto_for_deploy_and_expansion(config, action) -> None:
     orchestrator = LabOrchestrator(config)
+    state = {
+        **host_state(),
+        "ram_total_mb": 128 * 1024,
+        "ram_available_mb": 120 * 1024,
+        "consumed_cpu": 24,
+        "consumed_ram_mb": 16 * 1024,
+    }
+    orchestrator._collect_host_state = lambda force=False: state
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    topology = TopologySpec(
+        nodes=3,
+        node_cpu=8,
+        node_memory_mb=8192,
+        root_disk_gib=40,
+        ceph_disk_gib=50,
+        ceph_disks_per_node=2,
+        local_disk_gib=10,
+    )
+    environment = EnvironmentSnapshot(
+        workspace="lab_microcloud",
+        state_lineage="lineage-1",
+        state_serial=7,
+        current_nodes=3,
+        target_nodes=6,
+        storage_pool="default",
+    )
+    orchestrator._resolve_expansion_plan = lambda *_args: (topology, environment)
+    orchestrator._workspace_snapshot = lambda *_args, **_kwargs: environment
+    orchestrator.ai_engine.assess_lab_overcommit = lambda *_args: pytest.fail(
+        "CPU-only overcommit must not require an AI assessment."
+    )
+    parameters = {
+        "deploy_microcloud": {
+            **topology.model_dump(exclude={"ovn_underlay_cidr", "ceph_network_cidr"}),
+            "user_prefix": "bench",
+        },
+        "add_cluster_node": {"workspace": "lab_microcloud", "add_nodes": 3},
+        "scale_environment": {"workspace": "lab_microcloud", "target_nodes": 6},
+    }[action]
 
-    def fake_run(command: str, timeout: int = 10) -> str:
-        if command.startswith("lxc storage info"):
-            return ""
-        if command.startswith("lxc storage get"):
-            return "/var/snap/lxd/common/lxd/storage-pools/default"
-        if command.startswith("df -BG --"):
-            return "756"
-        raise AssertionError(f"unexpected command: {command}")
+    result = orchestrator._run_agent_loop(
+        "Create or expand a lab for storage benchmarks",
+        {"action": action, "parameters": parameters, "message": "Prepare the benchmark lab."},
+    )
 
-    orchestrator._run_host_cmd = fake_run
+    assert result.startswith("__CONFIRM__:")
+    assert "OVERCOMMIT WARNING" in result
+    assert "host 32 logical CPUs" in result
+    assert "after plan 48 vCPU (1.50x; lab limit 3.00x)" in result
+    assert "RAM uses the bounded lab fallback" not in result
+    assert orchestrator.approval_manager.pending.capacity.cpu_available == 72
+    assert orchestrator._revalidate_approved_plan(orchestrator.approval_manager.pending).valid
+    orchestrator._execute_approved_plan = lambda _plan: "executed"
+    assert orchestrator._handle_pending_confirmation("yes") == "executed"
 
-    assert orchestrator._get_pool_available_gib("default") == 756
+
+@pytest.mark.parametrize(("allocated", "fits"), [(3, True), (4, False)])
+def test_cpu_allocation_boundary_is_96_not_97_on_32_logical_cpus(config, allocated, fits) -> None:
+    orchestrator = LabOrchestrator(config)
+    capacity = orchestrator._capacity_snapshot({**host_state(), "consumed_cpu": allocated})
+    plan = ExecutionPlan(
+        action="deploy_microcloud",
+        parameters={"nodes": 3},
+        summary="Check the CPU ceiling",
+        topology=TopologySpec(
+            nodes=3,
+            node_cpu=31,
+            node_memory_mb=4096,
+            root_disk_gib=20,
+            ceph_disk_gib=10,
+            ceph_disks_per_node=1,
+        ),
+        capacity=capacity,
+    )
+
+    assert capacity.cpu_available == 96 - allocated
+    assert orchestrator.plan_validator.validate(plan).valid is fits
+
+
+def test_cpu_overcommit_does_not_relax_normal_ram_reserve(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    capacity = orchestrator._capacity_snapshot(
+        {**host_state(), "consumed_cpu": 24, "consumed_ram_mb": 60 * 1024}
+    )
+
+    assert capacity.cpu_available == 72
+    assert capacity.ram_available_mb == 0
+
+
+@pytest.mark.parametrize("action", ["add_cluster_node", "scale_environment"])
+def test_bounded_ram_fallback_preserves_expansion_geometry(config, action) -> None:
+    orchestrator = LabOrchestrator(config)
+    plan = lab_overcommit_plan().model_copy(
+        update={
+            "action": action,
+            "parameters": {
+                "workspace": "lab_microcloud",
+                **({"add_nodes": 3} if action == "add_cluster_node" else {"target_nodes": 6}),
+            },
+            "environment": EnvironmentSnapshot(
+                workspace="lab_microcloud",
+                state_lineage="lineage-1",
+                state_serial=7,
+                current_nodes=3,
+                target_nodes=6,
+                storage_pool="default",
+            ),
+        }
+    )
+    validation = orchestrator.plan_validator.validate(plan)
+
+    candidate = orchestrator._build_lab_overcommit_plan(plan, validation.errors)
+
+    assert candidate is not None
+    assert candidate.topology == plan.topology
+    assert candidate.environment == plan.environment
+    assert candidate.parameters == plan.parameters
+    assert candidate.capacity.ram_available_mb == 23040
+
+
+@pytest.mark.parametrize(("memory_mb", "eligible"), [(7680, True), (7681, False)])
+def test_ram_fallback_enforces_125_percent_to_the_mib(config, memory_mb, eligible) -> None:
+    orchestrator = LabOrchestrator(config)
+    plan = lab_overcommit_plan()
+    plan = plan.model_copy(
+        update={"topology": plan.topology.model_copy(update={"node_memory_mb": memory_mb})}
+    )
+    validation = orchestrator.plan_validator.validate(plan)
+
+    candidate = orchestrator._build_lab_overcommit_plan(plan, validation.errors)
+
+    assert (candidate is not None) is eligible
+
+
+def test_ram_fallback_cannot_bypass_cpu_ceiling(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    plan = lab_overcommit_plan()
+    plan = plan.model_copy(update={"topology": plan.topology.model_copy(update={"node_cpu": 25})})
+    validation = orchestrator.plan_validator.validate(plan)
+
+    assert any(error.startswith("Insufficient CPU:") for error in validation.errors)
+    assert orchestrator._build_lab_overcommit_plan(plan, validation.errors) is None
+
+
+def test_stopped_unknown_limits_do_not_block_active_allocation_inventory(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: (
+        "default,lab-node-1,RUNNING,8,8GiB\n"
+        "other,paused,FROZEN,2,4096MiB\n"
+        "default,lab-node-2,STOPPED,8,16GiB\n"
+        "build,snapcraft-builder,STOPPED,,\n"
+    )
+
+    environments, cpu, ram_mb, complete, stopped = orchestrator._collect_environment_usage()
+
+    assert complete
+    assert cpu == 10
+    assert ram_mb == 12 * 1024
+    assert stopped == {
+        "stopped_instances": 2,
+        "stopped_cpu": 8,
+        "stopped_ram_mb": 16 * 1024,
+        "stopped_allocations_complete": False,
+    }
+    assert environments[0]["nodes"] == 2
+    assert environments[0]["stopped_nodes"] == 1
+    assert environments[0]["active_nodes"] == 1
+
+
+def test_malformed_active_inventory_is_not_silently_ignored(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: "default,unknown"
+
+    _, _, _, complete, _ = orchestrator._collect_environment_usage()
+
+    assert not complete
+
+
+def test_restarted_instance_invalidates_cpu_overcommit_approval(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    state = {
+        **host_state(),
+        "consumed_cpu": 24,
+        "stopped_instances": 1,
+        "stopped_cpu": 80,
+        "stopped_ram_mb": 4 * 1024,
+    }
+    orchestrator._collect_host_state = lambda force=False: state
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    plan = orchestrator._build_execution_plan(
+        "deploy_microcloud",
+        {"nodes": 3, "user_prefix": "fresh", "node_cpu": 8},
+        "Create a lab",
+        "Teach Ceph.",
+    )
+    assert orchestrator.plan_validator.validate(plan).valid
+    assert "Stopped instances excluded: 1 (80 vCPU" in orchestrator._format_plan_for_confirmation(
+        plan
+    )
+    state.update({"consumed_cpu": 104, "stopped_instances": 0})
+
+    validation = orchestrator._revalidate_approved_plan(plan)
+
+    assert not validation.valid
+    assert "active allocations changed" in validation.errors[0]
+
+
+def test_advice_and_deployment_resolve_identical_multiple_disk_geometry(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    state = {
+        **host_state(),
+        "ram_total_mb": 128 * 1024,
+        "ram_available_mb": 120 * 1024,
+    }
+    orchestrator._collect_host_state = lambda force=False: state
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    parameters = {"nodes": 3, "ceph_disks_per_node": 2, "local_disk_gib": 10}
+    advice = orchestrator._handle_local_tool(
+        "get_sizing_recommendation", {**parameters, "tier": "medium"}
+    )
+    resolved, topology = orchestrator._resolve_deployment_parameters(
+        {**parameters, "sizing_tier": "medium"},
+        orchestrator._capacity_snapshot(state),
+    )
+
+    assert topology.resource_summary() in advice
+    assert "Totals: 24 vCPU / 48 GiB RAM / 510 GiB storage" in advice
+    assert topology.total_ceph_gib == 300
+    assert resolved["ceph_disks_per_node"] == 2
+    assert resolved["local_disk_gib"] == 10
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_sizing_report_is_not_rewritten_or_multiplied_by_model(config, native) -> None:
+    orchestrator = LabOrchestrator(config)
+    state = {
+        **host_state(),
+        "ram_total_mb": 128 * 1024,
+        "ram_available_mb": 120 * 1024,
+    }
+    orchestrator._collect_host_state = lambda force=False: state
+    orchestrator.ai_engine._pending_tool_call_id = "call-sizing" if native else None
+    orchestrator.ai_engine.feed_tool_result = lambda *_args: pytest.fail(
+        "The model must not rewrite the deterministic sizing table."
+    )
+    shown_plans = []
+    orchestrator.ui.print_ai_plan = shown_plans.append
+
+    result = orchestrator._run_agent_loop(
+        "Recommend medium resources for three nodes with two OSDs each",
+        {
+            "action": "get_sizing_recommendation",
+            "parameters": {
+                "nodes": 3,
+                "tier": "medium",
+                "ceph_disk_gib": 100,
+                "ceph_disks_per_node": 2,
+            },
+            "message": "The total would be 72 vCPU.",
+            "reasoning": "Prioritize Ceph learning.",
+        },
+    )
+
+    assert "Totals: 24 vCPU / 48 GiB RAM / 780 GiB storage" in result
+    assert "Totals: 72" not in result
+    assert "AI rationale: Prioritize Ceph learning." in result
+    assert not shown_plans
+    assert orchestrator.ai_engine._pending_tool_call_id is None
+    observation = orchestrator.ai_engine.conversation_history[-1]
+    assert result in observation["content"]
+    assert observation["role"] == ("tool" if native else "user")
+
+
+def test_unmeasured_host_does_not_fall_back_to_static_sizing(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._collect_host_state = lambda force=False: {"cpu_cores": 0, "ram_total_mb": 0}
+
+    result = orchestrator._handle_local_tool("get_sizing_recommendation", {"nodes": 3})
+
+    assert result.startswith("Error: host CPU/RAM measurements are unavailable")
+
+
+def test_dataset_deploy_uses_resolved_disks_without_forwarding_planning_metadata(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = orchestrator._capacity_snapshot(host_state())
+
+    resolved, topology = orchestrator._resolve_deployment_parameters(
+        {
+            "nodes": 3,
+            "ceph_disks_per_node": 2,
+            "dataset_size_gib": 100,
+            "workload_description": "a storage benchmark lab",
+        },
+        capacity,
+    )
+
+    assert resolved["sizing_tier"] == "performance"
+    assert topology.ceph_dataset_budget_gib >= 100
+    assert resolved["ceph_disk_gib"] == 63
+    assert "dataset_size_gib" not in resolved
+    assert "workload_description" not in resolved
+
+
+@pytest.mark.parametrize(
+    ("value", "mib"),
+    [
+        ("17179869184", 16384),
+        ("1.5GiB", 1536),
+        ("2GB", 1908),
+        ("1048577B", 2),
+        ("0", None),
+        ("0GiB", None),
+        ("-1GiB", None),
+        ("50%", None),
+    ],
+)
+def test_active_memory_limits_are_exact_and_unbounded_limits_are_unknown(value, mib) -> None:
+    assert LabOrchestrator._parse_memory_mb(value) == mib
+
+
+@pytest.mark.parametrize("cpu", ["0", "", "3-1", "0-3,6-4"])
+def test_unknown_or_invalid_active_cpu_limits_are_not_zero_allocations(cpu) -> None:
+    assert LabOrchestrator._parse_cpu_limit(cpu) is None
+
+
+@pytest.mark.parametrize(
+    ("total", "used", "gib"),
+    [
+        (100 * 1024**3, 1, 99),
+        (100_000_000_000, 0, 93),
+        (100 * 1024**3, 100 * 1024**3, 0),
+    ],
+)
+def test_pool_free_space_is_rounded_down_not_overstated(config, total, used, gib) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: json.dumps(
+        {"space": {"total": total, "used": used}}
+    )
+
+    assert orchestrator._get_pool_available_gib("default") == gib
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        {},
+        {"space": {}},
+        {"space": {"total": 0, "used": 0}},
+        {"space": {"total": True, "used": 0}},
+        {"space": {"total": 10, "used": 11}},
+        {"space": {"total": 10, "used": -1}},
+        {"space": {"total": "1000", "used": 0}},
+    ],
+)
+def test_missing_pool_metrics_do_not_use_an_unrelated_filesystem(config, metrics) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator._run_host_cmd_checked = lambda *_args, **_kwargs: json.dumps(metrics)
+    orchestrator._run_host_cmd = lambda *_args, **_kwargs: pytest.fail(
+        "Do not substitute filesystem free space for unavailable pool metrics."
+    )
+
+    with pytest.raises(RuntimeError, match="could not be measured safely"):
+        orchestrator._get_pool_available_gib("default")
+
+
+def test_pool_metrics_accept_api_metadata_wrapper_and_encode_pool_name(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    commands = []
+
+    def metrics(command, **_kwargs):
+        commands.append(command)
+        return json.dumps({"metadata": {"space": {"total": 100 * 1024**3, "used": 0}}})
+
+    orchestrator._run_host_cmd_checked = metrics
+
+    assert orchestrator._get_pool_available_gib("pool;not-a-command") == 100
+    assert commands == ["lxc query /1.0/storage-pools/pool%3Bnot-a-command/resources"]
+
+
+def test_approved_storage_pool_is_bound_to_script_parameters(config) -> None:
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    capacity = CapacitySnapshot(
+        cpu_available=96,
+        ram_available_mb=64 * 1024,
+        storage_available_gib=1000,
+        storage_pool="approved-pool",
+    )
+
+    resolved, _ = orchestrator._resolve_deployment_parameters({"nodes": 3}, capacity)
+
+    assert resolved["storage_pool"] == "approved-pool"
+    assert "storage_pool" in orchestrator._SCRIPT_ACCEPTED_PARAMS["deploy_microcloud"]
+
+
+def test_unavailable_capacity_after_yes_blocks_execution_and_closes_native_call(
+    config, monkeypatch
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(config.state_dir))
+    orchestrator = LabOrchestrator(config)
+    orchestrator.cluster_verifier.workspace_exists = lambda _workspace: False
+    orchestrator._collect_host_state = lambda force=False: host_state()
+    plan = orchestrator._build_execution_plan(
+        "deploy_microcloud", {"nodes": 3}, "Create a lab", "Teach MicroCloud."
+    )
+    orchestrator.approval_manager.request(plan)
+    orchestrator.ai_engine._pending_tool_call_id = "call-capacity"
+    orchestrator._execute_approved_plan = lambda _plan: pytest.fail(
+        "Do not run an unverified plan."
+    )
+
+    def unavailable(force=False):
+        raise RuntimeError("Pool resource metrics are unavailable.")
+
+    orchestrator._collect_host_state = unavailable
+
+    result = orchestrator._handle_pending_confirmation("yes")
+
+    assert "execution was blocked" in result
+    assert "Live capacity could not be revalidated" in result
+    assert orchestrator.approval_manager.pending is None
+    assert orchestrator.ai_engine._pending_tool_call_id is None
+    assert (
+        "Pool resource metrics are unavailable"
+        in orchestrator.ai_engine.conversation_history[-1]["content"]
+    )

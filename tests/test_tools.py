@@ -77,3 +77,42 @@ def test_custom_sizing_requires_all_explicit_resource_values() -> None:
         "deploy_microcloud",
         {"nodes": 3, "sizing_tier": "custom", "node_cpu": 2},
     )[0]
+
+
+def test_all_sizing_tools_support_complete_disk_geometry() -> None:
+    for name in ("get_sizing_recommendation", "propose_custom_topology", "deploy_microcloud"):
+        properties = get_tool_by_name(name)["parameters"]["properties"]
+        assert {"ceph_disks_per_node", "local_disk_gib", "dataset_size_gib"} <= set(properties)
+        assert properties["ceph_disks_per_node"]["maximum"] == 8
+
+    assert validate_tool_parameters(
+        "get_sizing_recommendation",
+        {
+            "nodes": 3,
+            "tier": "performance",
+            "node_cpu": 8,
+            "node_memory_mb": 16 * 1024,
+            "root_disk_gib": 60,
+            "ceph_disk_gib": 100,
+            "ceph_disks_per_node": 2,
+            "local_disk_gib": 50,
+            "reasoning": "Prioritize storage learning.",
+        },
+    )[0]
+    assert not validate_tool_parameters("get_sizing_recommendation", {"local_disk_gib": 1})[0]
+    assert not validate_tool_parameters("get_sizing_recommendation", {"dataset_size_gib": 0})[0]
+
+
+def test_sizing_and_deploy_share_exact_resource_schema() -> None:
+    recommendation = get_tool_by_name("get_sizing_recommendation")["parameters"]["properties"]
+    deployment = get_tool_by_name("deploy_microcloud")["parameters"]["properties"]
+    for field in (
+        "node_cpu",
+        "node_memory_mb",
+        "root_disk_gib",
+        "ceph_disk_gib",
+        "ceph_disks_per_node",
+        "local_disk_gib",
+        "dataset_size_gib",
+    ):
+        assert recommendation[field] == deployment[field]

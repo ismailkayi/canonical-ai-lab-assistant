@@ -13,12 +13,9 @@ import requests
 
 from lab_ai_assistant.config import Config
 from lab_ai_assistant.scenarios import scenarios_summary
-from lab_ai_assistant.sizing import SizingAdvisor
 from lab_ai_assistant.tools import get_tool_definitions
 
 logger = logging.getLogger(__name__)
-
-_sizing_advisor = SizingAdvisor()
 
 
 class AIEngine:
@@ -854,7 +851,6 @@ class AIEngine:
     def _get_default_system_prompt(self, include_tools: bool = True) -> str:
         """System prompt focused on custom topology planning."""
         scenario_catalog = scenarios_summary()
-        sizing_tiers = _sizing_advisor.describe_tiers()
 
         prompt = f"""You are a MicroCloud Lab & Demo Environment Assistant.
 Your purpose is to help users quickly provision and manage MicroCloud lab, demo,
@@ -883,8 +879,11 @@ CORE FACTS:
   OpenTofu (nested-lxd-lab mode).
 - Ceph disks are per-node virtual block volumes provisioned automatically
   by Terraform.
-- ceph_disks_per_node: 1 is the default; recommend 2 for higher IOPS or larger
-  clusters. Each OSD disk uses ceph_disk_gib GiB of host storage.
+- ceph_disks_per_node: 1 is the default. Multiple OSDs are useful for learning,
+  but they share the host storage pool and do not guarantee higher physical IOPS.
+  Each OSD disk uses ceph_disk_gib GiB of host storage.
+  Without an explicit disk size or dataset target, the calculator shares a
+  modest per-member raw storage target across the requested OSDs.
 - local_disk_gib: 0 = disabled (default). Set >= 10 to add a local ZFS disk
   per node for fast local storage alongside distributed Ceph.
 - network_mode defaults to standard-2nic: management/cluster traffic on eth0
@@ -999,23 +998,25 @@ The orchestrator filters out unknown parameters, but you should never invent
 parameters in the first place. Reason about what's possible from the architecture
 above, not by guessing CLI flags.
 
-SIZING — ALWAYS SHOW DETAILS:
-When proposing or confirming a sizing tier, ALWAYS display the per-node resource numbers:
-{sizing_tiers}
-
-Example of correct behavior when recommending "small" tier:
-  "I recommend the 'small' tier for your PoC:
-   - Per node: 4 vCPU / 8 GB RAM / 40 GB root / 50 GB Ceph disk
-   - Total (3 nodes): 12 vCPU / 24 GB RAM / 150 GB Ceph storage
-   Shall I proceed?"
-NEVER say just "small tier" without showing the resource numbers.
+SIZING — DECIDE INTENT, LET TOOLS CALCULATE:
+- Choose workload priorities, node count, OSD count, network layout, and trade-offs.
+- small/medium/large are workload intents, not fixed per-node resource promises.
+- For a sizing question, call get_sizing_recommendation. Include every requested
+  OSD/local disk and dataset_size_gib when the user states a dataset target.
+- Put a brief qualitative rationale in the tool's reasoning field.
+- Python renders the authoritative per-node table, totals, and fit verdict.
+  Do not calculate totals, repeat or reinterpret tool numbers, or multiply totals again.
+- For deployment, omit resource fields the user has not specified so the shared
+  host-aware helper can resolve them. Preserve explicit user resources.
+- When deploying an earlier recommendation, copy its exact resolved resources;
+  do not substitute fixed-tier values.
 
 PLANNING FLOW:
 0. If user asks for lifecycle actions (list/delete/scale/add-nodes/health-check), execute those tools directly.
 1. Understand user intent (PoC, lab, demo, teaching, etc.).
 2. Use LIVE ENVIRONMENT STATE for host capacity. Call inspect_host_environment only
     when the user requests a refresh or the state is missing.
-3. Propose topology WITH full sizing details shown to the user.
+3. Use sizing tools to obtain exact resource details; explain the qualitative trade-offs.
 4. Request deploy_microcloud when the plan is complete. The orchestrator validates
     and displays the exact resolved plan, then enforces user confirmation before execution.
 
@@ -1032,16 +1033,17 @@ TOOL DECISION RULES:
 - Explaining a proposed deployment is not a substitute for the tool call. Put
   the short rationale in message/reasoning and request deploy_microcloud in the
   same response so the user receives the exact validated plan.
-- Do not mention or offer overcommit proactively. Every request starts with the
-  normal strict capacity policy. If strict validation later supplies a bounded
-  CPU/RAM candidate, the orchestrator asks you for a separate structured
-  recommendation. Storage is never overcommitted.
-- If the user explicitly asks whether memory/CPU overcommit is supported, never
-  claim it is unavailable. Explain that new deployments use a strict-first,
-  bounded, AI-gated CPU/RAM fallback with an explicit warning. It is intended for
-  short-lived lab/demo/training workloads; benchmark, database performance, heavy
-  Ceph I/O, and production-like workloads are normally declined. Exact ratios and
-  runtime headroom remain deterministic, and storage cannot be overcommitted.
+- Lab CPU allocation up to 3:1 of host logical CPUs is allowed for deploy and
+  expansion. It is a ceiling, not a sizing target or a performance guarantee.
+  Do not veto it solely because the user wants a benchmark.
+- RAM keeps its normal host reserve. Only a RAM shortage can trigger a separate
+  bounded fallback assessment up to 1.25:1. Do not offer a policy menu.
+- If the user explicitly asks whether overcommit is supported, explain the
+  deterministic lab CPU budget and separate AI-gated RAM fallback for deployment
+  and expansion. Never claim the capability is unavailable or refuse solely
+  because the request mentions benchmarks; assess peak RAM contention instead.
+- Storage is never overcommitted. The orchestrator displays contention warnings
+  and obtains ordinary yes/no approval before executing.
 
 PLANNING MODE SUMMARY:
 {scenario_catalog}
@@ -1174,11 +1176,16 @@ ENVIRONMENT MANAGEMENT:
 
     def cancel_pending_tool_call(self, tool_name: str, reason: str) -> None:
         """Close a native tool call that policy blocked before execution."""
-        self.record_tool_observation(tool_name, f"Tool call was not executed: {reason}")
+        if self._pending_tool_call_id:
+            self.record_tool_observation(tool_name, f"Tool call was not executed: {reason}")
 
     def record_tool_observation(self, tool_name: str, result: str) -> None:
-        """Close a native tool call without requesting another model response."""
+        """Retain an authoritative observation without asking the model to rewrite it."""
         if not self._pending_tool_call_id:
+            self.conversation_history.append(
+                {"role": "user", "content": f"Tool '{tool_name}' returned:\n{result}"}
+            )
+            self._trim_conversation_history()
             return
         self.conversation_history.append(
             {
@@ -1196,17 +1203,19 @@ ENVIRONMENT MANAGEMENT:
         user_request: str,
         evidence: str,
     ) -> dict[str, Any]:
-        """Decide whether a bounded overcommit candidate fits the stated lab use."""
+        """Assess only the RAM fallback; lab CPU policy is already deterministic."""
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are deciding whether to recommend a pre-validated CPU/RAM "
-                    "overcommit candidate. Return only JSON with boolean 'recommend' "
-                    "and short string 'rationale'. Recommend only for short-lived "
-                    "lab/demo/training use where simultaneous peak load is unlikely. "
-                    "Decline for benchmarks, performance testing, heavy Ceph I/O, "
-                    "production-like use, or when safer downsizing/cleanup is preferable. "
+                    "Assess the RAM reservation fallback of a pre-validated lab plan. "
+                    "Return only JSON with boolean 'recommend' and short string 'rationale'. "
+                    "CPU allocation up to 3:1 is already allowed; do not veto CPU overcommit "
+                    "or decline solely because this is a benchmark/performance test. "
+                    "Assess simultaneous peak memory risk, not CPU throughput. Recommend "
+                    "for lab/demo/training use when peak memory contention is unlikely. "
+                    "Decline for sustained heavy-memory or production-like use, or when "
+                    "safer downsizing/cleanup is preferable. "
                     "The deterministic system owns all ratios and limits; do not invent "
                     "or modify any numbers."
                 ),

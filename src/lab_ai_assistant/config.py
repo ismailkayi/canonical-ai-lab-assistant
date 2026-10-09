@@ -8,6 +8,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+def get_snap_root() -> Path | None:
+    """Ignore SNAP inherited from unrelated apps such as a snap-packaged editor."""
+    snap_root = os.getenv("SNAP")
+    if snap_root:
+        root = Path(snap_root)
+        if (root / "scripts").is_dir() and (root / "terraform" / "main.tf").is_file():
+            return root
+    return None
+
+
 @dataclass
 class Config:
     """Application configuration."""
@@ -38,10 +48,9 @@ class Config:
 
     state_dir: Path = field(
         default_factory=lambda: Path(
-            os.getenv(
-                "SNAP_USER_COMMON",
-                str(Path.home() / ".canonical-ai-lab-assistant"),
-            )
+            os.getenv("SNAP_USER_COMMON", str(Path.home() / ".canonical-ai-lab-assistant"))
+            if get_snap_root() is not None
+            else Path.home() / ".canonical-ai-lab-assistant"
         )
     )
     history_file: Path = field(init=False)
@@ -81,11 +90,9 @@ class Config:
 
     def __post_init__(self):
         # Resolve script root robustly for both source checkout and snap runtime.
-        snap_root = os.getenv("SNAP")
-        if snap_root:
-            snap_repo = Path(snap_root)
-            if (snap_repo / "scripts").exists():
-                self.repo_root = snap_repo
+        snap_root = get_snap_root()
+        if snap_root is not None:
+            self.repo_root = snap_root
 
         if not (self.repo_root / "scripts").exists():
             cwd_root = Path.cwd()

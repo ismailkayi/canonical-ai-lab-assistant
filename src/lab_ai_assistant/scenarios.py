@@ -144,14 +144,13 @@ def scenarios_summary() -> str:
     """Return a short summary for the AI prompt."""
     lines = ["MicroCloud planning mode: AI-designed topology (no fixed baselines).\n"]
     for sc in SCENARIOS.values():
-        sizing = SIZING_TIERS[sc.default_sizing]
         lines.append(
             f"  [{sc.name}]  {sc.label}\n"
             f"    {sc.description}\n"
             f"    Nodes: {sc.default_nodes} (min {sc.min_nodes}) | "
             f"Network: {sc.network_mode.value} | "
             f"Storage: {sc.storage_backend.value}\n"
-            f"    Default sizing: {sizing.summary()}\n"
+            f"    Default sizing intent: {sc.default_sizing.value} (adjusted to live budgets)\n"
             f"    Required params: {', '.join(sc.required_params)}\n"
             f"    Notes: {sc.notes}\n"
         )

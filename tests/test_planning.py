@@ -43,6 +43,44 @@ def test_plan_validation_accounts_for_complete_capacity() -> None:
     assert any("CPU" in error for error in rejected.errors)
 
 
+def test_topology_storage_and_rendered_totals_include_every_volume() -> None:
+    topology = TopologySpec(
+        nodes=3,
+        node_cpu=8,
+        node_memory_mb=16 * 1024,
+        root_disk_gib=60,
+        ceph_disk_gib=100,
+        ceph_disks_per_node=2,
+        local_disk_gib=50,
+    )
+
+    assert topology.total_cpu == 24
+    assert topology.total_ram_mb == 48 * 1024
+    assert topology.total_root_gib == 180
+    assert topology.total_ceph_gib == 600
+    assert topology.total_local_gib == 150
+    assert topology.total_storage_gib == 930
+    assert topology.estimated_ceph_usable_gib == 200
+    assert topology.ceph_dataset_budget_gib == 160
+    assert "Totals: 24 vCPU / 48 GiB RAM / 930 GiB storage" in topology.resource_summary()
+
+
+def test_memory_capacity_error_does_not_hide_a_one_mib_shortage() -> None:
+    plan = deployment_plan()
+    plan = plan.model_copy(
+        update={
+            "topology": plan.topology.model_copy(update={"node_memory_mb": 1536}),
+            "capacity": plan.capacity.model_copy(update={"ram_available_mb": 4607}),
+        }
+    )
+
+    validation = PlanValidator().validate(plan)
+
+    assert not validation.valid
+    assert "requires 4608 MiB" in validation.errors[0]
+    assert "4607 MiB" in validation.errors[0]
+
+
 def test_approval_is_exact_and_one_shot() -> None:
     manager = ApprovalManager()
     plan = deployment_plan()

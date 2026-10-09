@@ -17,11 +17,13 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 
 from lab_ai_assistant.ai_engine import AIEngine
-from lab_ai_assistant.config import Config
+from lab_ai_assistant.config import Config, get_snap_root
 from lab_ai_assistant.doc_fetcher import DocFetcher
 from lab_ai_assistant.planning import (
     CPU_OVERCOMMIT_RATIO,
@@ -41,8 +43,7 @@ from lab_ai_assistant.planning import (
     TopologySpec,
     classify_confirmation,
 )
-from lab_ai_assistant.scenarios import SIZING_TIERS
-from lab_ai_assistant.sizing import SizingAdvisor, SizingTier
+from lab_ai_assistant.sizing import HostAwareSizing, SizingAdvisor
 from lab_ai_assistant.tools import get_tool_definitions, validate_tool_parameters
 from lab_ai_assistant.ui import ChatUI
 from lab_ai_assistant.verification import ClusterVerifier
@@ -124,8 +125,11 @@ class LabOrchestrator:
                 if user_input.lower() == "help":
                     self.ui.print_help()
                     continue
-                if user_input.lower().startswith("sizing"):
+                if user_input.lower() == "sizing tiers":
                     self.ui.print_ai_response(self.sizing_advisor.describe_tiers())
+                    continue
+                if user_input.lower() == "sizing":
+                    self.ui.print_ai_response(self._sizing_recommendation({}))
                     continue
 
                 with self.ui.thinking_indicator("AI is analyzing your request"):
@@ -180,17 +184,18 @@ class LabOrchestrator:
             return None
 
         return (
-            "Yes. New lab deployments support bounded CPU/RAM overcommit, including "
-            "memory overcommit. Every plan is checked against strict capacity first. "
-            "Only when the exact plan fails solely on CPU or RAM can the assistant "
-            f"consider up to {CPU_OVERCOMMIT_RATIO:.2f}x CPU and "
-            f"{RAM_OVERCOMMIT_RATIO:.2f}x RAM allocation, while also requiring live "
-            "runtime RAM headroom. A separate AI risk assessment may recommend it for "
-            "short-lived lab, demo, or training use; benchmark, database performance, "
-            "heavy Ceph I/O, and production-like requests are normally declined. "
-            "Storage is never overcommitted. To test the path, request a new lab with "
-            "an exact node count, per-node RAM, unique prefix, and short-lived lab purpose; "
-            "if eligible, you will receive an explicit OVERCOMMIT WARNING before approval."
+            "Yes. Lab deployment and expansion support bounded CPU/RAM overcommit. "
+            f"The active CPU allocation budget is {CPU_OVERCOMMIT_RATIO:.2f}x host logical "
+            "CPUs; this is a ceiling, not an automatic sizing target. CPU overcommit "
+            "does not need an AI assessment and is not rejected solely for benchmarks. "
+            "RAM is checked against the normal host reserve first. Only a RAM shortage "
+            f"can trigger a separate AI risk assessment up to {RAM_OVERCOMMIT_RATIO:.2f}x "
+            "physical RAM, with sufficient live runtime RAM headroom. Sustained peak "
+            "memory contention or production-like use may be declined. Storage is never "
+            "overcommitted. Stopped instance commitments are reported separately; recheck "
+            "capacity before restarting them. A plan that exceeds host logical CPUs or "
+            "uses the RAM fallback shows an explicit OVERCOMMIT WARNING and requires "
+            "ordinary yes/no approval before any changes are made."
         )
 
     def _run_agent_loop(self, user_message: str, ai_response: dict[str, Any]) -> str:
@@ -213,12 +218,6 @@ class LabOrchestrator:
                 )
                 return self._compose_user_facing_response(message, reasoning)
 
-            # Show AI's intermediate plan/reasoning
-            if message or reasoning:
-                rendered_plan = self._compose_user_facing_response(message, reasoning)
-                if rendered_plan:
-                    self.ui.print_ai_plan(rendered_plan)
-
             parameters = ai_response.get("parameters", {})
             requested_action = str(action)
             action = self._resolve_tool_action(action, message, reasoning, parameters, user_message)
@@ -239,6 +238,15 @@ class LabOrchestrator:
                 ai_response = self.ai_engine.feed_tool_result(action, feedback)
                 continue
 
+            if action in {"get_sizing_recommendation", "propose_custom_topology"}:
+                parameters = dict(parameters)
+                if reasoning and not parameters.get("reasoning"):
+                    parameters["reasoning"] = reasoning
+            elif message or reasoning:
+                rendered_plan = self._compose_user_facing_response(message, reasoning)
+                if rendered_plan:
+                    self.ui.print_ai_plan(rendered_plan)
+
             if action in MUTATING_ACTIONS:
                 try:
                     plan = self._build_execution_plan(action, parameters, message, reasoning)
@@ -254,18 +262,15 @@ class LabOrchestrator:
                         validation.errors,
                     )
                     if overcommit_plan is not None:
-                        evidence = self._format_overcommit_evidence(overcommit_plan)
+                        evidence = self._format_overcommit_evidence(
+                            overcommit_plan, include_topology=True
+                        )
                         decision = self.ai_engine.assess_lab_overcommit(
                             user_message,
                             evidence,
                         )
                         rationale = str(decision.get("rationale", "")).strip()
                         if decision.get("recommend") is True and rationale:
-                            warning = (
-                                "CPU and RAM are overcommitted for a lab workload. "
-                                "Simultaneous peak load can degrade VM latency, Ceph "
-                                "performance, and host memory stability."
-                            )
                             approved_plan = overcommit_plan.model_copy(
                                 update={
                                     "summary": (
@@ -273,7 +278,8 @@ class LabOrchestrator:
                                     ),
                                     "warnings": (
                                         *overcommit_plan.warnings,
-                                        warning,
+                                        "RAM uses a bounded lab fallback. Simultaneous "
+                                        "peak memory use can cause swapping or OOM.",
                                     ),
                                 }
                             )
@@ -302,11 +308,19 @@ class LabOrchestrator:
             self.ui.print_tool_call(action)
 
             # Execute the tool
-            tool_result = self._handle_local_tool(action, parameters)
+            try:
+                tool_result = self._handle_local_tool(action, parameters)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                logger.error("Local tool %s failed: %s", action, exc)
+                tool_result = f"Error: {exc}"
             if tool_result is None:
                 logger.info(f"Executing action: {action} params={parameters}")
                 tool_result = self._execute_action(action, parameters)
                 self._record_deployment(action, parameters, tool_result)
+
+            if action in {"get_sizing_recommendation", "propose_custom_topology"}:
+                self.ai_engine.record_tool_observation(action, tool_result)
+                return tool_result
 
             if self._is_failed_tool_result(tool_result):
                 # _compose_failed_tool_response closes the pending tool call while
@@ -338,15 +352,18 @@ class LabOrchestrator:
     ) -> ExecutionPlan | None:
         """Return the same plan under bounded lab policy, or None if ineligible."""
         if (
-            plan.action != "deploy_microcloud"
+            plan.action not in {"deploy_microcloud", "add_cluster_node", "scale_environment"}
             or plan.topology is None
             or plan.capacity is None
             or not strict_errors
+            or not any(error.startswith("Insufficient RAM:") for error in strict_errors)
             or any(
                 not error.startswith(("Insufficient CPU:", "Insufficient RAM:"))
                 for error in strict_errors
             )
             or not plan.capacity.allocations_complete
+            or not plan.capacity.cpu_total
+            or not plan.capacity.ram_total_mb
         ):
             return None
 
@@ -378,23 +395,55 @@ class LabOrchestrator:
         return candidate
 
     @staticmethod
-    def _format_overcommit_evidence(plan: ExecutionPlan) -> str:
+    def _format_overcommit_evidence(plan: ExecutionPlan, *, include_topology: bool = False) -> str:
         assert plan.topology is not None and plan.capacity is not None
         topology = plan.topology
         capacity = plan.capacity
         cpu_after = capacity.cpu_allocated + topology.total_cpu
         ram_after = capacity.ram_allocated_mb + topology.total_ram_mb
-        return (
-            f"CPU physical={capacity.cpu_total}, allocated_now={capacity.cpu_allocated}, "
-            f"after_plan={cpu_after}, ratio={cpu_after / capacity.cpu_total:.2f}x, "
-            f"hard_limit={CPU_OVERCOMMIT_RATIO:.2f}x\n"
-            f"RAM physical={capacity.ram_total_mb // 1024} GiB, "
-            f"allocated_now={capacity.ram_allocated_mb // 1024} GiB, "
-            f"after_plan={ram_after // 1024} GiB, "
-            f"ratio={ram_after / capacity.ram_total_mb:.2f}x, "
-            f"hard_limit={RAM_OVERCOMMIT_RATIO:.2f}x, "
-            f"runtime_available={capacity.runtime_ram_available_mb // 1024} GiB\n"
-            "Storage is strictly validated and is not overcommitted."
+        lines = [topology.resource_summary()] if include_topology else []
+        if capacity.cpu_total:
+            lines.append(
+                f"CPU: host {capacity.cpu_total} logical CPUs, active allocation "
+                f"{capacity.cpu_allocated} vCPU, after plan {cpu_after} vCPU "
+                f"({cpu_after / capacity.cpu_total:.2f}x; lab limit {CPU_OVERCOMMIT_RATIO:.2f}x)"
+            )
+        if capacity.ram_total_mb:
+            lines.append(
+                f"RAM: host {capacity.ram_total_mb / 1024:g} GiB, active allocation "
+                f"{capacity.ram_allocated_mb / 1024:g} GiB, after plan "
+                f"{ram_after / 1024:g} GiB ({ram_after / capacity.ram_total_mb:.2f}x; "
+                f"fallback limit {RAM_OVERCOMMIT_RATIO:.2f}x)"
+            )
+            lines.append(f"Runtime MemAvailable: {capacity.runtime_ram_available_mb / 1024:g} GiB")
+        lines.append(
+            f"Remaining allocation budget: {capacity.cpu_available - topology.total_cpu} vCPU / "
+            f"{(capacity.ram_available_mb - topology.total_ram_mb) / 1024:g} GiB RAM / "
+            f"{capacity.storage_available_gib - topology.total_storage_gib} GiB storage"
+        )
+        if capacity.stopped_instances:
+            completeness = (
+                "known limits"
+                if capacity.stopped_allocations_complete
+                else "known limits only; some stopped limits are unknown"
+            )
+            lines.append(
+                f"Stopped instances excluded: {capacity.stopped_instances} "
+                f"({capacity.stopped_cpu_allocated} vCPU / "
+                f"{capacity.stopped_ram_allocated_mb / 1024:g} GiB RAM, {completeness}). "
+                "Recheck capacity before restarting them."
+            )
+        lines.append("Storage overcommit: disabled")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _uses_lab_overcommit(plan: ExecutionPlan) -> bool:
+        if plan.topology is None or plan.capacity is None:
+            return False
+        capacity = plan.capacity
+        return capacity.policy == LAB_OVERCOMMIT_POLICY or (
+            capacity.cpu_total > 0
+            and capacity.cpu_allocated + plan.topology.total_cpu > capacity.cpu_total
         )
 
     def _handle_pending_confirmation(self, user_message: str) -> str | None:
@@ -423,7 +472,8 @@ class LabOrchestrator:
                 reason = self._format_plan_validation_failure(current_validation.errors)
                 self.ai_engine.cancel_pending_tool_call(approved.action, reason)
                 return (
-                    "The host changed after this plan was prepared, so execution was blocked.\n\n"
+                    "The host changed or could not be verified after this plan was prepared, "
+                    "so execution was blocked.\n\n"
                     f"{reason}"
                 )
 
@@ -433,7 +483,7 @@ class LabOrchestrator:
     def _infrastructure_lock(self) -> Iterator[None]:
         """Serialize live revalidation and execution under the scripts' shared lock."""
         lock_root = Path(
-            os.getenv("SNAP_USER_COMMON")
+            (os.getenv("SNAP_USER_COMMON") if get_snap_root() is not None else None)
             or os.getenv("XDG_RUNTIME_DIR")
             or os.getenv("TMPDIR")
             or "/tmp"
@@ -546,64 +596,15 @@ class LabOrchestrator:
                 )
 
         nodes = int(resolved.get("nodes", 3))
-        sizing_tier = str(resolved.get("sizing_tier", "balanced"))
-        ceph_disks_per_node = int(resolved.get("ceph_disks_per_node", 1))
-        local_disk_gib = int(resolved.get("local_disk_gib", 0))
-        profile = self._tier_to_profile(sizing_tier)
-        sizing_state = {
-            "cpu_cores": capacity.cpu_available,
-            "ram_total_mb": capacity.ram_available_mb,
-            "storage_available_gib": capacity.storage_available_gib,
-        }
-        recommendation = self.sizing_advisor.host_aware_size(
-            host_state=sizing_state,
-            nodes=nodes,
-            profile=profile,
-            residual_capacity=True,
-            ceph_disks_per_node=ceph_disks_per_node,
-            local_disk_gib=local_disk_gib,
-        )
-        try:
-            explicit_tier = SizingTier(sizing_tier)
-        except ValueError:
-            tier_defaults = None
-        else:
-            tier_defaults = SIZING_TIERS[explicit_tier]
+        recommendation = self._size_topology(resolved, capacity)
 
         resolved.setdefault("scenario", "custom")
         resolved.setdefault("user_prefix", "lab")
-        resolved["nodes"] = nodes
-        resolved.setdefault("sizing_tier", sizing_tier)
-        resolved.setdefault(
-            "node_cpu",
-            tier_defaults.cpu if tier_defaults is not None else recommendation.node_cpu,
-        )
-        resolved.setdefault(
-            "node_memory_mb",
-            (
-                tier_defaults.ram_gb * 1024
-                if tier_defaults is not None
-                else recommendation.node_memory_mb
-            ),
-        )
-        resolved.setdefault(
-            "root_disk_gib",
-            (
-                tier_defaults.root_disk_gb
-                if tier_defaults is not None
-                else recommendation.root_disk_gb
-            ),
-        )
-        resolved.setdefault(
-            "ceph_disk_gib",
-            (
-                tier_defaults.storage_disk_gb
-                if tier_defaults is not None
-                else recommendation.ceph_disk_gb
-            ),
-        )
-        resolved.setdefault("ceph_disks_per_node", ceph_disks_per_node)
-        resolved.setdefault("local_disk_gib", local_disk_gib)
+        for name, value in recommendation.deployment_parameters().items():
+            resolved.setdefault(name, value)
+        resolved.pop("workload_description", None)
+        resolved.pop("dataset_size_gib", None)
+        resolved["storage_pool"] = capacity.storage_pool
         resolved["resource_namespace"] = self._resource_namespace(workspace)
         self._resolve_network_parameters(resolved, workspace, nodes)
 
@@ -626,18 +627,40 @@ class LabOrchestrator:
             )
 
         topology = TopologySpec(
-            nodes=resolved["nodes"],
-            node_cpu=resolved["node_cpu"],
-            node_memory_mb=resolved["node_memory_mb"],
-            root_disk_gib=resolved["root_disk_gib"],
-            ceph_disk_gib=resolved["ceph_disk_gib"],
-            ceph_disks_per_node=resolved["ceph_disks_per_node"],
-            local_disk_gib=resolved["local_disk_gib"],
-            network_mode=resolved["network_mode"],
-            ovn_underlay_cidr=resolved.get("ovn_underlay_cidr"),
-            ceph_network_cidr=resolved.get("ceph_network_cidr"),
+            **{
+                **recommendation.topology.model_dump(),
+                "network_mode": resolved["network_mode"],
+                "ovn_underlay_cidr": resolved.get("ovn_underlay_cidr"),
+                "ceph_network_cidr": resolved.get("ceph_network_cidr"),
+            }
         )
         return resolved, topology
+
+    def _size_topology(
+        self,
+        parameters: dict[str, Any],
+        capacity: CapacitySnapshot,
+    ) -> HostAwareSizing:
+        return self.sizing_advisor.host_aware_size(
+            host_state={
+                "cpu_cores": capacity.cpu_available,
+                "ram_total_mb": capacity.ram_available_mb,
+                "storage_available_gib": capacity.storage_available_gib,
+            },
+            nodes=int(parameters.get("nodes", 3)),
+            profile=self._tier_to_profile(
+                parameters.get("sizing_tier"),
+                str(parameters.get("workload_description", "")),
+            ),
+            residual_capacity=True,
+            node_cpu=parameters.get("node_cpu"),
+            node_memory_mb=parameters.get("node_memory_mb"),
+            root_disk_gib=parameters.get("root_disk_gib"),
+            ceph_disk_gib=parameters.get("ceph_disk_gib"),
+            ceph_disks_per_node=int(parameters.get("ceph_disks_per_node", 1)),
+            local_disk_gib=int(parameters.get("local_disk_gib", 0)),
+            dataset_size_gib=parameters.get("dataset_size_gib"),
+        )
 
     @staticmethod
     def _resource_namespace(workspace: str) -> str:
@@ -724,8 +747,8 @@ class LabOrchestrator:
         # The playbook selects one of these for the logical OVN tenant network.
         reserved = [
             *occupied,
-            ipaddress.ip_network("192.168.250.0/24"),
-            ipaddress.ip_network("10.250.1.0/24"),
+            ipaddress.IPv4Network("192.168.250.0/24"),
+            ipaddress.IPv4Network("10.250.1.0/24"),
         ]
 
         ovn_network = (
@@ -823,10 +846,10 @@ class LabOrchestrator:
         for first_octet, ovn_second, ceph_second in candidate_bases:
             for attempt in range(240):
                 slot = 10 + ((seed + attempt) % 240)
-                candidate_ovn = ovn_network or ipaddress.ip_network(
+                candidate_ovn = ovn_network or ipaddress.IPv4Network(
                     f"{first_octet}.{ovn_second}.{slot}.0/24"
                 )
-                candidate_ceph = ceph_network or ipaddress.ip_network(
+                candidate_ceph = ceph_network or ipaddress.IPv4Network(
                     f"{first_octet}.{ceph_second}.{slot}.0/24"
                 )
                 self._validate_plane_cidr(str(candidate_ovn), nodes, "ovn_underlay_cidr")
@@ -976,7 +999,7 @@ class LabOrchestrator:
         self,
         state: dict[str, Any],
         storage_pool: str | None = None,
-        policy: str = STRICT_CAPACITY_POLICY,
+        policy: Literal["strict", "lab-overcommit"] = STRICT_CAPACITY_POLICY,
     ) -> CapacitySnapshot:
         """Calculate strict or bounded lab-overcommit residual capacity."""
         cpu_total = int(state.get("cpu_cores", 0) or 0)
@@ -986,19 +1009,14 @@ class LabOrchestrator:
         runtime_available_mb = int(state.get("ram_available_mb", 0) or 0)
         consumed_ram_mb = int(state.get("consumed_ram_mb", 0) or 0)
 
+        cpu_available = max(int(cpu_total * CPU_OVERCOMMIT_RATIO) - consumed_cpu, 0)
         if policy == LAB_OVERCOMMIT_POLICY:
-            cpu_available = max(
-                int(cpu_total * CPU_OVERCOMMIT_RATIO) - consumed_cpu,
-                0,
-            )
             ram_available_mb = max(
                 int(ram_total_mb * RAM_OVERCOMMIT_RATIO) - consumed_ram_mb,
                 0,
             )
         else:
             policy = STRICT_CAPACITY_POLICY
-            cpu_reserved = max(cpu_total // 5, 2) if cpu_total else 0
-            cpu_available = max(cpu_total - consumed_cpu - cpu_reserved, 0)
             ram_reserved_mb = max(ram_total_mb // 5, 4096) if ram_total_mb else 0
             allocation_available_mb = max(
                 ram_total_mb - consumed_ram_mb - ram_reserved_mb,
@@ -1029,6 +1047,10 @@ class LabOrchestrator:
             ram_allocated_mb=consumed_ram_mb,
             runtime_ram_available_mb=runtime_available_mb,
             allocations_complete=bool(state.get("allocations_complete", True)),
+            stopped_instances=int(state.get("stopped_instances", 0)),
+            stopped_cpu_allocated=int(state.get("stopped_cpu", 0)),
+            stopped_ram_allocated_mb=int(state.get("stopped_ram_mb", 0)),
+            stopped_allocations_complete=bool(state.get("stopped_allocations_complete", True)),
         )
 
     def _revalidate_approved_plan(self, plan: ExecutionPlan):
@@ -1080,8 +1102,8 @@ class LabOrchestrator:
                     )
                     occupied = [
                         *self._occupied_ipv4_networks(),
-                        ipaddress.ip_network("192.168.250.0/24"),
-                        ipaddress.ip_network("10.250.1.0/24"),
+                        ipaddress.IPv4Network("192.168.250.0/24"),
+                        ipaddress.IPv4Network("10.250.1.0/24"),
                     ]
                     self._reject_network_overlap(ovn_network, occupied, "OVN underlay")
                     self._reject_network_overlap(ceph_network, occupied, "Ceph")
@@ -1130,20 +1152,26 @@ class LabOrchestrator:
                         "prepare and approve a new plan.",
                     ),
                 )
-        current_state = self._collect_host_state(force=True)
         storage_pool = plan.capacity.storage_pool if plan.capacity else None
         policy = plan.capacity.policy if plan.capacity is not None else STRICT_CAPACITY_POLICY
-        current_plan = plan.model_copy(
-            update={
-                "capacity": self._capacity_snapshot(
-                    current_state,
-                    storage_pool,
-                    policy=policy,
-                )
-            }
-        )
+        try:
+            current_state = self._collect_host_state(force=True)
+            current_plan = plan.model_copy(
+                update={
+                    "capacity": self._capacity_snapshot(
+                        current_state,
+                        storage_pool,
+                        policy=policy,
+                    )
+                }
+            )
+        except RuntimeError as exc:
+            return PlanValidation(
+                valid=False,
+                errors=(f"Live capacity could not be revalidated: {exc}",),
+            )
         if (
-            policy == LAB_OVERCOMMIT_POLICY
+            (self._uses_lab_overcommit(plan) or self._uses_lab_overcommit(current_plan))
             and plan.capacity is not None
             and current_plan.capacity is not None
             and plan.topology is not None
@@ -1157,15 +1185,14 @@ class LabOrchestrator:
                 return PlanValidation(
                     valid=False,
                     errors=(
-                        "Host physical or allocated CPU/RAM changed after the "
+                        "Host logical CPU, physical RAM, or active allocations changed after the "
                         "overcommit plan was prepared.",
                     ),
                 )
             minimum_runtime_ram = max(
-                MIN_OVERCOMMIT_RUNTIME_RAM_MB,
-                plan.topology.total_ram_mb // 4 + 4096,
+                MIN_OVERCOMMIT_RUNTIME_RAM_MB, plan.topology.total_ram_mb // 4 + 4096
             )
-            if (
+            if policy == LAB_OVERCOMMIT_POLICY and (
                 not current_plan.capacity.allocations_complete
                 or current_plan.capacity.runtime_ram_available_mb < minimum_runtime_ram
             ):
@@ -1204,56 +1231,35 @@ class LabOrchestrator:
             node_label = "Nodes"
             if plan.action in {"add_cluster_node", "scale_environment"}:
                 node_label = "New nodes (resource delta)"
-            lines.extend(
-                [
-                    f"{node_label}: {topology.nodes}",
-                    "Per node: "
-                    f"{topology.node_cpu} vCPU / {topology.node_memory_mb // 1024} GiB RAM / "
-                    f"{topology.root_disk_gib} GiB root",
-                    "Storage per node: "
-                    f"{topology.ceph_disks_per_node} x {topology.ceph_disk_gib} GiB Ceph / "
-                    f"{topology.local_disk_gib} GiB local",
-                    "Network layout: "
-                    f"{topology.network_mode}"
-                    + (
-                        f" / OVN underlay {topology.ovn_underlay_cidr}"
-                        f" / Ceph {topology.ceph_network_cidr}"
-                        if topology.network_mode == SEGREGATED_NETWORK_MODE
-                        else ""
-                    ),
-                    "Totals: "
-                    f"{topology.total_cpu} vCPU / {topology.total_ram_mb // 1024} GiB RAM / "
-                    f"{topology.total_storage_gib} GiB storage",
-                ]
+            lines.append(topology.resource_summary(node_label))
+            lines.append(
+                f"Network layout: {topology.network_mode}"
+                + (
+                    f" / OVN underlay {topology.ovn_underlay_cidr}"
+                    f" / Ceph {topology.ceph_network_cidr}"
+                    if topology.network_mode == SEGREGATED_NETWORK_MODE
+                    else ""
+                )
             )
-        if (
-            plan.topology is not None
-            and plan.capacity is not None
-            and plan.capacity.policy == LAB_OVERCOMMIT_POLICY
-        ):
-            topology = plan.topology
-            capacity = plan.capacity
-            cpu_after = capacity.cpu_allocated + topology.total_cpu
-            ram_after = capacity.ram_allocated_mb + topology.total_ram_mb
-            lines.extend(
-                [
-                    "",
-                    "OVERCOMMIT WARNING",
-                    f"CPU: physical {capacity.cpu_total}, allocated "
-                    f"{capacity.cpu_allocated}, after plan {cpu_after} "
-                    f"({cpu_after / capacity.cpu_total:.2f}x; "
-                    f"limit {CPU_OVERCOMMIT_RATIO:.2f}x)",
-                    f"RAM: physical {capacity.ram_total_mb // 1024} GiB, allocated "
-                    f"{capacity.ram_allocated_mb // 1024} GiB, after plan "
-                    f"{ram_after // 1024} GiB "
-                    f"({ram_after / capacity.ram_total_mb:.2f}x; "
-                    f"limit {RAM_OVERCOMMIT_RATIO:.2f}x)",
-                    f"Runtime MemAvailable: " f"{capacity.runtime_ram_available_mb // 1024} GiB",
-                    "Storage overcommit: disabled",
-                    "Risk: simultaneous load can degrade VM latency, Ceph performance, "
-                    "and host memory stability.",
-                ]
-            )
+        if plan.topology is not None and plan.capacity is not None:
+            lines.extend(["", self._format_overcommit_evidence(plan)])
+        if self._uses_lab_overcommit(plan):
+            lines.extend(["", "OVERCOMMIT WARNING"])
+            if (
+                plan.capacity is not None
+                and plan.topology is not None
+                and plan.capacity.cpu_allocated + plan.topology.total_cpu > plan.capacity.cpu_total
+            ):
+                lines.append(
+                    "CPU allocation exceeds host logical CPUs. Simultaneous load can degrade "
+                    "VM latency and Ceph throughput; shared-host benchmarks are not isolated."
+                )
+            if plan.capacity is not None and plan.capacity.policy == LAB_OVERCOMMIT_POLICY:
+                lines.append(
+                    "RAM uses the bounded lab fallback instead of the normal host reserve. "
+                    "Simultaneous peak memory use can cause swapping or OOM."
+                )
+        lines.extend(f"Warning: {warning}" for warning in plan.warnings)
         if plan.capacity is not None and plan.environment is None:
             lines.append(f"Storage pool: {plan.capacity.storage_pool}")
         visible_params = ", ".join(
@@ -1263,7 +1269,7 @@ class LabOrchestrator:
             lines.append(f"Exact parameters: {visible_params}")
         confirmation = (
             "Approve this exact overcommit risk-bound plan?"
-            if plan.capacity is not None and plan.capacity.policy == LAB_OVERCOMMIT_POLICY
+            if self._uses_lab_overcommit(plan)
             else "Approve this exact plan?"
         )
         lines.extend(["", confirmation])
@@ -1676,104 +1682,39 @@ class LabOrchestrator:
             return f"POSTCONDITION STATUS: {report.status}\n{report.as_tool_result()}"
 
         if action == "propose_custom_topology":
-            nodes = int(parameters.get("node_count", 3))
-            cpu = int(parameters.get("node_cpu", 2))
-            ram = int(parameters.get("node_ram_gb", 8))
-            root = int(parameters.get("root_disk_gb", 40))
-            ceph = int(parameters.get("ceph_disk_gb", 50))
-            network_mode = str(parameters.get("network_mode", STANDARD_NETWORK_MODE))
-            reasoning = parameters.get("reasoning", "")
-            trade_offs = parameters.get("trade_offs", "")
-            alternative = parameters.get("alternative", "")
-
-            state = self._collect_host_state()
-            capacity = self._capacity_snapshot(state)
-            topology = TopologySpec(
-                nodes=nodes,
-                node_cpu=cpu,
-                node_memory_mb=ram * 1024,
-                root_disk_gib=root,
-                ceph_disk_gib=ceph,
-                ceph_disks_per_node=1,
-                local_disk_gib=0,
+            normalized = {
+                "nodes": int(parameters["node_count"]),
+                "node_cpu": int(parameters["node_cpu"]),
+                "node_memory_mb": int(parameters["node_ram_gb"]) * 1024,
+                "ceph_disk_gib": int(parameters["ceph_disk_gb"]),
+                "ceph_disks_per_node": int(parameters.get("ceph_disks_per_node", 1)),
+                "local_disk_gib": int(parameters.get("local_disk_gib", 0)),
+                "reasoning": parameters.get("reasoning", ""),
+                "trade_offs": parameters.get("trade_offs", ""),
+                "alternative": parameters.get("alternative", ""),
+            }
+            if "root_disk_gb" in parameters:
+                normalized["root_disk_gib"] = int(parameters["root_disk_gb"])
+            if "dataset_size_gib" in parameters:
+                normalized["dataset_size_gib"] = int(parameters["dataset_size_gib"])
+            result = self._sizing_recommendation(normalized)
+            network_mode = parameters.get("network_mode", STANDARD_NETWORK_MODE)
+            result += (
+                f"\nNetwork layout: {network_mode} "
+                "(plane CIDRs are resolved and collision-checked in the exact deploy plan)"
             )
-            proposal_plan = ExecutionPlan(
-                action="deploy_microcloud",
-                parameters={"nodes": nodes},
-                summary="Validate topology proposal",
-                topology=topology,
-                capacity=capacity,
-            )
-            validation = self.plan_validator.validate(proposal_plan)
-            if not validation.valid:
-                return self._format_plan_validation_failure(validation.errors)
-
-            total_cpu = nodes * cpu
-            total_ram = nodes * ram
-            total_ceph_raw = nodes * ceph
-            total_ceph_usable = int(total_ceph_raw / 3)
-
-            lines = [
-                "Custom topology proposal",
-                "",
-                f"  Nodes            : {nodes}",
-                f"  vCPU / node      : {cpu} (total: {total_cpu} vCPU)",
-                f"  RAM / node       : {ram} GB (total: {total_ram} GB)",
-                f"  Root disk / node : {root} GB",
-                f"  Ceph disk / node : {ceph} GB",
-                f"  Ceph capacity    : ~{total_ceph_usable} GB usable ({total_ceph_raw} GB raw, estimated 3x replication)",
-                "  OVN networking   : enabled (required by this automation)",
-                f"  Network layout   : {network_mode}",
-            ]
             if network_mode == SEGREGATED_NETWORK_MODE:
-                lines.append(
-                    "  Dedicated planes : mgmt0 / IP-free OVN uplink / "
+                result += (
+                    "\nDedicated planes: mgmt0 / IP-free OVN uplink / "
                     "OVN underlay / Ceph public+internal"
                 )
-                lines.append(
-                    "  Plane CIDRs      : resolved and collision-checked in the exact deploy plan"
-                )
-            if reasoning:
-                lines += ["", "Why:", f"  {reasoning}"]
-            if trade_offs:
-                lines += ["", "Trade-offs:", f"  {trade_offs}"]
-            if alternative:
-                lines += ["", "Alternative:", f"  {alternative}"]
-            return "\n".join(lines)
+            return result
 
         if action == "get_sizing_recommendation":
-            scenario_name = parameters.get("scenario", "custom")
-            nodes_value = parameters.get("nodes")
-            requested_nodes = int(nodes_value) if nodes_value is not None else None
-            workload = parameters.get("workload_description", "")
-            tier_str = parameters.get("tier")
-            tier = SizingTier(tier_str) if tier_str else None
-
-            # Prefer host-aware sizing: it mirrors deploy_microcloud.sh exactly, so
-            # the numbers shown to the user are what will actually be provisioned.
-            host_state = self._collect_host_state()
-            if host_state.get("cpu_cores"):
-                profile = self._tier_to_profile(tier_str, workload)
-                capacity = self._capacity_snapshot(host_state)
-                host_sizing = self.sizing_advisor.host_aware_size(
-                    host_state={
-                        "cpu_cores": capacity.cpu_available,
-                        "ram_total_mb": capacity.ram_available_mb,
-                        "storage_available_gib": capacity.storage_available_gib,
-                    },
-                    nodes=requested_nodes or 3,
-                    profile=profile,
-                    residual_capacity=True,
-                )
-                return host_sizing.summary()
-
-            rec = self.sizing_advisor.recommend(
-                scenario_name=scenario_name,
-                nodes=requested_nodes,
-                workload_description=workload,
-                override_tier=tier,
-            )
-            return rec.summary()
+            normalized = dict(parameters)
+            if "tier" in normalized:
+                normalized["sizing_tier"] = normalized.pop("tier")
+            return self._sizing_recommendation(normalized)
 
         if action == "get_documentation":
             topic = parameters.get("topic", "microcloud")
@@ -1792,6 +1733,49 @@ class LabOrchestrator:
             )
 
         return None
+
+    def _sizing_recommendation(self, parameters: dict[str, Any]) -> str:
+        state = self._collect_host_state(force=True)
+        if not state.get("cpu_cores") or not state.get("ram_total_mb"):
+            logger.error("Cannot size a lab without measured host CPU and RAM.")
+            return "Error: host CPU/RAM measurements are unavailable; refresh host inspection."
+        capacity = self._capacity_snapshot(state)
+        sizing = self._size_topology(parameters, capacity)
+        plan = ExecutionPlan(
+            action="deploy_microcloud",
+            parameters=parameters,
+            summary="Validate sizing recommendation",
+            topology=sizing.topology,
+            capacity=capacity,
+        )
+        validation = self.plan_validator.validate(plan)
+        sections = [
+            sizing.summary(),
+            f"Storage pool: {capacity.storage_pool}\n{self._format_overcommit_evidence(plan)}",
+        ]
+        if not validation.valid:
+            errors = "\n".join(f"- {error}" for error in validation.errors)
+            sections.insert(
+                0, f"Error: sizing does not fit the current allocation budget:\n{errors}"
+            )
+            if self._build_lab_overcommit_plan(plan, validation.errors) is not None:
+                sections.append(
+                    "A bounded RAM fallback is possible, but it requires a separate "
+                    "assessment and explicit confirmation when requesting deployment."
+                )
+        if self._uses_lab_overcommit(plan):
+            sections.append(
+                "CPU allocation exceeds host logical CPUs. Shared-host contention can "
+                "affect latency and benchmark results; deployment requires confirmation."
+            )
+        for field, heading in (
+            ("reasoning", "AI rationale"),
+            ("trade_offs", "Trade-offs"),
+            ("alternative", "Alternative"),
+        ):
+            if parameters.get(field):
+                sections.append(f"{heading}: {parameters[field]}")
+        return "\n\n".join(sections)
 
     def _inspect_host_environment(self) -> str:
         """Collect host facts for grounded planning decisions."""
@@ -1877,6 +1861,7 @@ class LabOrchestrator:
             consumed_cpu,
             consumed_ram_mb,
             allocations_complete,
+            stopped_allocations,
         ) = self._collect_environment_usage()
         consumed_ram_gb = consumed_ram_mb / 1024
 
@@ -1895,6 +1880,7 @@ class LabOrchestrator:
             "consumed_ram_mb": consumed_ram_mb,
             "consumed_ram_gb": consumed_ram_gb,
             "allocations_complete": allocations_complete,
+            **stopped_allocations,
         }
 
         self._host_state_cache = state
@@ -1902,42 +1888,48 @@ class LabOrchestrator:
         return state
 
     def _get_pool_available_gib(self, pool: str) -> int:
-        """Return free space in an LXD storage pool, with a source-path fallback."""
-        quoted_pool = shlex.quote(pool)
-        info = self._run_host_cmd(f"lxc storage info {quoted_pool} --bytes 2>/dev/null")
-        total_bytes: int | None = None
-        used_bytes: int | None = None
-        for raw in info.splitlines():
-            key, separator, value = raw.strip().partition(":")
-            if not separator:
-                continue
-            numeric_value = value.strip().strip('"')
-            if not numeric_value.isdigit():
-                continue
-            if key.lower() == "total space":
-                total_bytes = int(numeric_value)
-            elif key.lower() == "space used":
-                used_bytes = int(numeric_value)
-        if total_bytes is not None and used_bytes is not None:
-            return max((total_bytes - used_bytes) // (1024**3), 0)
-
-        source = self._run_host_cmd(f"lxc storage get {quoted_pool} source 2>/dev/null")
-        if not source.startswith("/"):
-            return 0
-        df_out = self._run_host_cmd(
-            f"df -BG -- {shlex.quote(source)} 2>/dev/null "
-            "| awk 'NR==2 {gsub(/G/,\"\",$4); print $4}'"
+        """Measure the selected pool, never substitute another filesystem's free space."""
+        path = f"/1.0/storage-pools/{quote(pool, safe='')}/resources"
+        raw = self._run_host_cmd_checked(f"lxc query {shlex.quote(path)}")
+        error = (
+            f"Available space in LXD pool '{pool}' could not be measured safely. "
+            "Check its resource metrics before requesting sizing or deployment."
         )
-        return self._parse_int(df_out, default=0)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(error) from exc
+        metrics = payload.get("metadata", payload) if isinstance(payload, dict) else None
+        space = metrics.get("space") if isinstance(metrics, dict) else None
+        if not isinstance(space, dict):
+            raise RuntimeError(error)
+        total = space.get("total")
+        used = space.get("used")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or not isinstance(used, int)
+            or isinstance(used, bool)
+            or total <= 0
+            or not 0 <= used <= total
+        ):
+            raise RuntimeError(error)
+        return (total - used) // (1024**3)
 
     def _collect_environment_usage(
         self,
-    ) -> tuple[list[dict[str, Any]], int, int, bool]:
-        """List labs while accounting for every competing LXD instance.
+    ) -> tuple[list[dict[str, Any]], int, int, bool, dict[str, Any]]:
+        """Count active commitments and report stopped commitments separately.
 
         Lab VMs follow the naming pattern '<prefix>-node-<n>'. We group by prefix,
-        but CPU/RAM totals include all projects and all instance names.
+        but CPU/RAM totals include active instances in every project.
         """
+        stopped: dict[str, Any] = {
+            "stopped_instances": 0,
+            "stopped_cpu": 0,
+            "stopped_ram_mb": 0,
+            "stopped_allocations_complete": True,
+        }
         try:
             csv_out = self._run_host_cmd_checked(
                 "lxc list --all-projects --format csv "
@@ -1946,9 +1938,9 @@ class LabOrchestrator:
             )
         except RuntimeError as exc:
             logger.warning("Could not collect LXD allocation limits: %s", exc)
-            return [], 0, 0, False
+            return [], 0, 0, False, stopped
         if not csv_out:
-            return [], 0, 0, True
+            return [], 0, 0, True, stopped
 
         groups: dict[str, dict[str, Any]] = {}
         total_cpu = 0
@@ -1957,18 +1949,29 @@ class LabOrchestrator:
         for cols in csv.reader(csv_out.splitlines()):
             cols = [column.strip() for column in cols]
             if len(cols) < 5 or not cols[1]:
+                logger.warning("Malformed LXD allocation row; inventory is incomplete.")
+                complete = False
                 continue
             name = cols[1]
-            status = cols[2].upper()
-            if status not in {"RUNNING", "FROZEN"}:
-                continue
             cpu = self._parse_cpu_limit(cols[3])
             ram_mb = self._parse_memory_mb(cols[4])
-            if cpu is None or ram_mb is None:
-                complete = False
+            is_stopped = cols[2].upper() == "STOPPED"
+            if is_stopped:
+                stopped["stopped_instances"] += 1
+                stopped["stopped_cpu"] += cpu or 0
+                stopped["stopped_ram_mb"] += ram_mb or 0
+                if cpu is None or ram_mb is None:
+                    stopped["stopped_allocations_complete"] = False
             else:
-                total_cpu += cpu
-                total_ram_mb += ram_mb
+                if cpu is None or ram_mb is None:
+                    logger.warning(
+                        "Active LXD limits are unbounded or unsupported: %s/%s",
+                        cols[0],
+                        name,
+                    )
+                    complete = False
+                total_cpu += cpu or 0
+                total_ram_mb += ram_mb or 0
 
             match = re.match(r"^(?P<prefix>.+)-node-\d+$", name)
             if not match:
@@ -1986,13 +1989,16 @@ class LabOrchestrator:
                     "node_ram_gb": node_ram_mb / 1024,
                     "total_cpu": 0,
                     "total_ram_gb": 0,
+                    "active_nodes": 0,
+                    "stopped_nodes": 0,
                 },
             )
             env["nodes"] += 1
             env["total_cpu"] += node_cpu
             env["total_ram_gb"] += node_ram_mb / 1024
+            env["stopped_nodes" if is_stopped else "active_nodes"] += 1
 
-        return list(groups.values()), total_cpu, total_ram_mb, complete
+        return list(groups.values()), total_cpu, total_ram_mb, complete, stopped
 
     @staticmethod
     def _parse_int(value: str, default: int = 0) -> int:
@@ -2007,24 +2013,33 @@ class LabOrchestrator:
 
     @staticmethod
     def _parse_memory_mb(value: str) -> int | None:
-        """Parse an LXD memory limit into MiB without truncating allocations."""
-        if not value or "%" in value:
+        """Account in whole MiB, rounding allocations up rather than undercounting."""
+        size = LabOrchestrator._parse_byte_size(value)
+        if size is None or not size:
             return None
-        num_match = re.search(r"[0-9]+(?:\.[0-9]+)?", value)
-        if not num_match:
+        return int((size / (1024**2)).to_integral_value(rounding=ROUND_CEILING))
+
+    @staticmethod
+    def _parse_byte_size(value: str) -> Decimal | None:
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)", (value or "").strip())
+        if match is None:
             return None
-        num = float(num_match.group(0))
-        unit_match = re.search(r"[A-Za-z]+", value)
-        unit = (unit_match.group(0) if unit_match else "GiB").upper()
-        if unit.startswith("T"):
-            return int(num * 1024 * 1024)
-        if unit.startswith("G"):
-            return int(num * 1024)
-        if unit.startswith("M"):
-            return int(num)
-        if unit.startswith("K"):
-            return int(num / 1024)
-        return None
+        units = {
+            "": 1,
+            "b": 1,
+            "kb": 1000,
+            "mb": 1000**2,
+            "gb": 1000**3,
+            "tb": 1000**4,
+            "kib": 1024,
+            "mib": 1024**2,
+            "gib": 1024**3,
+            "tib": 1024**4,
+        }
+        multiplier = units.get(match.group(2).lower())
+        if multiplier is None:
+            return None
+        return Decimal(match.group(1)) * multiplier
 
     @staticmethod
     def _parse_cpu_limit(value: str) -> int | None:
@@ -2032,12 +2047,14 @@ class LabOrchestrator:
         if not value:
             return None
         if value.isdigit():
-            return int(value)
+            return int(value) or None
         cpus: set[int] = set()
         try:
             for item in value.split(","):
                 if "-" in item:
                     start, end = (int(part) for part in item.split("-", 1))
+                    if start > end:
+                        return None
                     cpus.update(range(start, end + 1))
                 else:
                     cpus.add(int(item))
@@ -2045,48 +2062,9 @@ class LabOrchestrator:
             return None
         return len(cpus) if cpus else None
 
-    # An explicit tier is a decision the model already made; it maps directly to
-    # a sizing profile. Free-text inference is only a fallback for when no tier
-    # was supplied.
-    _TIER_PROFILES: dict[str, str] = {
-        "minimal": "conservative",
-        "conservative": "conservative",
-        "small": "balanced",
-        "medium": "balanced",
-        "balanced": "balanced",
-        "large": "performance",
-        "performance": "performance",
-    }
-
     @staticmethod
     def _tier_to_profile(tier_str: str | None, workload: str = "") -> str:
-        """Map a requested tier/workload to a host-aware sizing profile."""
-        explicit = (tier_str or "").strip().lower()
-        if explicit in LabOrchestrator._TIER_PROFILES:
-            # Honour the model's choice instead of re-deriving it from prose,
-            # where an unrelated word such as "dev" could silently downgrade it.
-            return LabOrchestrator._TIER_PROFILES[explicit]
-
-        text = f"{explicit} {workload or ''}".lower()
-        if any(
-            k in text
-            for k in ("minimal", "poc", "proof of concept", "dev", "sandbox", "conservative")
-        ):
-            return "conservative"
-        if any(
-            k in text
-            for k in (
-                "large",
-                "production",
-                "prod",
-                "performance",
-                "ha",
-                "high availability",
-                "enterprise",
-            )
-        ):
-            return "performance"
-        return "balanced"
+        return SizingAdvisor.profile_for(tier_str, workload)
 
     def _format_host_state_report(self, state: dict[str, Any]) -> str:
         """Human-readable host snapshot returned by inspect_host_environment."""
@@ -2094,6 +2072,7 @@ class LabOrchestrator:
         if envs:
             env_lines = "\n".join(
                 f"    - {e['name']}: {e['nodes']} nodes "
+                f"({e.get('stopped_nodes', 0)} stopped) "
                 f"({e['node_cpu']} vCPU / {e['node_ram_gb']} GB each, "
                 f"total {e['total_cpu']} vCPU / {e['total_ram_gb']} GB)"
                 for e in envs
@@ -2107,14 +2086,20 @@ class LabOrchestrator:
             "Host environment snapshot\n"
             "  Deployment mode : nested-lxd-lab (OpenTofu creates MicroCloud VMs)\n"
             "  Ceph disk model : per-node virtual block volumes are provisioned automatically\n"
-            f"  CPU cores        : {state.get('cpu_cores', 'unknown')}\n"
+            f"  Logical CPUs     : {state.get('cpu_cores', 'unknown')}\n"
             f"  RAM              : {ram_total_gb} GB total ({ram_avail_gb} GB available)\n"
             f"  Disk devices     : {state.get('disks', 'unknown')}\n"
             f"  LXD version      : {state.get('lxd_version', 'unknown')}\n"
             f"  LXD networks     : {state.get('lxd_networks', 'unknown')}\n"
             f"  LXD storage pool : {state.get('lxd_storage_pools', 'unknown')} "
             f"(~{state.get('storage_available_gib', 0)} GiB free in '{state.get('primary_pool', 'default')}')\n"
-            "  Active lab environments:\n"
+            f"  Active allocations: {state.get('consumed_cpu', 0)} vCPU / "
+            f"{state.get('consumed_ram_mb', 0) / 1024:g} GiB RAM\n"
+            f"  Stopped instances: {state.get('stopped_instances', 0)} (excluded from active budget)\n"
+            f"  Stopped known limits: {state.get('stopped_cpu', 0)} vCPU / "
+            f"{state.get('stopped_ram_mb', 0) / 1024:g} GiB RAM "
+            f"(all stopped limits readable: {state.get('stopped_allocations_complete', True)})\n"
+            "  Lab environments (including stopped members):\n"
             f"{env_lines}"
         )
 
@@ -2140,17 +2125,26 @@ class LabOrchestrator:
             env_lines = "    (none)"
 
         return (
-            f"  Host capacity : {cpu} vCPU | {ram_total_gb} GB RAM total "
+            f"  Host capacity : {cpu} logical CPUs | {ram_total_gb} GB RAM total "
             f"({ram_avail_gb} GB available) | {free_storage} GiB free in pool '{pool}'\n"
             f"  LXD version   : {state.get('lxd_version', 'unknown')}\n"
             f"  LXD networks  : {state.get('lxd_networks', 'unknown')}\n"
-            f"  Lab/VM allocations: {consumed_cpu} vCPU / "
-            f"{int(consumed_ram_mb) // 1024} GB RAM\n"
-            f"  Active lab environments (already consuming resources):\n"
+            f"  Active LXD allocations: {consumed_cpu} vCPU / "
+            f"{int(consumed_ram_mb) / 1024:g} GiB RAM\n"
+            f"  Stopped instances excluded: {state.get('stopped_instances', 0)}; "
+            f"known future limits {state.get('stopped_cpu', 0)} vCPU / "
+            f"{state.get('stopped_ram_mb', 0) / 1024:g} GiB RAM "
+            f"(complete: {state.get('stopped_allocations_complete', True)}). "
+            "Recheck capacity before restarting them.\n"
+            f"  Active allocation inventory complete: {strict.allocations_complete}\n"
+            "  Lab environments (including stopped members):\n"
             f"{env_lines}\n"
-            f"  Strict safe headroom for new labs: {strict.cpu_available} vCPU / "
-            f"{strict.ram_available_mb // 1024} GB RAM / "
-            f"{strict.storage_available_gib} GiB storage"
+            f"  New lab budget: {strict.cpu_available} vCPU "
+            f"(CPU allocation limit {CPU_OVERCOMMIT_RATIO:g}:1) / "
+            f"{strict.ram_available_mb / 1024:g} GiB RAM (normal host reserve) / "
+            f"{strict.storage_available_gib} GiB storage (no overcommit).\n"
+            "  CPU allocation is not CPU usage or guaranteed performance. "
+            "Use sizing tools for exact totals; do not recalculate them."
         )
 
     # Whitelist of parameters each script actually accepts.
@@ -2169,6 +2163,7 @@ class LabOrchestrator:
             "ceph_disk_gib",
             "ceph_disks_per_node",
             "local_disk_gib",
+            "storage_pool",
             "network_mode",
             "ovn_underlay_cidr",
             "ceph_network_cidr",
@@ -2384,6 +2379,9 @@ class LabOrchestrator:
     def _script_environment(self) -> dict[str, str]:
         """Return the environment contract shared by all lifecycle scripts."""
         child_env = os.environ.copy()
+        if get_snap_root() is None:
+            child_env.pop("SNAP", None)
+            child_env.pop("SNAP_USER_COMMON", None)
         child_env["LAB_AI_TERRAFORM_DIR"] = str(self.config.terraform_dir)
         return child_env
 
