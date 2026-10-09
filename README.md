@@ -1,223 +1,281 @@
 # Canonical AI Lab Assistant
 
-Canonical AI Lab Assistant turns a natural-language request into a working
-MicroCloud lab on your Ubuntu machine.
+Build a working MicroCloud lab on one Ubuntu machine by describing what you
+need in plain English.
 
-Tell the assistant what you want to learn, demonstrate, or test. It inspects the
-host, proposes a topology, shows the exact plan for approval, provisions LXD
-virtual machines with OpenTofu, configures MicroCloud with Ansible, and verifies
-the finished cluster.
+```text
+You:        Create a three-node MicroCloud training lab called demo.
+Assistant:  Shows an exact plan: VMs, CPU, memory, disks, and networks.
+You:        yes
+Assistant:  Creates the VMs, installs MicroCloud, and checks that it is healthy.
+```
+
+You do not need to know how to install MicroCloud, LXD, Ceph, or OVN. The
+assistant prepares everything and always asks before it changes anything.
 
 > [!IMPORTANT]
-> This project creates local lab, training, demo, and proof-of-concept
-> environments. It is not a production deployment tool.
-
-**Start here:** follow [Quick start](#quick-start), then
-[Create your first lab](#create-your-first-lab). You do not need to write
-OpenTofu configuration, Ansible playbooks, or a MicroCloud preseed file.
-The supported installation method is currently a source checkout, not a
-single application snap.
+> This tool is for labs, training, demos, and proofs of concept. It is not a
+> production deployment tool.
 
 ## Contents
 
-- [What you can do](#what-you-can-do)
+**Getting started**
+
+1. [Before you begin](#1-before-you-begin)
+2. [Install](#2-install)
+3. [Create your first lab](#3-create-your-first-lab)
+4. [Use your lab](#4-use-your-lab)
+5. [Manage your labs](#5-manage-your-labs)
+6. [If something goes wrong](#6-if-something-goes-wrong)
+
+**Reference**
+
 - [How it works](#how-it-works)
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
-- [Create your first lab](#create-your-first-lab)
-- [Access your lab](#access-your-lab)
-- [Common tasks](#common-tasks)
-- [Update the assistant](#update-the-assistant)
-- [Understand your deployment](#understand-your-deployment)
-- [Safety model](#safety-model)
+- [Choosing the AI model](#choosing-the-ai-model)
+- [Lab size and host capacity](#lab-size-and-host-capacity)
+- [Network layouts](#network-layouts)
+- [Approvals and safety](#approvals-and-safety)
+- [Your data and backups](#your-data-and-backups)
+- [Updating the assistant](#updating-the-assistant)
 - [Configuration](#configuration)
 - [Command reference](#command-reference)
-- [Troubleshooting](#troubleshooting)
-- [State and backups](#state-and-backups)
-- [Architecture](#architecture)
+- [Detailed troubleshooting](#detailed-troubleshooting)
 - [Development](#development)
 - [Current limitations](#current-limitations)
 
-## What you can do
+---
 
-- Design a MicroCloud topology from a plain-English request.
-- Size the lab against live CPU, memory, and storage capacity.
-- Create 3-50 MicroCloud members as LXD virtual machines.
-- Configure LXD, MicroCeph, and MicroOVN automatically.
-- Attach 1-8 virtual Ceph OSD disks to each member.
-- Add an optional local ZFS disk to each member.
-- Choose a simple two-NIC network or a fully segregated four-NIC layout.
-- List, expand, verify, and delete environments through chat.
-- Ask questions grounded in current official Canonical documentation.
-- Diagnose deployment failures with deterministic evidence and AI-assisted
-  explanations.
+## 1. Before you begin
 
-## How it works
+You need an **Ubuntu machine** (Ubuntu 24.04 recommended) with:
 
-```text
-Natural-language request
-        |
-        v
-Observe the host and existing labs
-        |
-        v
-AI proposes a topology and selects an action
-        |
-        v
-Python validates names, capacity, state, and safety
-        |
-        v
-User approves the exact immutable plan
-        |
-        v
-OpenTofu creates LXD infrastructure
-        |
-        v
-Ansible configures MicroCloud, MicroCeph, and MicroOVN
-        |
-        v
-Independent post-deployment verification
-```
+| Requirement | Why |
+|---|---|
+| A user with `sudo` access | Setup installs LXD and other tools |
+| Internet access | Setup downloads packages, the AI model, and VM images |
+| Hardware virtualization | Lab members are virtual machines |
+| About 32 GiB RAM and 200 GiB free disk | Enough for the first small lab and the local AI model |
 
-The AI plans, explains, and recommends trade-offs. Deterministic code owns live
-facts, hard limits, resource names, approval binding, locking, and
-postconditions. Lab deployment, expansion, and deletion through chat require
-approval. The bootstrap commands separately request `sudo` access to prepare
-the host.
+The machine can be a physical server, a desktop, or a VM, including a
+public-cloud VM, as long as it can run virtual machines itself.
 
-Throughout this guide:
-
-- **Host** means the Ubuntu machine on which you run the assistant.
-- **Member** or **node** means one of the Ubuntu VMs created for your lab.
-- **Environment** means one complete lab, identified by a workspace name such
-  as `demo_microcloud`.
-- **LXD** manages the host VMs; **MicroCloud** configures the cluster inside them.
-- **OpenTofu** creates and tracks resources; **Ansible** installs and configures
-  the software inside the members.
-
-## Requirements
-
-Use an Ubuntu host with:
-
-- Ubuntu 24.04 recommended
-- Python 3.10 or newer
-- Git, Python's `venv` module, and curl
-- A user account with `sudo` access
-- Hardware virtualization available to LXD
-- Internet access for snaps, Ubuntu images, and documentation
-- Enough CPU, RAM, and storage for the requested nested VMs
-
-Bare-metal Ubuntu and Ubuntu VMs can be used, including public-cloud VMs,
-**provided the host can run LXD virtual machines**. This does not mean every
-cloud instance type supports the required virtualization.
-
-For the small lab in this guide, the VMs alone request 6 vCPU, 12 GiB RAM,
-and 150 GiB storage. You also need memory for Ubuntu and local inference, model
-download space, and the storage pool's 20 GiB reserve. As a practical starting
-point, use about 32 GiB host RAM and at least 200 GiB free in the LXD storage
-pool. This is guidance, not a universal minimum or a performance guarantee;
-existing workloads and the selected model also matter.
-
-The bootstrap process installs or prepares:
-
-- snapd
-- LXD
-- OpenTofu
-- Ansible and the required collection
-- A dedicated lab SSH key
-- A local Canonical inference snap (`gemma4` by default)
-
-### Running inside a VM
-
-The assistant creates LXD **virtual machines**, so a host VM must expose nested
-hardware virtualization. If nested virtualization is unavailable, LXD VM
-creation will fail even if LXD itself installs successfully.
-
-Before bootstrapping, check that the host exposes KVM:
+Check virtualization now:
 
 ```bash
 ls -l /dev/kvm
 ```
 
-If the device is missing, enable hardware virtualization in the bare-metal
-machine's firmware, or enable nested virtualization in the parent hypervisor.
-For public cloud, check that the chosen instance type supports it. Installing
-LXD cannot enable a feature the hypervisor does not expose.
+If this prints `No such file or directory`, the machine cannot run the lab
+VMs. Enable virtualization in the BIOS/firmware, or choose a VM or cloud
+instance type that supports nested virtualization. See
+[LXD cannot create virtual machines](#lxd-cannot-create-virtual-machines).
 
-Use a host you are authorized to modify. Bootstrap installs system packages,
-initializes LXD when necessary, and may create a bridge and storage pool.
-Membership of the `lxd` group gives powerful host-management access; do not
-grant it to untrusted users.
+> [!NOTE]
+> Use a machine you are allowed to change. Setup installs system packages and
+> configures LXD.
 
-### Model download
+## 2. Install
 
-The inference snap is small, but its selected model is downloaded separately.
-The first bootstrap can therefore take several minutes, depending on your
-connection.
+Run these commands in a terminal on the Ubuntu machine, as your normal user
+(not as `root`).
 
-Approximate `gemma4` model sizes:
-
-| Model | Approximate download | Recommended use |
-|---|---:|---|
-| `e2b` | 2.9 GB | Small, CPU-only, or bandwidth-constrained hosts |
-| `e4b` | 5.0 GB | Default; balanced local experience |
-| `26b` | 15.8 GB | Optional; not needed for the normal lab workflow |
-
-The configured value `gemma4` is a generic alias. Auto-discovery resolves it to
-the model currently selected by the snap; a fresh default installation normally
-selects `e4b`.
-
-To choose `e2b` **before the first default model download**, use the alternative
-bootstrap commands in [Quick start](#2-bootstrap-the-host).
-The model runs on the host, not separately in each lab member.
-The assistant uses local inference for chat; downloads, package installation,
-and documentation retrieval still require internet access.
-
-## Quick start
-
-Run the following commands in a terminal **on the Ubuntu host**, as your normal
-user. Do not run the launcher with `sudo`; the individual setup steps request
-elevated privileges when needed.
-
-### 1. Install the launcher prerequisites and clone the repository
-
-On a fresh Ubuntu installation:
+**Step 1 — Install the basic tools and download the assistant**
 
 ```bash
 sudo apt update
 sudo apt install -y git python3 python3-venv curl openssh-client
-```
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
 
-Then clone the project:
-
-```bash
 git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
 cd canonical-ai-lab-assistant
 ```
 
-Keep this checkout: it will contain the state needed to manage your labs.
-Run subsequent commands from this directory.
+Keep this folder. The assistant stores the information it needs to manage
+your labs here. Run every later command from this folder.
 
-### 2. Bootstrap the host
-
-Ensure the directory for the dedicated lab SSH key exists:
-
-```bash
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-```
-
-For the default model:
+**Step 2 — Prepare the machine**
 
 ```bash
 ./dev.sh --bootstrap
 ```
 
-`dev.sh` creates the Python virtual environment, installs the current checkout,
-and runs the host bootstrap. It prompts for your `sudo` password before changing
-host-level packages and services.
+This asks for your `sudo` password, then installs LXD, OpenTofu, Ansible, and
+the local AI model. The first run downloads several GB and can take a while.
+Leave the terminal open until it finishes.
 
-**Optional: smaller first download.** Instead of the command above, run:
+> [!TIP]
+> On a slow connection or a small machine, you can install a smaller AI model
+> instead. See [Choosing the AI model](#choosing-the-ai-model) **before**
+> running this step.
+
+**Step 3 — Log out and log back in**
+
+Setup adds your user to the `lxd` group if needed. Log out and back in (or
+reconnect your SSH session) so this takes effect. Then return to the folder and check:
+
+```bash
+cd canonical-ai-lab-assistant
+lxc info
+./dev.sh --check
+```
+
+`lxc info` should print LXD details without asking for `sudo`. The check
+should report:
+
+```text
+✓ Inference engine available at ...
+```
+
+If it does not, see [The AI service is unavailable](#the-ai-service-is-unavailable).
+
+**Step 4 — Start the assistant**
+
+```bash
+./dev.sh --chat
+```
+
+You only need to run setup once. Next time, just run `./dev.sh --chat` from
+this folder. Type `help` for help and `quit` to leave.
+
+## 3. Create your first lab
+
+Type this **in the assistant chat**:
+
+```text
+Create a three-node MicroCloud training lab called demo.
+```
+
+The assistant checks your machine, chooses a suitable size, and shows the
+exact plan: the VMs, CPU, memory, disks, and network it will create.
+
+Read the plan, then type:
+
+```text
+yes
+```
+
+Type `no` instead to cancel. Nothing is created until you type `yes`.
+
+Deployment takes several minutes. When it finishes, the assistant shows:
+
+- the names and IP addresses of the lab members
+- whether MicroCloud, LXD, MicroCeph, and MicroOVN are healthy
+
+You can also give exact sizes:
+
+```text
+Create a three-node lab called demo with 2 vCPU, 4 GiB RAM, a 30 GiB root
+disk, and one 20 GiB Ceph disk per node.
+```
+
+## 4. Use your lab
+
+Each lab member is an Ubuntu VM. For the `demo` lab, they are called
+`demo-microcloud-node-1`, `demo-microcloud-node-2`, and so on.
+
+In a host terminal (outside the chat), list them and look at the cluster:
+
+```bash
+lxc list
+lxc exec demo-microcloud-node-1 -- microcloud cluster list
+```
+
+To work inside a member, open a shell. Type `exit` to return to the host:
+
+```bash
+lxc exec demo-microcloud-node-1 -- bash
+```
+
+> [!NOTE]
+> Lab members use private IP addresses. If your Ubuntu machine is a remote or
+> cloud VM, connect to it with SSH first and use the commands above from there.
+
+Leaving the chat does **not** stop or delete your lab. It keeps using the
+machine's resources until you delete it.
+
+## 5. Manage your labs
+
+Type these requests in the chat. A lab called `demo` is managed with the
+name `demo_microcloud`.
+
+| To do this | Type |
+|---|---|
+| See your labs | `List my MicroCloud environments.` |
+| Check health | `Check the health of demo_microcloud.` |
+| Add a member | `Add one node to demo_microcloud.` |
+| Grow to a size | `Scale demo_microcloud to five nodes.` |
+| Delete a lab | `Delete demo_microcloud.` |
+| Get a size suggestion | `Recommend a three-node lab for this machine.` |
+| Ask a question | `Explain how MicroCeph stores data in my lab.` |
+
+Adding, scaling, and deleting always show a plan first and wait for `yes`.
+
+> [!WARNING]
+> Deleting a lab permanently removes its VMs and disks. Read the plan carefully
+> and type `no` if it names the wrong lab.
+
+## 6. If something goes wrong
+
+| Problem | What to do |
+|---|---|
+| `lxc` asks for `sudo` or permission is denied | Log out and back in, then run `lxc info` |
+| The AI service is unavailable | Run `./dev.sh --diagnose` — see [details](#the-ai-service-is-unavailable) |
+| The plan does not fit on your machine | Ask for a smaller lab, or delete a lab you no longer need — see [details](#the-plan-does-not-fit) |
+| A name is already in use | Choose another lab name |
+| Deployment fails | Read the error, then ask `Check the health of demo_microcloud.` — see [details](#a-deployment-fails) |
+| The first answer after a break is slow | Normal; the AI model is loading again |
+
+When an operation fails, nothing keeps running in the background. Do not
+delete files in this folder to "start fresh"; they track your existing labs.
+
+More help: [Detailed troubleshooting](#detailed-troubleshooting).
+
+---
+
+# Reference
+
+The sections below explain the details. You do not need them for normal use.
+
+## How it works
+
+```text
+Your request
+   → the assistant inspects the machine and existing labs
+   → the AI proposes a lab and explains the trade-offs
+   → Python checks capacity, names, and safety rules
+   → you approve the exact plan
+   → OpenTofu creates the LXD VMs, disks, and networks
+   → Ansible installs and configures MicroCloud
+   → the assistant verifies the finished cluster
+```
+
+The AI decides *what* to build and explains why. Python code does all the
+arithmetic, enforces the limits, and runs only the plan you approved.
+
+Terms used in this guide:
+
+| Term | Meaning |
+|---|---|
+| Host | The Ubuntu machine where you run the assistant |
+| Member / node | One VM in your lab |
+| Environment / workspace | One complete lab, such as `demo_microcloud` |
+| LXD | Runs the lab VMs on the host |
+| MicroCloud | Turns the VMs into a cluster with LXD, MicroCeph, and MicroOVN |
+| OSD | A Ceph storage disk |
+
+## Choosing the AI model
+
+The assistant uses a local AI model from the `gemma4` inference snap. The
+model runs on the host only.
+
+| Model | Download | Use for |
+|---|---:|---|
+| `e2b` | ~2.9 GB | Small or CPU-only machines, slow connections |
+| `e4b` | ~5.0 GB | Default; recommended for most machines |
+| `26b` | ~15.8 GB | Not needed for normal lab work |
+
+To install the smaller `e2b` model, replace **Step 2** of the installation
+with:
 
 ```bash
 ./dev.sh
@@ -225,816 +283,415 @@ bash scripts/prep_host.sh
 bash scripts/install_inference_snap.sh --model e2b
 ```
 
-This prepares the same host tools but selects the smaller model explicitly.
-Do not run both bootstrap paths just to choose a model.
+Then continue with Step 3. To switch an existing installation to `e2b`, run
+the last command on its own.
 
-If bootstrap adds your user to the `lxd` group, log out and back in before
-continuing. On a remote host, disconnect and reconnect your SSH session.
-Return to the checkout, then confirm non-sudo access:
+## Lab size and host capacity
 
-```bash
-lxc info
-```
+### How the size is chosen
 
-The first installation downloads packages, the model, and later the Ubuntu VM
-image and cluster snaps. Leave the terminal open and follow the progress
-messages. A completed bootstrap is not an end-to-end chat test.
+- If you give exact values, the assistant uses them. If they do not fit, it
+  tells you which resource is short; it does not silently shrink them.
+- If you leave values out, the assistant chooses them from your purpose and
+  the machine's free capacity.
+- `small`, `medium`, and `large` describe intent, not fixed sizes.
+- Type `sizing` in the chat for a live three-node suggestion, or
+  `sizing tiers` for reference sizes.
 
-### 3. Check local inference
-
-```bash
-./dev.sh --check
-```
-
-Look for a success message similar to:
+You can state how much data you plan to store:
 
 ```text
-✓ Inference engine available at http://127.0.0.1:8336
-  Model: gemma4
+Recommend a three-node storage lab with two Ceph disks per member.
+I expect about 100 GiB of data.
 ```
 
-The endpoint and displayed model label can vary with your configuration.
-The launcher can still print "Dev environment is ready" after a failed
-inference check; that message refers to Python setup, not model readiness.
-If the inference check reports an error, use
-[Inference is unavailable](#inference-is-unavailable) before starting chat.
+The assistant then sizes Ceph for three copies of the data plus 20% free
+space.
 
-### 4. Start the assistant
+### Supported values
 
-```bash
-./dev.sh --chat
-```
+| Resource | Supported value |
+|---|---|
+| Members | 3–50 |
+| vCPU per member | 1 or more |
+| Memory per member | 1024 MiB or more (automatic sizing uses at least 4 GiB) |
+| Root disk | 20 GiB or more |
+| Ceph disk | 10 GiB or more |
+| Ceph disks per member | 1–8 |
+| Local ZFS disk | `0` (off) or 10 GiB or more |
 
-Use `quit` to leave the chat and `help` to display the built-in help.
-For later sessions, run `./dev.sh --chat` again; you do not need to bootstrap
-for each lab. The launcher refreshes the Python installation and may contact
-the package index on each run.
+Sizes are in GiB (1 GiB = 1024 MiB).
 
-> [!TIP]
-> Code blocks labelled `bash` are host terminal commands, unless explicitly
-> shown inside a member. Natural-language examples are messages for chat.
+### Example: what a lab really uses
 
-## Create your first lab
+Three members, each with 8 vCPU, 16 GiB RAM, a 60 GiB root disk, and two
+100 GiB Ceph disks:
 
-Type this **inside the assistant chat**, not at the Bash prompt:
+| Resource | Total |
+|---|---:|
+| CPU | 24 vCPU |
+| RAM | 48 GiB |
+| Root disks | 180 GiB |
+| Ceph disks (raw) | 600 GiB |
+| **Total host disk** | **780 GiB** |
+| Usable Ceph space (3 copies) | about 200 GiB |
+
+### Capacity rules
+
+| Resource | Rule |
+|---|---|
+| CPU | All running LXD instances together may use up to **3 vCPU per host CPU thread**. For example, 32 threads allow 96 vCPU. |
+| Memory | The host keeps 20% of its memory (at least 4 GiB) free. If only memory is short, the assistant may offer a limited lab exception, up to 1.25× the host's memory, when enough memory is actually free. |
+| Disk | Every disk must fit in the LXD storage pool, keeping 20 GiB free. Disk is never overcommitted. |
+
+When a plan uses more vCPU than the host has threads, or uses the memory
+exception, the plan shows an **overcommit warning**. This is allowed for
+labs, but VMs share the host, so heavy simultaneous load is slower. Benchmark
+results on a shared host are not representative of dedicated hardware.
+
+Additional details:
+
+- Instances in all LXD projects count, including ones not created by this assistant.
+- Stopped instances do not count toward CPU and memory, but their disks still use
+  space. Check capacity again before starting them alongside a new lab.
+- Capacity is measured again right before a plan runs. If it changed, you are
+  asked to approve a new plan.
+- Extra Ceph disks on the same host are useful for learning Ceph, but do not
+  make storage faster. All lab members share one host, so the lab does not
+  survive a host failure.
+
+## Network layouts
+
+**Standard (default):** each member has two network interfaces — one for
+management, cluster, and storage traffic, and one IP-free uplink for MicroOVN.
+This suits most labs.
+
+**Fully segregated (optional):** each member has four interfaces, so you can
+teach or demonstrate separated traffic:
+
+| Interface | Address | Traffic |
+|---|---|---|
+| `mgmt0` | DHCP | Management and MicroCloud |
+| `ovn-uplink` | None | External OVN uplink |
+| `ovn-underlay` | Static | OVN Geneve tunnels |
+| `ceph-general` | Static | Ceph client and replication |
+
+Ask for it in the chat:
 
 ```text
-Create a three-node MicroCloud training lab called demo.
-Use 2 vCPU, 4 GiB RAM, a 30 GiB root disk, and one 20 GiB Ceph disk per node.
+Create a three-node network training lab called netlab with fully segregated
+four-NIC networking.
 ```
 
-The assistant will:
+The assistant picks non-overlapping subnets automatically. The network layout
+cannot be changed after deployment; new members reuse it.
 
-1. Inspect the live host and existing environments.
-2. Resolve all omitted values.
-3. Check capacity and LXD resource-name collisions.
-4. Display an exact plan and Plan ID.
-5. Wait for your approval.
+## Approvals and safety
 
-Review the plan, then reply:
+Before creating, expanding, or deleting a lab, the assistant:
 
-```text
-yes
-```
+1. Resolves every value and resource name.
+2. Checks capacity, existing state, and name conflicts.
+3. Shows the exact plan with a Plan ID.
+4. Waits for a standalone `yes` (anything else does not approve it).
+5. Checks everything again, then runs only that plan.
+6. After creating or expanding a lab, verifies the cluster.
 
-Reply `no` to cancel without executing the pending plan. A general reply such
-as "looks good" is not the standalone confirmation the assistant expects.
+Other protections:
 
-The command remains attached to the terminal while OpenTofu and Ansible run.
-When it finishes, the assistant reports:
+- **Name conflicts:** if any LXD VM, network, profile, or volume with the
+  planned name already exists, deployment stops before changing anything.
+  The assistant never adopts or deletes resources it did not create.
+- **Locking:** only one infrastructure operation runs at a time.
+- **Recovery:** if the LXD provider creates a network but fails to record it,
+  the assistant imports that exact verified network and continues once. Other
+  cases stop and report the problem.
 
-- member names and management IP addresses
-- LXD UI URLs
-- MicroCloud, LXD, MicroCeph, and MicroOVN membership
-- Ceph health and OSD count
-- network-plane health when four-NIC networking is enabled
+Running scripts or OpenTofu commands directly bypasses these approvals. Use
+the chat for normal work.
 
-Check the reported health before using the cluster. A completed script with
-failed post-deployment checks is not a healthy deployment. If anything fails,
-follow [A deployment fails](#a-deployment-fails).
+## Your data and backups
 
-Leaving chat with `quit` does **not** delete the VMs. They continue using host
-resources until stopped or deleted.
+The assistant records what it has built in files inside the project folder.
+It needs them to add nodes to, scale, or delete your labs.
 
-### Let the assistant choose the size
+| Location | Contents |
+|---|---|
+| `terraform/` | Infrastructure state for each lab |
+| `inventory_<workspace>.yaml` | Generated Ansible inventory |
+| `~/.canonical-ai-lab-assistant/` | Operation history and documentation cache |
+| `~/.ssh/id_rsa_lab` | Private SSH key for the lab VMs |
 
-You do not need to provide every number:
+- Keep the project folder while you have labs. Git does not back these files up.
+- Back up `terraform/` before moving the folder.
+- Keep the private key private, and never commit these files.
+- Back up anything important inside your labs separately.
 
-```text
-Create a lightweight three-node MicroCloud lab for a short training session.
-Call it training.
-```
+## Updating the assistant
 
-The assistant uses live host capacity and your stated purpose to propose a
-suitable size.
-
-## Access your lab
-
-After a successful deployment, use the actual member names and IP addresses
-shown in the result. For the `demo` example, leave chat with `quit` and run
-these commands on the host:
-
-```bash
-lxc list
-lxc exec demo-microcloud-node-1 -- bash
-```
-
-You are now inside the first member. Inspect the cluster:
-
-```bash
-microcloud cluster list
-lxc cluster list
-```
-
-Run `exit` to return to the host. The shell commands inside a member control
-that member's cluster, not the host LXD installation.
-
-The default network uses private VM addresses. If the host is a remote cloud
-VM, those addresses are not automatically reachable from your laptop. Connect
-to the host over SSH and use `lxc exec`, or arrange a secure tunnel for browser
-access. Reported LXD UI URLs still require network reachability and LXD
-authentication; do not expose the management API publicly just to reach them.
-
-## Common tasks
-
-Run these requests inside `./dev.sh --chat`.
-
-### Check a proposed size without deploying
-
-```text
-Recommend a three-node training lab for this host, with two Ceph disks per node.
-Explain the trade-offs.
-```
-
-This displays a recommendation, not a deployment. You can also type `sizing`
-for a live three-node default recommendation, or `sizing tiers` for reference
-targets.
-
-### List environments
-
-```text
-List my MicroCloud environments.
-```
-
-### Check cluster health
-
-```text
-Check the health of demo_microcloud.
-```
-
-### Add members
-
-```text
-Add one node to demo_microcloud.
-```
-
-New members inherit the saved image, CPU, memory, disks, storage pool, network
-mode, and dedicated network CIDRs.
-
-### Scale to a larger total
-
-```text
-Scale demo_microcloud to five nodes.
-```
-
-Scale-up uses the same safe live member-addition workflow. Downscale is not
-automated.
-
-### Delete an environment
-
-```text
-Delete demo_microcloud.
-```
-
-Deletion displays an approval-bound destroy plan before removing the
-environment. This removes the lab VMs and associated data volumes; back up
-anything you need first. Reject the plan with `no` if it names the wrong lab.
-Deletion does not uninstall the host tools or the inference snap.
-
-### Ask a documentation-backed question
-
-```text
-Using the current official documentation, explain the recommended MicroCloud
-member count for a training environment.
-```
-
-## Update the assistant
-
-Wait for any infrastructure operation to finish, leave chat, and back up your
-infrastructure state. Update the **existing** checkout:
+Leave the chat when no operation is running, then update the same folder:
 
 ```bash
 git pull --ff-only
 ./dev.sh --chat
 ```
 
-For a normal installation, the checkout tracks `main`. If Git reports local
-changes or a divergent branch, review them instead of resetting or deleting
-the directory. Starting a new chat loads the updated Python code.
-
-Updating the assistant does not recreate existing labs or upgrade their
-installed snaps. A separate checkout has separate infrastructure state, even
-on the same host; it is not automatically a replacement for the original
-checkout.
-
-## Understand your deployment
-
-### Environment names
-
-A deployment prefix such as `demo` produces:
-
-```text
-Terraform workspace: demo_microcloud
-LXD member names:     demo-microcloud-node-1, ...
-```
-
-Use the workspace name for list, health, scale, add, and delete requests.
-
-### Resource sizing
-
-| Resource | Supported value |
-|---|---|
-| Members | 3-50 |
-| vCPU per member | 1 or more |
-| Memory per member | 1024 MiB or more |
-| Root disk | 20 GiB or more |
-| Ceph OSD disk | 10 GiB or more |
-| Ceph OSD disks per member | 1-8 |
-| Local ZFS disk | `0` to disable; otherwise 10 GiB or more |
-| Image | Ubuntu 24.04 by default |
-
-Ceph and optional local disks are LXD block volumes in the selected host storage
-pool.
-
-Lab memory and virtual disk figures use GiB (1024 MiB), not decimal GB.
-An **OSD** is a Ceph storage daemon with its own data disk. "Two 100 GiB Ceph
-disks per member" means 200 GiB of raw Ceph storage for each member, in addition
-to its root disk.
-
-Sizing is driven by your workload and the host's current allocation budget.
-`small`, `medium`, and `large` describe intent, not fixed deployment sizes.
-The assistant adapts omitted resources to the budget and preserves explicit
-CPU, memory, and disk values. If an explicit plan does not fit, the assistant
-reports the limiting resources rather than silently downsizing it. A plan that
-exceeds only the normal RAM reserve may still qualify for the separately
-assessed lab fallback below.
-
-In chat, `sizing` shows a live three-node recommendation; `sizing tiers` shows
-reference targets. The recommendation and deployment use the same calculator,
-and Python renders the resource figures directly instead of asking the model
-to recalculate them. Automatic memory sizing starts at 4 GiB per member;
-smaller explicit values remain available for advanced experiments.
-
-Without a dataset target, automatic Ceph sizing uses a modest per-member raw
-storage target, capped at 100 GiB, shared across the requested OSDs. Adding OSDs
-does not automatically multiply that target. Specify a larger dataset or exact
-per-disk sizes when more capacity is needed:
-
-```text
-Recommend a three-node storage lab with two Ceph OSDs per member.
-I expect about 100 GiB of data. Explain the trade-offs.
-```
-
-Dataset-based sizing estimates three replicas and leaves 20% free space inside
-Ceph. The report separates root storage, raw Ceph, local storage, estimated
-Ceph usable capacity, and the suggested dataset budget. These estimates do not
-guarantee application capacity or account for every metadata/workload overhead.
-
-For example, three members with 8 vCPU, 16 GiB RAM, a 60 GiB root disk, and two
-100 GiB Ceph disks **per member** require:
-
-| Resource | Total |
-|---|---:|
-| CPU | 24 vCPU |
-| RAM | 48 GiB |
-| Root storage | 180 GiB |
-| Raw Ceph storage | 600 GiB |
-| Total host storage | 780 GiB |
-| Estimated Ceph usable capacity, before overhead | 200 GiB |
-| Suggested dataset budget with 20% Ceph headroom | 160 GiB |
-
-All virtual OSDs share the underlying host storage pool. More OSDs are useful
-for learning and testing Ceph behavior, but do not guarantee more physical
-IOPS. Replicas inside VMs on one host do not provide host-level fault tolerance.
-
-The direct deployment script's auto-sizing also uses this calculator through
-the assistant Python environment. It preserves partially supplied resource
-values, fills all omitted fields, and fails before provisioning if sizing
-cannot be validated. Bounded RAM fallback assessment is available through chat,
-not the non-interactive sizing helper.
-
-### Network layouts
-
-#### Standard two-NIC layout
-
-This is the default and is appropriate for most labs:
-
-| Interface | Purpose |
-|---|---|
-| Management NIC | MicroCloud lookup, management, and Ceph traffic |
-| IP-free OVN uplink | External connectivity for MicroOVN |
-
-Example:
-
-```text
-Create a small three-node MicroCloud lab called demo.
-```
-
-#### Fully segregated four-NIC layout
-
-Use this mode to teach or demonstrate separated traffic planes:
-
-| Interface | Addressing | Purpose |
-|---|---|---|
-| `mgmt0` | DHCP | Management and MicroCloud lookup |
-| `ovn-uplink` | No IP address | External OVN uplink |
-| `ovn-underlay` | Static | OVN Geneve encapsulation |
-| `ceph-general` | Static | Ceph public/client and internal/replication traffic |
-
-Example:
-
-```text
-Create a three-node network training lab called network-demo.
-Use fully segregated four-NIC networking with dedicated OVN underlay and Ceph
-planes.
-```
-
-The assistant selects non-overlapping `/24` subnets unless you explicitly
-provide advanced `ovn_underlay_cidr` and `ceph_network_cidr` values. The mode and
-CIDRs become immutable deployment geometry and are reused during expansion.
-
-### Host-aware capacity and lab overcommit
-
-CPU, RAM, and storage have independent policies. No initial policy-selection
-menu is required.
-
-**In plain English:** CPU can be shared more aggressively for labs; RAM needs
-live headroom; disk requests must fit. An overcommit warning means the lab is
-allowed within policy, not that every member can run at peak load at once.
-The current plan always shows which limits are relevant.
-
-**CPU:** active LXD vCPU allocation, including the proposed resource delta,
-may reach **3:1 of the host's accessible logical CPU count** (`nproc`). For
-example, 32 logical CPUs allow at most 96 allocated vCPU; if 24 are already
-allocated, the remaining allocation budget is 72 vCPU. This is a ceiling, not
-an automatic sizing target or a throughput guarantee. The same rule applies
-to fresh deployments, add-node operations, and scaling. An AI assessment does
-not veto a CPU-only overcommit plan.
-
-**RAM:** the normal budget keeps a host reserve of the greater of 20% of
-measured total memory or 4 GiB, and considers both active VM limits and live
-`MemAvailable`. If a plan fails only the RAM budget, the assistant may assess
-a separate bounded lab fallback. Total active RAM allocation must remain at
-or below **1.25:1 of measured host RAM**, and `MemAvailable` must be at least
-the greater of 8 GiB or one quarter of the new RAM request plus 4 GiB. This
-check reduces risk; it cannot guarantee that later workload peaks will avoid
-swapping or OOM.
-
-**Storage:** root disks, every Ceph OSD, and optional local disks are included
-in the total. The selected storage pool keeps a 20 GiB host reserve. Storage
-requests cannot exceed its measured free-space budget. The selected pool is
-bound to the approved plan and passed explicitly to provisioning; unavailable
-pool metrics block sizing rather than using an unrelated filesystem's free space.
-Existing thin-provisioned volumes can still grow later, so monitor pool usage
-and retain headroom rather than treating the check as a future disk-space guarantee.
-
-Active and frozen instances in **all LXD projects**, including instances not
-created by this assistant, must have readable CPU and RAM limits. Unreadable
-active allocations block planning. Stopped instances are excluded from active
-CPU/RAM commitments and their known potential allocations are shown separately.
-Unknown limits on a stopped build instance do not block a new lab. Its disks
-still occupy storage, and restarting it changes the active budget: recheck
-capacity before starting stopped instances alongside a new lab.
-
-The approval panel shows exact current and after-plan allocations, remaining
-budgets, and warnings for CPU contention or a RAM fallback. Reply `yes` only
-after reviewing the plan; `no` cancels it. Capacity and allocation visibility
-are measured again under the infrastructure lock immediately before execution.
-Changed overcommit commitments require a new plan and approval.
-
-CPU-overcommitted labs can run benchmarks, but shared CPU, storage, and virtual
-networking affect the results. Stop competing labs when reproducible comparisons
-matter; this setup is not a substitute for isolated hardware performance tests.
-
-### LXD name-collision protection
-
-Terraform workspaces do not provide separate LXD namespaces. Before approval and
-again before execution, the assistant checks every profile, network, instance,
-and custom-volume name that the plan will create.
-
-If a managed, unmanaged, or orphaned LXD resource already uses one of those
-names, deployment stops before making changes and reports the exact conflicts.
-Choose another environment prefix or remove only resources you know you own.
-
-Short network names use a persisted eight-character hash, for example:
-
-```text
-ca-f21a40ab-up
-ca-f21a40ab-ov
-ca-f21a40ab-ce
-```
-
-### Existing LXD resources
-
-The assistant does not automatically adopt or delete unrelated LXD resources.
-Existing networks, profiles, instances, and volumes can remain on the host as
-long as their names do not conflict with the exact deployment manifest.
-
-## Safety model
-
-Chat-managed deployment, expansion, and deletion use approval-bound plans.
-The safeguards relevant to the action are checked before it runs:
-
-1. Resolve all parameters and names.
-2. Observe live host and Terraform state.
-3. Validate schema, capacity, topology, storage, and collisions.
-4. Display the exact immutable plan and Plan ID.
-5. Require a standalone confirmation.
-6. Acquire a shared infrastructure lock.
-7. Revalidate state and capacity.
-8. Execute the approved action.
-9. For deployment and expansion, verify deterministic cluster postconditions.
-
-If relevant workspace identity or geometry changes, capacity no longer fits,
-or a required check cannot be completed, execution is blocked. Inspect the
-reported reason and request a new plan.
-
-Use chat for the approval-bound workflow. Manual bootstrap, direct shell
-scripts, and OpenTofu commands do not pass through the chat approval manager;
-do not use them as a way to bypass a rejected plan.
-
-### Provider state recovery
-
-Some versions of the LXD Terraform provider can create a network but fail to
-record it in Terraform state. Recovery is limited to networks and is
-fail-closed:
-
-1. Verify the exact expected network name.
-2. Verify workspace ownership, role, CIDR, bridge type, and IP-free shape.
-3. Import only that verified network into Terraform state.
-4. Continue the same approved apply once.
-
-Foreign resources, metadata mismatches, and missing-state VM, profile, or volume
-errors are never recovered automatically.
+If Git reports local changes, review them rather than deleting the folder.
+Updating does not change existing labs.
 
 ## Configuration
 
-Configuration can be placed in a `.env` file in the repository root or exported
-in the shell. **No `.env` file is required for the normal local setup.** Change
-only the settings you need, and start a new chat session afterward.
+No configuration is needed for normal use. To change a setting, add it to a
+`.env` file in the project folder, then start a new chat.
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_ENGINE` | `gemma4` | Local inference snap command |
-| `INFERENCE_AUTO_DISCOVERY` | `true` | Discover endpoint and model from snap status |
-| `INFERENCE_HOST` | `http://127.0.0.1:8336` | OpenAI-compatible service root or API base |
-| `INFERENCE_MODEL` | `gemma4` | Model name; generic names can resolve automatically |
-| `INFERENCE_TIMEOUT_SEC` | `120` | Maximum time for one inference request |
-| `INFERENCE_MAX_OUTPUT_TOKENS` | `512` | Output-token limit per response |
-| `INFERENCE_ENABLE_THINKING` | `false` | Enable extended hidden reasoning |
-| `INFERENCE_STREAM` | `true` | Show the response while it is generated |
-| `INFERENCE_RESTART_TIMEOUT_SEC` | `15` | Wait time after a local inference disconnect |
-| `INFERENCE_MAX_RETRIES` | `3` | Retry count for transient disconnects |
-| `INFERENCE_READY_TIMEOUT_SEC` | `1800` | Installer wait for the local model endpoint |
-| `OPERATION_TIMEOUT_SEC` | `3600` | Timeout for infrastructure operations |
-
-`INFERENCE_ENGINE` and `INFERENCE_AUTO_DISCOVERY` are advanced overrides and do
-not need to be added to `.env` for the normal local setup.
-
-For example, this optional `.env` keeps streamed responses and disables extended
-reasoning:
-
-```env
-INFERENCE_ENABLE_THINKING=false
-INFERENCE_STREAM=true
-```
-
-Keep `INFERENCE_ENABLE_THINKING=false` for the normal local experience.
-Thinking-capable models can otherwise consume the entire response budget before
-producing a visible answer.
+| `INFERENCE_HOST` | `http://127.0.0.1:8336` | AI service address (found automatically for the local snap) |
+| `INFERENCE_MODEL` | `gemma4` | Model name (resolved automatically) |
+| `INFERENCE_ENGINE` | `gemma4` | Inference snap name |
+| `INFERENCE_AUTO_DISCOVERY` | `true` | Find the address and model from the snap |
+| `INFERENCE_TIMEOUT_SEC` | `120` | Maximum time for one AI request |
+| `INFERENCE_MAX_OUTPUT_TOKENS` | `512` | Maximum answer length |
+| `INFERENCE_ENABLE_THINKING` | `false` | Extended reasoning; keep `false` for fast answers |
+| `INFERENCE_STREAM` | `true` | Show the answer while it is written |
+| `INFERENCE_RESTART_TIMEOUT_SEC` | `15` | Wait after the AI service disconnects |
+| `INFERENCE_MAX_RETRIES` | `3` | Retries for temporary disconnects |
+| `INFERENCE_READY_TIMEOUT_SEC` | `1800` | How long setup waits for the model |
+| `OPERATION_TIMEOUT_SEC` | `3600` | Maximum time for one infrastructure operation |
 
 ## Command reference
 
-### Recommended launcher
+### `dev.sh`
 
 | Command | Purpose |
 |---|---|
-| `./dev.sh --bootstrap` | Create/update `.venv` and prepare the complete host |
-| `./dev.sh --chat` | Install the current checkout and start chat |
-| `./dev.sh --check` | Check inference connectivity |
-| `./dev.sh --diagnose` | Run detailed inference diagnostics |
-| `./dev.sh --shell` | Open a shell with `.venv` activated |
-| `./dev.sh --force-reinstall` | Reinstall the editable Python package |
-| `./dev.sh --clean` | Recreate the virtual environment |
+| `./dev.sh --bootstrap` | First-time setup of the machine |
+| `./dev.sh --chat` | Start the assistant |
+| `./dev.sh --check` | Check the AI service |
+| `./dev.sh --diagnose` | Run detailed AI service diagnostics |
+| `./dev.sh --shell` | Open a shell with the Python environment active |
+| `./dev.sh --force-reinstall` | Reinstall the Python package |
+| `./dev.sh --clean` | Recreate the Python environment (does not touch labs) |
 
-Running `./dev.sh` with no option prepares the local Python environment and
-prints the next commands.
+### `lab-ai`
 
-### Python CLI
-
-Activate the environment first:
-
-```bash
-source .venv/bin/activate
-```
+Available after `source .venv/bin/activate`:
 
 | Command | Purpose |
 |---|---|
-| `lab-ai chat` | Start the interactive assistant |
-| `lab-ai bootstrap` | Prepare host tools and inference |
-| `lab-ai check` | Check the inference endpoint |
-| `lab-ai setup` | Show the inference engine and setup script paths |
-| `lab-ai version` | Show the package version |
+| `lab-ai chat` | Start the assistant |
+| `lab-ai bootstrap` | First-time setup of the machine |
+| `lab-ai check` | Check the AI service (non-zero exit status on failure) |
+| `lab-ai setup` | Show the configured scripts and AI engine |
+| `lab-ai version` | Show the version |
+| `lab-ai --debug check` | Check with debug logging |
 
-For a check that returns a non-zero exit status on failure, use
-`lab-ai check` directly. The development launcher keeps running after check or
-diagnostic failures so it can still help you troubleshoot.
+### In the chat
 
-## Troubleshooting
+| Input | Purpose |
+|---|---|
+| `help` | Show help |
+| `sizing` | Live three-node size suggestion |
+| `sizing tiers` | Reference sizes |
+| `yes` / `no` | Approve or cancel the pending plan |
+| `quit` | Leave the chat (labs keep running) |
 
-### Python reports that `venv` or `ensurepip` is missing
+## Detailed troubleshooting
 
-Install `python3-venv` using the prerequisite commands in Quick start. If the
-first launcher run left an incomplete virtual environment, retry:
+### `venv` or `ensurepip` is missing
+
+Install `python3-venv` (see [Install](#2-install)), then recreate the Python
+environment:
 
 ```bash
 ./dev.sh --clean
 ```
 
-This recreates `.venv`, not the lab VMs. Do not delete the whole checkout to fix
-a Python environment problem.
+### LXD asks for `sudo`
 
-### LXD commands require permission
+Your login session does not yet include the `lxd` group. Log out completely
+and log back in, then run `lxc info`.
 
-If bootstrap added your user to the `lxd` group, end the current login session
-and log in again. Then verify:
+### The AI service is unavailable
 
-```bash
-lxc info
-```
-
-### Inference is unavailable
-
-Run:
+Run the diagnostics:
 
 ```bash
 ./dev.sh --diagnose
 ```
 
-The diagnostic checks the snap, services, endpoint, model list, health, chat
-API, and Python client.
-
-It sends a chat request, so it can load the model and take longer than a simple
-connectivity check. Use the reported errors, not just the launcher's final
-Python-environment status.
-
-Useful manual checks:
+Useful checks:
 
 ```bash
 snap services gemma4
 gemma4 status
-sudo snap restart gemma4
 ./dev.sh --check
 ```
 
-If the actual API endpoint uses a different address or port, inspect:
+If the service is stopped, restart it (this interrupts anyone else using it):
+
+```bash
+sudo snap restart gemma4
+```
+
+If the service runs on a different address or port, find the `openai`
+endpoint and put it in `.env` as `INFERENCE_HOST`:
 
 ```bash
 gemma4 status --format json
 ```
 
-Set `INFERENCE_HOST` in `.env` to the `endpoints.openai` URL reported there,
-including its API path if present. Start a new session and check again.
-Do not assume another machine uses the example port `8336`.
+### The model download takes a long time
 
-Do not restart the inference service while another user or session is using it.
+Check progress:
+
+```bash
+snap changes
+gemma4 status
+```
+
+On slow connections, use the smaller model; see
+[Choosing the AI model](#choosing-the-ai-model).
+
+### Answers are slow
+
+The model can unload after a period of inactivity, so the first answer after a
+break takes longer. To keep it loaded longer (it keeps using memory):
+
+```bash
+gemma4 set sleep-idle-seconds=3600
+```
+
+If answers are always slow, use the smaller model, keep
+`INFERENCE_ENABLE_THINKING=false`, and stop other heavy workloads.
 
 ### LXD cannot create virtual machines
 
-Confirm `/dev/kvm` exists on the host. For a host VM, check nested virtualization
-in the parent hypervisor or the cloud instance's supported features.
-The assistant cannot resolve a missing virtualization capability by reducing
-the member size.
+`/dev/kvm` must exist on the host. On a physical machine, enable
+virtualization in the BIOS/firmware. On a VM or cloud instance, enable nested
+virtualization or choose an instance type that supports it. A smaller lab does
+not fix this.
 
-### The proposed plan does not fit
+### The plan does not fit
 
-Read each resource error separately:
+The error names the resource that is short:
 
-- **CPU:** the sum of active allocations and the new request must fit the 3:1
-  lab ceiling. This does not relax the RAM or disk limits.
-- **RAM:** lower per-member memory, free host memory, or stop an unused lab.
-  A bounded fallback is not guaranteed and requires its own assessment.
-- **Storage:** reduce disk sizes or OSD count, or free space in the named LXD
-  pool. Stopping a VM does not remove its disks.
+- **CPU:** choose fewer or smaller members.
+- **Memory:** use less memory per member, or delete a lab you no longer need.
+- **Disk:** use smaller or fewer disks, or free space in the LXD storage pool.
+  Stopping a VM does not free its disk space.
 
-Ask the assistant to inspect the host again and propose a smaller plan. Do not
-delete unfamiliar resources just to make the calculation pass.
+Ask the assistant: `Recommend a smaller lab that fits this machine.`
+Do not delete resources you do not recognize just to make room.
 
 ### Storage capacity cannot be measured
 
-Use the pool name in the error; `default` is only an example:
+The assistant reads free space from LXD. Check that the pool exists and
+reports its usage (replace `default` with your pool name):
 
 ```bash
 lxc storage list
 lxc query /1.0/storage-pools/default/resources
 ```
 
-The assistant requires valid `space.total` and `space.used` metrics. If the
-query fails, check LXD permissions and the pool's health. Free space reported
-for an unrelated filesystem is not a safe substitute.
+### A name is already in use
 
-### The first message after a pause is slow
-
-The inference snap can unload the model after an idle period. The assistant
-can report a possible reload and retry the request. Model loading, CPU-only
-generation, and competing host workloads can all affect latency.
-
-To keep `gemma4` resident longer:
-
-```bash
-gemma4 get sleep-idle-seconds
-gemma4 set sleep-idle-seconds=3600
-```
-
-This keeps inference resources occupied for longer. If chat remains slow, use a
-smaller model, keep thinking disabled, and reduce competing workloads rather
-than starting with a much larger model.
-
-### The model download takes a long time
-
-Check snap activity:
-
-```bash
-snap changes
-snap services gemma4
-gemma4 status
-```
-
-For constrained hosts, select `e2b`:
-
-```bash
-bash scripts/install_inference_snap.sh --model e2b
-```
-
-### An LXD resource name already exists
-
-The error lists conflicts such as:
+The error lists the exact conflicts, for example:
 
 ```text
 network:ca-f21a40ab-up
 instance:demo-microcloud-node-1
-volume:demo-microcloud-ceph-1-1
 ```
 
-Use another prefix, or inspect and remove only resources you own. The assistant
-will not adopt or delete an unknown resource automatically.
+Choose another lab name, or remove only resources you know you own.
+
+### A deployment fails
+
+The assistant shows the error and, when possible, an explanation and a
+suggested next step. Then:
+
+1. Ask `List my MicroCloud environments.` and `Check the health of demo_microcloud.`
+2. Read the reported state before retrying.
+3. To start over with a lab you do not need, delete it through the chat and
+   create it again.
+
+Do not delete the `terraform/` folder or run cleanup commands repeatedly.
 
 ### `Missing Resource State After Create`
 
-For a verified assistant-owned network, the deployment imports the missing
-network state and continues once. Other resource types remain fail-closed.
-
-If recovery is refused, inspect both systems before retrying:
+For a network the assistant can verify as its own, it recovers automatically.
+If recovery is refused, compare the recorded state with LXD (replace the
+workspace and pool names):
 
 ```bash
 cd terraform
-tofu workspace list
 TF_WORKSPACE=demo_microcloud tofu state list
-
+cd ..
 lxc network list
-lxc profile list
 lxc list
 lxc storage volume list default
 ```
 
-Replace `demo_microcloud` and `default` with the actual workspace and pool from
-the error. Run these commands on the host, from the same checkout used to
-create the environment.
-
-### A deployment fails
-
-Infrastructure operations are synchronous. If a failure is shown, no hidden
-background job continues.
-
-The assistant displays:
-
-- the last deterministic error evidence
-- an AI-generated root-cause analysis when available
-- a suggested diagnostic or remediation when enough evidence is available
-
-Failed operations can leave VMs, disks, or networks behind. Start by asking:
-
-```text
-List my MicroCloud environments.
-Check the health of demo_microcloud.
-```
-
-Replace the workspace name with your own. Keep the checkout and its state,
-then review the failure evidence before retrying. A fresh deployment with the
-same prefix is not a supported way to resize or repair an existing environment.
-Use add/scale only for expansion, or review an exact deletion plan before
-recreating a disposable lab.
-
-Do not run destructive cleanup commands repeatedly or delete Terraform state
-to force a retry.
-
-### Enable debug logging
+### Debug logs
 
 ```bash
 .venv/bin/lab-ai --debug check
 ```
 
-Review logs before sharing them: they can contain host paths, IP addresses,
-environment names, and deployment output.
-
-## State and backups
-
-The local inference model is not the record of your infrastructure. OpenTofu
-state and the saved deployment specification track the resources and geometry
-needed for add, scale, and delete operations.
-
-| Location | What it contains |
-|---|---|
-| `terraform/` in this checkout | Provider working files and per-workspace infrastructure state |
-| `inventory_<workspace>.yaml` in this checkout | Generated Ansible inventory |
-| `~/.canonical-ai-lab-assistant/` | Assistant operation history and documentation cache |
-| `~/.ssh/id_rsa_lab` | Private lab SSH key created during bootstrap |
-
-Keep the original checkout while labs exist. Git does not back up ignored
-runtime state or private keys. Back up infrastructure state before moving the
-checkout or modifying labs, and store those backups securely. Keep lab workload
-data backed up separately.
-
-State files can contain configuration and public SSH keys; private keys must
-remain private. Do not commit runtime state, inventories, or private keys.
-`./dev.sh --clean` recreates Python's virtual environment only; it is not a
-lab cleanup command.
-
-## Architecture
-
-```text
-src/lab_ai_assistant/
-├── ai_engine.py       Local LLM, streaming, tools, and failure analysis
-├── orchestrator.py    Agent loop, approval, locking, and execution
-├── planning.py        Immutable plans and deterministic validation
-├── sizing.py          Host-aware sizing
-├── verification.py    State identity and cluster postconditions
-├── doc_fetcher.py     Official documentation retrieval and caching
-├── tools.py           Tool schemas and parameter validation
-├── ui.py              Terminal user interface
-└── cli.py             Command-line entry point
-
-terraform/main.tf      LXD profiles, VMs, networks, and block volumes
-playbooks/microcloud.yml
-                       MicroCloud installation and cluster bootstrap
-scripts/               Infrastructure lifecycle adapters and diagnostics
-tests/                 Unit, contract, lifecycle, and safety tests
-```
+Logs can contain host names, IP addresses, and paths. Review them before
+sharing.
 
 ## Development
-
-Install development dependencies:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e '.[dev]'
-```
 
-Run the Python checks without provisioning a lab:
-
-```bash
 python -m pytest -q
 python -m ruff check src tests
 python -m black --check src tests
 ```
 
-Infrastructure syntax checks require the tools installed by host bootstrap.
-Initialize the providers before validating OpenTofu configuration:
+Infrastructure checks (require the tools installed by setup):
 
 ```bash
-for script in scripts/*.sh dev.sh; do
-    bash -n "$script"
-done
-
+for script in scripts/*.sh dev.sh; do bash -n "$script"; done
 (cd terraform && tofu init -input=false && tofu fmt -check -recursive && tofu validate)
 ansible-playbook --syntax-check -i 'localhost,' playbooks/microcloud.yml
 ```
 
+Project layout:
+
+```text
+src/lab_ai_assistant/
+├── ai_engine.py       Local AI model, streaming, tools, failure analysis
+├── orchestrator.py    Chat loop, approvals, locking, execution
+├── planning.py        Plans and deterministic validation
+├── sizing.py          Host-aware sizing
+├── verification.py    State checks and cluster health
+├── doc_fetcher.py     Official documentation lookup
+├── tools.py           Tool definitions and validation
+├── ui.py              Terminal interface
+└── cli.py             Command-line entry point
+
+terraform/main.tf          LXD VMs, networks, and disks
+playbooks/microcloud.yml   MicroCloud installation
+scripts/                   Setup, lifecycle, and diagnostic scripts
+tests/                     Automated tests
+```
+
 ## Current limitations
 
-- Production deployments are out of scope.
-- Safe member removal and downscale are not automated.
-- Network mode and dedicated CIDRs cannot be changed in place.
-- Snap channels are configured in `playbooks/microcloud.yml`, not through chat.
-- Custom MicroCloud preseed files are not exposed through chat.
-- The supported delivery path is currently a source checkout using `dev.sh` or
-  the Python CLI.
-- Clusters share one host's CPU, storage, and network resources. Multiple
-  members or Ceph replicas on that host do not make it resilient to host loss.
-- Private member addresses and printed UI URLs are not automatically exposed
-  outside the host.
+- Labs only; production deployments are out of scope.
+- Removing members and scaling down are not automated.
+- The network layout cannot be changed after deployment.
+- Snap channels are set in `playbooks/microcloud.yml`, not through the chat.
+- Custom MicroCloud preseed files are not supported.
+- Installation is from this source folder; there is no application snap yet.
+- All members run on one host, so a lab does not survive a host failure.
+- Lab IP addresses are private to the host.
 
 ## License
 
