@@ -10,12 +10,19 @@ You:        yes
 Assistant:  Creates the VMs, installs MicroCloud, and checks that it is healthy.
 ```
 
-You do not need to know how to install MicroCloud, LXD, Ceph, or OVN. The
-assistant prepares everything and always asks before it changes anything.
+Install the **`lab-ai` application snap**, then describe your lab in the chat.
+The snap includes the Python application, Ansible, OpenTofu, providers, scripts,
+playbooks, and Terraform configuration. **LXD and `gemma4` are separate snaps**:
+LXD runs the lab VMs, and `gemma4` provides the local AI service.
+
+The assistant shows an exact plan and asks for approval before creating,
+expanding, or deleting a lab. Host setup is a separate, explicit action.
 
 > [!IMPORTANT]
-> This tool is for labs, training, demos, and proofs of concept. It is not a
-> production deployment tool.
+> This is a local classic-confinement snap prototype for labs, training, demos,
+> and proofs of concept. It is not a production deployment tool or a published
+> Snap Store application. Normal development on `main` and `staging` remains
+> separate from `prototype/snap-packaging`.
 
 ## Contents
 
@@ -51,8 +58,8 @@ You need an **Ubuntu machine** (Ubuntu 24.04 recommended) with:
 
 | Requirement | Why |
 |---|---|
-| A user with `sudo` access | Setup installs LXD and other tools |
-| Internet access | Setup downloads packages, the AI model, and VM images |
+| An amd64 machine with snapd and a user with `sudo` access | Installing the local classic snap and preparing the platform requires administrator access |
+| Internet access | Platform setup downloads the inference model and lab VM images; application tools and providers are bundled |
 | Hardware virtualization | Lab members are virtual machines |
 | About 32 GiB RAM and 200 GiB free disk | Enough for the first small lab and the local AI model |
 
@@ -71,86 +78,79 @@ instance type that supports nested virtualization. See
 [LXD cannot create virtual machines](#lxd-cannot-create-virtual-machines).
 
 > [!NOTE]
-> Use a machine you are allowed to change. Setup installs system packages and
-> configures LXD.
+> Use a machine you are allowed to change. Classic confinement grants broad
+> host access. Installing the application does not prepare LXD or select an AI
+> model automatically; explicit host setup can install packages, configure LXD,
+> and add your user to the `lxd` group.
 
 ## 2. Install
 
-This branch contains the isolated **classic-confinement application snap prototype**.
-Normal source development remains on `staging` and `main`; snap builds belong in
-`~/lxdlab/canonical-ai-lab-assistant-snap` on `prototype/snap-packaging`.
+Use your normal user account, not a root shell. Git, a Python virtual
+environment, pip, Ansible, and OpenTofu do **not** need to be installed separately
+to run the application snap.
 
-### Local snap prototype
+**Step 1 — Install the application snap**
 
-Build in the dedicated snap worktree, or use the locally supplied package:
+Obtain the local `lab-ai_0.1.0-prototype.5_amd64.snap` package. In this prototype
+workspace it is built under `~/lxdlab/canonical-ai-lab-assistant-snap`:
 
 ```bash
 cd ~/lxdlab/canonical-ai-lab-assistant-snap
-snapcraft pack
 sudo snap install ./lab-ai_0.1.0-prototype.5_amd64.snap --dangerous --classic
-lab-ai doctor
-lab-ai check
-lab-ai chat
+snap list lab-ai
+snap run lab-ai version
 ```
 
-The snap bundles Python, Ansible plus `community.general`, OpenTofu, locked
-providers, scripts, playbooks, and Terraform configuration. LXD and `gemma4`
-remain separate platform services. There is no runtime venv/pip requirement.
-`doctor` checks tools and services without host setup; plain `bootstrap` does
-not change the host in snap mode. If platform setup is needed, explicitly run
-`lab-ai bootstrap --host-setup` and review its privileged host changes.
+If the package was copied elsewhere, install from that location instead.
+`--dangerous` permits an unsigned local package; `--classic` acknowledges its
+host access. There is no Store install command for this prototype. Building
+from source is optional and covered in [Development](#development).
 
-Application assets live read-only under `$SNAP`. Lab state and inventories live
-under `$SNAP_USER_COMMON` (normally `~/snap/lab-ai/common`). Do not reuse source
-checkout state or staging lab prefixes. See [snap build and update notes](snap/README.md).
-
-### Source development
-
-The following source-checkout workflow remains available for development. Do
-not run it as part of snap installation. Run these commands as your normal user
-(not as `root`).
-
-**Step 1 — Install the basic tools and download the assistant**
+**Step 2 — Check the platform, then prepare it only if needed**
 
 ```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv curl openssh-client
+snap run lab-ai doctor
+```
+
+`doctor` checks bundled tools, LXD access, and the inference service without
+installing packages or changing host settings. A failed check on a fresh
+machine is expected until LXD and `gemma4` are ready.
+
+Ensure your user has an SSH directory even if the platform is already ready;
+the assistant reuses or creates `~/.ssh/id_rsa_lab` for lab access:
+
+```bash
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
-
-git clone https://github.com/ismailkayi/canonical-ai-lab-assistant.git
-cd canonical-ai-lab-assistant
 ```
 
-Keep this folder. The assistant stores the information it needs to manage
-your labs here. Run every later command from this folder.
-
-**Step 2 — Prepare the machine**
+If LXD and `gemma4` are already prepared, skip host setup. Otherwise, on a
+machine you are allowed to configure, explicitly run:
 
 ```bash
-./dev.sh --bootstrap
+snap run lab-ai bootstrap --host-setup
 ```
 
-This asks for your `sudo` password, then installs LXD, OpenTofu, Ansible, and
-the local AI model. The first run downloads several GB and can take a while.
-Leave the terminal open until it finishes.
+This can ask for `sudo`, install the separate platform snaps and missing host
+prerequisites, initialize LXD, add group membership, and prepare the lab SSH
+key. The first model download can take a while. Review the output and do not
+use this command to reconfigure an existing staging host unnecessarily.
 
-> [!TIP]
-> On a slow connection or a small machine, you can install a smaller AI model
-> instead. See [Choosing the AI model](#choosing-the-ai-model) **before**
-> running this step.
+Plain `snap run lab-ai bootstrap` only prints guidance: it does not authorize
+host setup. See [Choosing the AI model](#choosing-the-ai-model) to select a
+smaller model before the first inference download.
 
-**Step 3 — Log out and log back in**
+**Step 3 — Log out and log back in if group membership changed**
 
-Setup adds your user to the `lxd` group if needed. Log out and back in (or
-reconnect your SSH session) so this takes effect. Then return to the folder and check:
+End your login session or reconnect over SSH if setup added you to `lxd`.
+Then check from a host terminal:
 
 ```bash
-cd canonical-ai-lab-assistant
 lxc info
-./dev.sh --check
+snap run lab-ai doctor
+snap run lab-ai check
 ```
 
-`lxc info` should print LXD details without asking for `sudo`. The check
+`lxc info` should work without `sudo`. Once inference is ready, the final check
 should report:
 
 ```text
@@ -162,11 +162,14 @@ If it does not, see [The AI service is unavailable](#the-ai-service-is-unavailab
 **Step 4 — Start the assistant**
 
 ```bash
-./dev.sh --chat
+snap run lab-ai chat
 ```
 
-You only need to run setup once. Next time, just run `./dev.sh --chat` from
-this folder. Type `help` for help and `quit` to leave.
+Next time, run the same command from any directory. No repository folder or
+Python environment activation is needed. This guide uses `snap run lab-ai` to
+select the snap explicitly even if a source-installed command is also on PATH.
+Type `help` for help and `quit` to leave. Always use the same user account to
+manage the labs whose state is stored under `~/snap/lab-ai/common`.
 
 ## 3. Create your first lab
 
@@ -191,6 +194,11 @@ Deployment takes several minutes. When it finishes, the assistant shows:
 
 - the names and IP addresses of the lab members
 - whether MicroCloud, LXD, MicroCeph, and MicroOVN are healthy
+
+Use a unique name for each new lab, especially when source/staging labs already
+exist on the same LXD host. Snap state is separate, but the host's resource names
+and capacity are shared. Do not copy staging Terraform state into the snap or
+reuse another lab's prefix.
 
 You can also give exact sizes:
 
@@ -240,6 +248,15 @@ name `demo_microcloud`.
 | Ask a question | `Explain how MicroCeph stores data in my lab.` |
 
 Adding, scaling, and deleting always show a plan first and wait for `yes`.
+Multiple labs may coexist if each has a unique prefix and the combined active
+allocations fit the host budget. To create another minimal lab, for example:
+
+```text
+Create another three-node minimal lab called demo-2.
+```
+
+You do not need to delete `demo_microcloud` just to create `demo-2_microcloud`.
+The snap manages workspaces in its own user state, not in a staging checkout.
 
 > [!WARNING]
 > Deleting a lab permanently removes its VMs and disks. Read the plan carefully
@@ -250,14 +267,17 @@ Adding, scaling, and deleting always show a plan first and wait for `yes`.
 | Problem | What to do |
 |---|---|
 | `lxc` asks for `sudo` or permission is denied | Log out and back in, then run `lxc info` |
-| The AI service is unavailable | Run `./dev.sh --diagnose` — see [details](#the-ai-service-is-unavailable) |
+| The AI service is unavailable | Run `snap run lab-ai doctor` and `snap run lab-ai check` — see [details](#the-ai-service-is-unavailable) |
 | The plan does not fit on your machine | Ask for a smaller lab, or delete a lab you no longer need — see [details](#the-plan-does-not-fit) |
 | A name is already in use | Choose another lab name |
 | Deployment fails | Read the error, then ask `Check the health of demo_microcloud.` — see [details](#a-deployment-fails) |
 | The first answer after a break is slow | Normal; the AI model is loading again |
+| Python, a virtual environment, or a bundled tool appears missing | Verify the installed snap revision — see [details](#a-bundled-tool-is-missing) |
 
-When an operation fails, nothing keeps running in the background. Do not
-delete files in this folder to "start fresh"; they track your existing labs.
+When an operation fails, no assistant infrastructure operation continues in the
+background. LXD resources already created may remain; inspect their state before
+retrying. Do not delete `~/snap/lab-ai/common` or purge the application to
+"start fresh"; this removes the information needed to manage those labs.
 
 More help: [Detailed troubleshooting](#detailed-troubleshooting).
 
@@ -280,14 +300,24 @@ Your request
    → the assistant verifies the finished cluster
 ```
 
-The AI decides *what* to build and explains why. Python code does all the
-arithmetic, enforces the limits, and runs only the plan you approved.
+The AI decides *what* to build and explains why. The snap's Python code does all
+the arithmetic, enforces the limits, and runs only the plan you approved. Bundled
+OpenTofu and Ansible perform provisioning; providers are available from the
+snap's filesystem mirror instead of requiring a runtime download.
+
+Scripts, playbooks, and Terraform assets are read-only under `$SNAP`.
+Terraform working files, per-lab state, and inventories are writable under
+`$SNAP_USER_COMMON`, normally `~/snap/lab-ai/common`. The LXD daemon, inference
+service, and model are not part of the application snap.
 
 Terms used in this guide:
 
 | Term | Meaning |
 |---|---|
 | Host | The Ubuntu machine where you run the assistant |
+| Application snap | `lab-ai`, containing the assistant and automation tools |
+| Platform snaps | Separate LXD and `gemma4` services |
+| User state | `~/snap/lab-ai/common`, containing the snap-managed lab state |
 | Member / node | One VM in your lab |
 | Environment / workspace | One complete lab, such as `demo_microcloud` |
 | LXD | Runs the lab VMs on the host |
@@ -305,17 +335,22 @@ model runs on the host only.
 | `e4b` | ~5.0 GB | Default; recommended for most machines |
 | `26b` | ~15.8 GB | Not needed for normal lab work |
 
-To install the smaller `e2b` model, replace **Step 2** of the installation
-with:
+The model belongs to the separate inference snap, not the application package.
+To select `e2b` before first-time host setup, install the inference snap if it is
+missing and choose the model explicitly:
 
 ```bash
-./dev.sh
-bash scripts/prep_host.sh
-bash scripts/install_inference_snap.sh --model e2b
+sudo snap install gemma4          # only if gemma4 is not already installed
+snap run gemma4 list-models
+snap run gemma4 use-model e2b --assume-yes
+snap run lab-ai check
 ```
 
-Then continue with Step 3. To switch an existing installation to `e2b`, run
-the last command on its own.
+On an existing installation, omit the install command and use `use-model` to
+change the model. It can download a model component and restart the shared
+inference service; coordinate with other users before switching it. This does
+not resize, replace, or delete any lab VM. Changing `INFERENCE_MODEL` alone
+changes the client request; it does not install or select a model in `gemma4`.
 
 ## Lab size and host capacity
 
@@ -433,7 +468,10 @@ Other protections:
 - **Name conflicts:** if any LXD VM, network, profile, or volume with the
   planned name already exists, deployment stops before changing anything.
   The assistant never adopts or deletes resources it did not create.
-- **Locking:** only one infrastructure operation runs at a time.
+- **Locking:** snap infrastructure operations for a user are serialized through
+  the snap's operation lock. A source checkout uses a different state/lock
+  location, so do not run staging and snap mutations concurrently on the same
+  host.
 - **Recovery:** if the LXD provider creates a network but fails to record it,
   the assistant imports that exact verified network and continues once. Other
   cases stop and report the problem.
@@ -443,68 +481,94 @@ the chat for normal work.
 
 ## Your data and backups
 
-The assistant needs its Terraform state to add nodes to, scale, or delete labs.
-For the application snap, all mutable lab data is under `$SNAP_USER_COMMON`:
+The application snap needs its Terraform state to add nodes to, scale, or
+delete labs. Use the same host user account for all operations on a lab.
 
-| Snap location | Contents |
-|---|---|
-| `~/snap/lab-ai/common/terraform/` | Provider initialization and per-lab Terraform state |
-| `~/snap/lab-ai/common/inventory_<workspace>.yaml` | Generated Ansible inventories |
-| `~/snap/lab-ai/common/` | Operation history, logs, documentation cache, and provider mirror configuration |
-| `~/.ssh/id_rsa_lab` | Private SSH key for the lab VMs |
-
-Back up the entire snap common directory and the SSH key before changing
-machines. Do not remove the snap with `--purge` while managed labs exist: this
-would remove state, not the external LXD resources. Refreshing from a local snap
-file preserves state; see [Updating the assistant](#updating-the-assistant).
-
-For **source checkouts**, the locations are:
+The normal user-state root is **`~/snap/lab-ai/common`** (`$SNAP_USER_COMMON`).
+It is separate from the repository and from normal staging state.
 
 | Location | Contents |
 |---|---|
-| `terraform/` | Infrastructure state for each lab |
-| `inventory_<workspace>.yaml` | Generated Ansible inventory |
-| `~/.canonical-ai-lab-assistant/` | Operation history and documentation cache |
+| `~/snap/lab-ai/common/terraform/` | Terraform working files, provider initialization, and per-lab state |
+| `~/snap/lab-ai/common/inventory_<workspace>.yaml` | Generated Ansible inventory |
+| `~/snap/lab-ai/common/deployment_history.json` | Operation history |
+| `~/snap/lab-ai/common/` | Documentation cache, runtime files, and provider mirror configuration |
 | `~/.ssh/id_rsa_lab` | Private SSH key for the lab VMs |
+| `$SNAP/` | Read-only application, scripts, playbooks, Terraform assets, and bundled tooling; not your lab state |
 
-- Keep the project folder while you have labs. Git does not back these files up.
-- Back up `terraform/` before moving the folder.
-- Keep the private key private, and never commit these files.
-- Back up anything important inside your labs separately.
+- Back up the **entire common directory**, not just a selected state file, before
+  changing machines or updating the prototype. Stop infrastructure operations
+  before copying it.
+- Back up the lab SSH key securely and keep it private. Git does not back up
+  state, inventories, or keys; never commit them.
+- Back up important guest data separately. A state backup is not a VM or disk backup.
+- Keep using the same user account. Running the assistant with `sudo` or a
+  different user can select another state directory and hide your existing labs.
+- Do not copy staging state into the snap or delete state to fix a failed deployment.
+
+> [!WARNING]
+> Removing or purging the application snap does not destroy its external LXD
+> VMs. Delete unwanted labs through the chat first. `snap remove --purge lab-ai`
+> discards user state and can leave VMs that the assistant can no longer manage.
+
+See [Updating the assistant](#updating-the-assistant) for a state-preserving update.
 
 ## Updating the assistant
 
-Leave the chat and wait for infrastructure operations to finish. For a **local
-application snap**, back up state and install the new file over the existing
-snap. This replaces the snap revision without removing `$SNAP_USER_COMMON`:
+Leave the chat and wait for infrastructure operations to finish. Obtain the new
+local snap file, back up user state, then install it **over the existing snap**:
 
 ```bash
 cd ~/lxdlab/canonical-ai-lab-assistant-snap
 backup=".snap-test/state-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$backup"
+mkdir -p "$backup" && chmod 700 "$backup"
 cp -a "$HOME/snap/lab-ai/common" "$backup/common"
 sudo snap install ./lab-ai_0.1.0-prototype.5_amd64.snap --dangerous --classic
-lab-ai doctor
-lab-ai chat
+snap list lab-ai
+snap run lab-ai doctor
+snap run lab-ai chat
 ```
 
-Do not use `snap remove --purge` as an update procedure. Existing Terraform
-workspaces, state identities, inventories, and labs must be preserved.
+This local-file install replaces the snap revision while preserving
+`$SNAP_USER_COMMON`. The update path was tested with an existing lab: Terraform
+lineage, serial, VM geometry, and inventory remained unchanged. Installing a new
+revision does not resize or redeploy existing labs.
 
-For a **source checkout**, update the same folder:
+Check `List my MicroCloud environments.` in the chat after updating. Use the
+same user and confirm existing labs are visible before creating another one.
 
-```bash
-git pull --ff-only
-./dev.sh --chat
-```
-
-If Git reports local changes, review them rather than deleting the folder.
-Updating does not resize or redeploy existing labs.
+**Do not remove the snap or use `--purge` as an update procedure.** Also do not
+restore an old backup over a newer live state while operations are running.
+The local prototype is not updated from the Snap Store; updating Git files does
+not update the installed application. A new build and local snap install are
+required. If the package is in a different directory, replace the file path;
+your state still belongs to `~/snap/lab-ai/common`. The backup location above is
+ignored by Git; keep backups private and copy them to secure backup storage
+rather than treating the worktree as their only home.
 
 ## Configuration
 
-No configuration is needed for normal use. To change a setting, add it to a
-`.env` file in the project folder, then start a new chat.
+No configuration is needed for normal use. Override a setting through the
+launch environment, then start a new chat. For example:
+
+```bash
+INFERENCE_TIMEOUT_SEC=180 snap run lab-ai chat
+```
+
+For a custom endpoint, replace the address and model below with the real values:
+
+```bash
+INFERENCE_HOST=http://127.0.0.1:8336/v1 \
+INFERENCE_MODEL=gemma4-e4b \
+INFERENCE_AUTO_DISCOVERY=false \
+snap run lab-ai check
+```
+
+Exports in a host shell apply to subsequent `snap run lab-ai` commands from that
+shell. A working-directory `.env` can also be read, but it is not required and
+is not a supported snap configuration directory. Do not edit `$SNAP` files or
+assume `snap set lab-ai ...` configures this prototype; no application configure
+hook is provided. Leave `$SNAP_USER_COMMON` managed by snapd.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -518,38 +582,41 @@ No configuration is needed for normal use. To change a setting, add it to a
 | `INFERENCE_STREAM` | `true` | Show the answer while it is written |
 | `INFERENCE_RESTART_TIMEOUT_SEC` | `15` | Wait after the AI service disconnects |
 | `INFERENCE_MAX_RETRIES` | `3` | Retries for temporary disconnects |
-| `INFERENCE_READY_TIMEOUT_SEC` | `1800` | How long setup waits for the model |
+| `INFERENCE_READY_TIMEOUT_SEC` | `1800` | How long explicit host setup waits for the model |
 | `OPERATION_TIMEOUT_SEC` | `3600` | Maximum time for one infrastructure operation |
 
 ## Command reference
 
-### `dev.sh`
+### Snap administration
 
 | Command | Purpose |
 |---|---|
-| `./dev.sh --bootstrap` | First-time setup of the machine |
-| `./dev.sh --chat` | Start the assistant |
-| `./dev.sh --check` | Check the AI service |
-| `./dev.sh --diagnose` | Run detailed AI service diagnostics |
-| `./dev.sh --shell` | Open a shell with the Python environment active |
-| `./dev.sh --force-reinstall` | Reinstall the Python package |
-| `./dev.sh --clean` | Recreate the Python environment (does not touch labs) |
+| `sudo snap install ./lab-ai_0.1.0-prototype.5_amd64.snap --dangerous --classic` | Install the local application or update it without purging user state |
+| `snap list lab-ai` | Show the installed snap package version and revision |
+| `snap info lab-ai` | Show installed package metadata |
+| `snap run --shell lab-ai` | Open an advanced shell with the bundled runtime and snap paths |
+| `snap services lxd` | Check the separate LXD platform service |
+| `snap services gemma4` | Check the separate inference platform service |
 
 ### `lab-ai`
 
-Available directly after snap installation, or after `source .venv/bin/activate`
-for a source checkout. Snap users also have `lab-ai doctor` for diagnostics and
-`lab-ai bootstrap --host-setup` for explicit privileged setup; plain snap-mode
-`bootstrap` does not change the host.
+The snap's short command is `lab-ai`. This guide uses `snap run lab-ai` to avoid
+running a source-installed executable with the same name. Application commands
+run as your normal user, not with `sudo`.
 
 | Command | Purpose |
 |---|---|
-| `lab-ai chat` | Start the assistant |
-| `lab-ai bootstrap` | First-time setup of the machine |
-| `lab-ai check` | Check the AI service (non-zero exit status on failure) |
-| `lab-ai setup` | Show the configured scripts and AI engine |
-| `lab-ai version` | Show the version |
-| `lab-ai --debug check` | Check with debug logging |
+| `snap run lab-ai chat` | Start the assistant from any directory |
+| `snap run lab-ai doctor` | Check tools and platform services without privileged host setup |
+| `snap run lab-ai check` | Check inference readiness; non-zero exit status on failure |
+| `snap run lab-ai bootstrap` | Show guidance only; does not perform host setup |
+| `snap run lab-ai bootstrap --host-setup` | Explicitly authorize host preparation; can request `sudo` |
+| `snap run lab-ai setup` | Show the configured scripts, AI engine, and setup guidance |
+| `snap run lab-ai version` | Show the application version; use `snap list lab-ai` for the prototype package revision |
+| `snap run lab-ai --debug check` | Check with debug logging |
+
+The hidden `resolve-sizing` command is an internal bridge used by bundled
+scripts; use chat sizing requests for normal operation.
 
 ### In the chat
 
@@ -563,48 +630,62 @@ for a source checkout. Snap users also have `lab-ai doctor` for diagnostics and
 
 ## Detailed troubleshooting
 
-### `venv` or `ensurepip` is missing
+### A bundled tool is missing
 
-Install `python3-venv` (see [Install](#2-install)), then recreate the Python
-environment:
+The application snap already includes Python, Ansible, `community.general`,
+OpenTofu, and its tested providers. A missing Python or package error is not a
+request to create a virtual environment or install packages on the host.
+
+First confirm the intended snap revision and command:
 
 ```bash
-./dev.sh --clean
+snap list lab-ai
+snap run lab-ai version
+snap run lab-ai doctor
 ```
+
+If the installed revision is wrong or incomplete, obtain the corrected local
+package and use the state-preserving [update procedure](#updating-the-assistant).
+Do not purge user state. LXD and `gemma4` are separate services and are not fixed
+by reinstalling Python dependencies.
 
 ### LXD asks for `sudo`
 
-Your login session does not yet include the `lxd` group. Log out completely
-and log back in, then run `lxc info`.
+If setup added your user to the `lxd` group, log out completely and log back in,
+then run `lxc info` and `snap run lab-ai doctor`. If access is still denied,
+check `id -nG` and `snap services lxd`; an administrator may need to prepare the
+platform. Do not run the application as root to bypass the problem, because it
+would use a different lab state directory.
 
 ### The AI service is unavailable
 
-Run the diagnostics:
+The application snap is a client of the separate `gemma4` service. Run:
 
 ```bash
-./dev.sh --diagnose
-```
-
-Useful checks:
-
-```bash
+snap run lab-ai doctor
 snap services gemma4
-gemma4 status
-./dev.sh --check
+snap run gemma4 status
+snap run lab-ai check
 ```
 
-If the service is stopped, restart it (this interrupts anyone else using it):
+If `gemma4` is not installed, prepare the platform explicitly as described in
+[Install](#2-install). If its service is stopped, coordinate with other users
+before restarting it:
 
 ```bash
 sudo snap restart gemma4
 ```
 
-If the service runs on a different address or port, find the `openai`
-endpoint and put it in `.env` as `INFERENCE_HOST`:
+Restarting the shared service interrupts other inference clients. It does not
+change lab VMs. To find a custom address or model, inspect status:
 
 ```bash
-gemma4 status --format json
+snap run gemma4 status --format json
 ```
+
+Set `INFERENCE_HOST` and, if necessary, `INFERENCE_MODEL` in the launch
+environment using the actual reported values; see [Configuration](#configuration).
+No source checkout or Python environment is required for these checks.
 
 ### The model download takes a long time
 
@@ -612,7 +693,7 @@ Check progress:
 
 ```bash
 snap changes
-gemma4 status
+snap run gemma4 status
 ```
 
 On slow connections, use the smaller model; see
@@ -624,11 +705,14 @@ The model can unload after a period of inactivity, so the first answer after a
 break takes longer. To keep it loaded longer (it keeps using memory):
 
 ```bash
-gemma4 set sleep-idle-seconds=3600
+snap run gemma4 set sleep-idle-seconds=3600
 ```
 
+This changes the shared inference service and keeps using host memory.
 If answers are always slow, use the smaller model, keep
-`INFERENCE_ENABLE_THINKING=false`, and stop other heavy workloads.
+`INFERENCE_ENABLE_THINKING=false`, and reduce competing heavy workloads only
+when they are yours to manage. Do not stop existing staging labs to troubleshoot
+the snap without checking ownership and capacity first.
 
 ### LXD cannot create virtual machines
 
@@ -680,52 +764,83 @@ suggested next step. Then:
 3. To start over with a lab you do not need, delete it through the chat and
    create it again.
 
-Do not delete the `terraform/` folder or run cleanup commands repeatedly.
+Do not delete `~/snap/lab-ai/common/terraform/`, purge the snap, or run cleanup
+commands repeatedly. A failed operation may have created resources recorded in
+that state. After adding nodes, Ceph can temporarily report recovery activity;
+run health again after it settles rather than assuming a partial result is success.
 
 ### `Missing Resource State After Create`
 
 For a network the assistant can verify as its own, it recovers automatically.
-If recovery is refused, compare the recorded state with LXD (replace the
-workspace and pool names):
+If recovery is refused, compare the snap's recorded state with LXD. Do not use
+another checkout's Terraform directory or a host-installed OpenTofu binary.
+
+Open the packaged shell as the same user who created the lab, then run the
+following read-only inspection (replace the workspace and pool names):
 
 ```bash
-cd terraform
-TF_WORKSPACE=demo_microcloud tofu state list
-cd ..
+snap run --shell lab-ai
+export TF_CLI_CONFIG_FILE="$SNAP_USER_COMMON/tofu.rc"
+TF_WORKSPACE=demo_microcloud tofu -chdir="$SNAP_USER_COMMON/terraform" state list
 lxc network list
 lxc list
 lxc storage volume list default
+exit
 ```
+
+The provider mirror configuration is created by `snap run lab-ai` commands.
+These inspection commands do not initialize, import, destroy, or delete state.
+Do not manually adopt conflicting resources; let the assistant enforce ownership.
 
 ### Debug logs
 
 ```bash
-.venv/bin/lab-ai --debug check
+snap run lab-ai --debug check
+snap run lab-ai --debug chat
 ```
 
-Logs can contain host names, IP addresses, and paths. Review them before
-sharing.
+Application diagnostics appear in the terminal. The separate platform services
+have their own snapd logs:
+
+```bash
+sudo snap logs gemma4 -n=50
+sudo snap logs lxd -n=50
+```
+
+The application is a CLI, not a daemon; it does not have a `snap services lab-ai`
+service to restart. Logs can contain host names, IP addresses, and paths. Review
+them before sharing.
 
 ## Development
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e '.[dev]'
+End users run the installed snap; building is only needed when changing the
+prototype. Keep all snap edits, builds, and artifacts in the dedicated worktree
+on **`prototype/snap-packaging`**. Do not build in or merge back into normal
+`main` or `staging` worktrees without explicit approval.
 
-python -m pytest -q
-python -m ruff check src tests
-python -m black --check src tests
-```
-
-Infrastructure checks (require the tools installed by setup):
+With Snapcraft available, build a local package in that worktree:
 
 ```bash
-for script in scripts/*.sh dev.sh; do bash -n "$script"; done
-(cd terraform && tofu init -input=false && tofu fmt -check -recursive && tofu validate)
-ansible-playbook --syntax-check -i 'localhost,' playbooks/microcloud.yml
+cd ~/lxdlab/canonical-ai-lab-assistant-snap
+git branch --show-current        # must be prototype/snap-packaging
+snapcraft pack
 ```
+
+Snapcraft installs build dependencies in its build environment and bundles the
+runtime. The end user's host does not need a separate Python development
+installation. Source regression tests and checks belong to the development
+worktree; see the project test suites and [snap packaging notes](snap/README.md).
+
+Do not commit `.snap`, `parts/`, `prime/`, `stage/`, user state, inventories, or
+keys. GitHub contains the prototype source and build definition, not the
+locally generated snap file.
+
+For package acceptance, prefer a clean Ubuntu 24.04 VM with nested
+virtualization and separate lab prefixes. Verify `doctor`, `check`, `chat`,
+standard deployment, two concurrent labs, add-node/scale, health, delete, and
+state-preserving local updates. Verify that provider initialization works from
+the bundled mirror without a download. Do not perform destructive tests against
+existing staging labs.
 
 Project layout:
 
@@ -741,10 +856,13 @@ src/lab_ai_assistant/
 ├── ui.py              Terminal interface
 └── cli.py             Command-line entry point
 
-terraform/main.tf          LXD VMs, networks, and disks
-playbooks/microcloud.yml   MicroCloud installation
-scripts/                   Setup, lifecycle, and diagnostic scripts
-tests/                     Automated tests
+terraform/main.tf          Read-only Terraform assets copied into snap user state
+playbooks/microcloud.yml   Bundled MicroCloud installation playbook
+scripts/                   Bundled setup, lifecycle, and diagnostic scripts
+snap/snapcraft.yaml        Classic application snap build definition
+snap/local/                Packaged launcher and provider mirror setup
+snap/python/               Pinned application dependencies for the build
+tests/                     Source and snap regression tests
 ```
 
 ## Current limitations

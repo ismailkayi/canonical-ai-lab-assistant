@@ -78,12 +78,23 @@ rather than treating a partial postcondition as success.
 
 ## Build and install
 
+For end-user installation, host preparation, model selection, daily commands,
+and troubleshooting, follow the main [snap user guide](../README.md#2-install).
+This document records prototype packaging and build details. Building belongs
+only in the isolated snap worktree; users with a supplied package can skip it.
+
 ```bash
+cd ~/lxdlab/canonical-ai-lab-assistant-snap
 snapcraft pack
 sudo snap install ./lab-ai_0.1.0-prototype.5_amd64.snap \
   --dangerous --classic
-lab-ai doctor
+snap run lab-ai doctor
 ```
+
+Use `snap run lab-ai` to choose the packaged command explicitly even when a
+source-installed executable is on PATH. LXD and `gemma4` are separate platform
+snaps. Plain `bootstrap` does not prepare the host; only explicit
+`bootstrap --host-setup` authorizes the privileged setup flow.
 
 ## Updating an installed local prototype
 
@@ -94,10 +105,12 @@ over the existing snap:
 ```bash
 cd ~/lxdlab/canonical-ai-lab-assistant-snap
 backup=".snap-test/state-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$backup"
+mkdir -p "$backup" && chmod 700 "$backup"
 cp -a "$HOME/snap/lab-ai/common" "$backup/common"
 sudo snap install ./lab-ai_0.1.0-prototype.5_amd64.snap --dangerous --classic
-lab-ai doctor
+snap list lab-ai
+snap run lab-ai doctor
+snap run lab-ai chat
 ```
 
 This refreshes the local snap revision without purging user data. Confirm that
@@ -107,4 +120,8 @@ purge deletes Terraform state but cannot delete external LXD resources. Existing
 VM geometry is not changed by installing this revision.
 
 LXD and `gemma4` remain separately installed platform services. Do not reuse
-staging lab prefixes or Terraform state when testing this prototype.
+staging lab prefixes or Terraform state when testing this prototype, and do not
+run source/staging and snap mutations concurrently on the same host. Their
+state and operation locks are separate even though they share LXD capacity.
+The ignored backup directory is not the only place to retain backups; keep a
+private copy in secure backup storage while labs exist.
