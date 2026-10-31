@@ -1,0 +1,56 @@
+# MicroCloud demo settings
+# Copy this file to demo.conf and fill in the three "REQUIRED" values:
+#   cp demo.conf.example demo.conf
+# demo.conf is ignored by git, so your keys stay on this machine.
+# Use plain KEY=value lines (no spaces around "=").
+
+# ---------------------------------------------------------------------------
+# AI co-presenter (OpenRouter)                                       REQUIRED*
+# Get a key at https://openrouter.ai/keys
+# Any model listed at https://openrouter.ai/models works.
+# (*The demo still runs without a key; you just get built-in narration.)
+# ---------------------------------------------------------------------------
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+
+# ---------------------------------------------------------------------------
+# Landscape (step 3)                                                 REQUIRED
+# Landscape SaaS:     set LANDSCAPE_ACCOUNT_NAME and leave LANDSCAPE_FQDN empty.
+# Self-hosted:        set LANDSCAPE_FQDN (e.g. landscape.example.com);
+#                     the account name is then "standalone".
+# The registration key is set in Landscape under Settings (optional on
+# self-hosted servers that do not use one).
+# ---------------------------------------------------------------------------
+LANDSCAPE_ACCOUNT_NAME=
+LANDSCAPE_FQDN=
+LANDSCAPE_REGISTRATION_KEY=
+# Self-hosted with a self-signed certificate: path to the server's .pem file
+LANDSCAPE_SSL_CERT=
+
+# ---------------------------------------------------------------------------
+# Ubuntu Pro (step 4 — USG needs Pro)                                REQUIRED
+# Get a token at https://ubuntu.com/pro/dashboard (free for personal use).
+# ---------------------------------------------------------------------------
+PRO_TOKEN=
+
+# ---------------------------------------------------------------------------
+# Demo shape — the defaults match the demo story. Change only if needed.
+# ---------------------------------------------------------------------------
+NODE_COUNT=10            # MicroCloud cluster members (VMs on this host)
+NODE_CPU=2
+NODE_MEMORY=4GiB
+NODE_ROOT_DISK=20GiB
+NODE_CEPH_DISK=20GiB
+
+INSTANCE_COUNT=5         # Workload instances provisioned on MicroCloud
+INSTANCE_TYPE=vm         # vm, or "container" if nested virtualization is unavailable
+INSTANCE_CPU=1
+INSTANCE_MEMORY=1GiB
+
+UBUNTU_IMAGE=ubuntu:24.04
+UPLINK_SUBNET=10.20.0    # first three octets of the MicroCloud uplink network
+
+USG_INSTANCE=1           # which instance to harden in step 4
+USG_PROFILE=cis_level1_server
+# Rule to fix. Leave empty to auto-pick the first failing rule from a safe list.
+USG_RULE=sshd_disable_root_login
