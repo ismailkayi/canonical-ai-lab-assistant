@@ -6,10 +6,11 @@ require_cluster
 
 # --- 1. The pool -----------------------------------------------------------
 title "1/3  ${NODE_COUNT} machines, one resource pool"
-show lxc exec "${LEADER}" -- lxc cluster list -c nurs
+show lxc exec "${LEADER}" -- lxc cluster list
 
 mc sh -c '
-    for m in $(lxc cluster list -f csv -c n); do
+    # Member names from the API ("/1.0/cluster/members/<name>"), one per line.
+    for m in $(lxc query /1.0/cluster/members | sed -n "s|.*/1.0/cluster/members/\([^\"]*\)\".*|\1|p"); do
         printf "%s " "$m"
         lxc query "/1.0/resources?target=$m" | tr -d "\n"
         echo
