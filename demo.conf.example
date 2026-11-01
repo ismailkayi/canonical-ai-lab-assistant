@@ -60,6 +60,10 @@ INSTANCE_MEMORY=512MiB
 UBUNTU_IMAGE=ubuntu:24.04
 UPLINK_SUBNET=10.20.0    # first three octets of the MicroCloud uplink network
 
+# Print every command a step runs, including background ones (yes / no).
+# The key commands are always printed.
+TRACE_COMMANDS=yes
+
 USG_INSTANCE=1           # which instance to harden in step 4
 USG_PROFILE=cis_level1_server
 # Rule to fix. Leave empty to auto-pick the first failing rule from a safe list.
