@@ -2,6 +2,67 @@
 # STEP 1 — Create NODE_COUNT VMs on this host and join them into one MicroCloud.
 # Safe to re-run: existing VMs are kept, and an existing cluster is just shown.
 source "$(dirname "$0")/common.sh"
+# --print: show the commands to type by hand instead of running them.
+guide() {
+    local pool n="${NODE_PREFIX}"
+    pool=$(lxc profile device get default root pool 2>/dev/null || echo default)
+    print_guide <<EOF
+# ============================================================================
+# STEP 1 by hand: build a ${NODE_COUNT}-node MicroCloud
+# Run these on this machine (the host). Values come from demo.conf.
+# ============================================================================
+
+# 1/5  An uplink network for MicroCloud's software-defined network (OVN).
+#      No DHCP: the OVN router takes its addresses from this range itself.
+lxc network create ${UPLINK_BRIDGE} ipv4.address=${UPLINK_SUBNET}.1/24 ipv4.nat=true ipv4.dhcp=false ipv6.address=none
+
+# 2/5  ${NODE_COUNT} VMs. Each gets a second NIC (the OVN uplink) and an empty disk for Ceph.
+for i in \$(seq 1 ${NODE_COUNT}); do
+  lxc storage volume create ${pool} ${n}-\$i-ceph --type=block size=${NODE_CEPH_DISK}
+  lxc init ${UBUNTU_IMAGE} ${n}-\$i --vm -c limits.cpu=${NODE_CPU} -c limits.memory=${NODE_MEMORY} -d root,size=${NODE_ROOT_DISK}
+  lxc config device add ${n}-\$i uplink nic network=${UPLINK_BRIDGE}
+  lxc config device add ${n}-\$i ceph disk pool=${pool} source=${n}-\$i-ceph
+  lxc start ${n}-\$i
+done
+
+# Wait until every VM shows an IPv4 address (about a minute), then continue.
+lxc list ${n}-
+
+# 3/5  Install the MicroCloud building blocks on every VM:
+#      LXD (compute), MicroCeph (storage), MicroOVN (network), MicroCloud (glue).
+for i in \$(seq 1 ${NODE_COUNT}); do
+  lxc exec ${n}-\$i -- snap wait system seed.loaded
+  lxc exec ${n}-\$i -- sh -c 'snap install lxd --channel=5.21/stable || snap refresh lxd --channel=5.21/stable'
+  lxc exec ${n}-\$i -- snap install microceph --channel=squid/stable
+  lxc exec ${n}-\$i -- snap install microovn --channel=24.03/stable
+  lxc exec ${n}-\$i -- snap install microcloud --channel=2/stable
+done
+
+# 4/5  Form the cluster. Start it on the first VM; it prints a passphrase:
+lxc exec ${LEADER} -- microcloud init
+
+# In a second terminal per VM, join the others and type that passphrase:
+#   lxc exec ${n}-2 -- microcloud join      (... up to ${n}-${NODE_COUNT})
+#
+# Back on ${LEADER}, answer the questions roughly like this:
+#   More than one cluster member?   yes, and select all ${NODE_COUNT} systems
+#   Local storage?                  no
+#   Distributed storage (Ceph)?     yes: pick the ${NODE_CEPH_DISK} disk on each VM, wipe it
+#   CephFS?                         no
+#   Distributed networking (OVN)?   yes: on each VM pick the NIC that has no IP address
+#   IPv4 gateway:                   ${UPLINK_SUBNET}.1/24
+#   IPv4 range:                     ${UPLINK_SUBNET}.100-${UPLINK_SUBNET}.254
+#   IPv6 gateway:                   (leave empty)
+#   DNS servers:                    8.8.8.8
+# (./demo.py step 1 does the same from a file: logs/microcloud-preseed.yaml)
+
+# 5/5  Keep Ceph's memory small on these small VMs, then admire the result:
+lxc exec ${LEADER} -- microceph.ceph config set osd osd_memory_target 1073741824
+lxc exec ${LEADER} -- lxc cluster list
+# Every member should show ONLINE: ${NODE_COUNT} machines, one cloud.
+EOF
+}
+[[ "${1:-}" != "--print" ]] || { guide; exit 0; }
 require_lxd
 
 cluster_ready() { lxc info "${LEADER}" >/dev/null 2>&1 && mc lxc cluster list >/dev/null 2>&1; }

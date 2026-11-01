@@ -140,6 +140,40 @@ At every pause you can:
 
 After step 4 the AI gives a closing summary, then waits for audience questions.
 
+### Hands-on mode: type the commands yourself
+
+For anyone who wants to learn rather than watch a script run. Nothing is
+executed for you. Each step prints the exact commands to type, with your
+`demo.conf` values filled in and a comment on what each one does. Secrets
+(Pro token, Landscape key) show as `<placeholders>`.
+
+```bash
+./demo.py run --manual
+```
+
+The AI still introduces each step. Then you see the commands, type them in a
+second terminal, and press **Enter** when done. At the pause you can also ask
+the AI about any command (`what does lxc shell do?`) or press `c` to see the
+commands again.
+
+To print the commands without the AI or any pauses (to read, or to save to a
+file):
+
+```bash
+./demo.py commands 2
+```
+
+```bash
+./demo.py commands > all-steps.txt
+```
+
+Each step script does the same with `--print`, e.g.
+`bash scripts/step4_usg_harden.sh --print`. The hand-typed commands are the
+plain version of what the scripts do. The scripts add only checks, waiting and
+running things in parallel. Step 1 by hand uses the interactive
+`microcloud init` / `microcloud join` instead of a preseed file, so you see
+every question MicroCloud asks.
+
 ### What to point at in each step
 
 **Step 1 — One cloud from three machines.**
@@ -219,6 +253,7 @@ press `r`. Detailed logs are in `logs/`.
 
 ```text
 demo.py                 Runs the demo and talks to the AI (Python standard library only)
+                        commands / run --manual print the commands instead of running them
 demo.conf.example       All settings with explanations. Copy it to demo.conf.
 scripts/
   step1_build_microcloud.sh      N VMs → one MicroCloud

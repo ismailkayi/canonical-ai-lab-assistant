@@ -21,7 +21,7 @@ UPLINK_BRIDGE="mcbr0"            # host bridge that gives MicroCloud's OVN netwo
 LEADER="${NODE_PREFIX}-1"
 
 # --- output helpers --------------------------------------------------------
-BOLD='\033[1m'; BLUE='\033[0;34m'; GREEN='\033[0;32m'
+BOLD='\033[1m'; DIM='\033[2m'; BLUE='\033[0;34m'; GREEN='\033[0;32m'
 YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
 info()  { echo -e "${BLUE}==>${NC} $*"; }
@@ -32,6 +32,25 @@ title() { echo; echo -e "${BOLD}$*${NC}"; }
 
 # Print a command, then run it — so the audience sees exactly what happens.
 show() { echo -e "${BOLD}\$ $*${NC}"; "$@"; }
+
+# Hands-on mode: every step script accepts --print, which prints the commands
+# to type by hand (read from stdin) instead of running anything.
+# Comment lines are dimmed and commands are bold on a terminal; when piped or
+# redirected to a file the text stays plain, ready to copy.
+print_guide() {
+    local line
+    if [[ -t 1 ]]; then
+        while IFS= read -r line; do
+            case "${line}" in
+                "#"*) printf "${DIM}%s${NC}\n" "${line}" ;;
+                "")   echo ;;
+                *)    printf "${BOLD}%s${NC}\n" "${line}" ;;
+            esac
+        done
+    else
+        cat
+    fi
+}
 
 # --- MicroCloud helpers ----------------------------------------------------
 node_name()     { echo "${NODE_PREFIX}-$1"; }

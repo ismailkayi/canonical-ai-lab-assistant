@@ -2,6 +2,37 @@
 # STEP 2 — Show the cluster members as ONE pool of resources, then provision
 # INSTANCE_COUNT instances from that pool. MicroCloud decides where each one runs.
 source "$(dirname "$0")/common.sh"
+# --print: show the commands to type by hand instead of running them.
+guide() {
+    local type_flag=""
+    [[ "${INSTANCE_TYPE}" != "vm" ]] || type_flag=" --vm"
+    print_guide <<EOF
+# ============================================================================
+# STEP 2 by hand: one resource pool, ${INSTANCE_COUNT} instances from it
+# ============================================================================
+
+# Open a shell on the first cluster member. Everything below runs inside it,
+# and its lxc command talks to the WHOLE cluster, not just this one VM.
+lxc shell ${LEADER}
+
+# 1/3  The pool: every member, and what each one contributes.
+lxc cluster list
+lxc info --resources --target ${NODE_PREFIX}-2   # one member's CPUs, memory and disks
+lxc storage info remote                       # the shared Ceph pool, the sum of all members
+
+# 2/3  Ask the pool for ${INSTANCE_COUNT} instances. There is no --target: we do not say where they run.
+for i in \$(seq 1 ${INSTANCE_COUNT}); do
+  lxc launch ${UBUNTU_IMAGE} ${INSTANCE_PREFIX}-\$i${type_flag} -c limits.cpu=${INSTANCE_CPU} -c limits.memory=${INSTANCE_MEMORY}
+done
+
+# 3/3  Where did they land? Look at the LOCATION column: the cloud chose.
+lxc list -c ns4tL
+
+# Leave the member's shell when you are done:
+exit
+EOF
+}
+[[ "${1:-}" != "--print" ]] || { guide; exit 0; }
 require_cluster
 
 # --- 1. The pool -----------------------------------------------------------
