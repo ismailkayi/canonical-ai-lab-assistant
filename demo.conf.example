@@ -34,18 +34,28 @@ LANDSCAPE_SSL_CERT=
 PRO_TOKEN=
 
 # ---------------------------------------------------------------------------
-# Demo shape — the defaults match the demo story. Change only if needed.
+# Demo shape — sized to fit in about 10 GiB of RAM, for a laptop that is
+# also running a desktop, browser and IDE. The narration follows these numbers.
+#
+#   ~10 GiB free:  NODE_COUNT=3  NODE_MEMORY=3GiB  INSTANCE_TYPE=container  (default)
+#   ~24 GiB free:  NODE_COUNT=5  NODE_MEMORY=4GiB  INSTANCE_TYPE=vm  INSTANCE_MEMORY=1GiB
+#   ~48 GiB free:  NODE_COUNT=10 NODE_MEMORY=4GiB  INSTANCE_TYPE=vm  INSTANCE_COUNT=5
+#
+# NODE_COUNT must be at least 3 (Ceph and the cluster need three members).
+# The cluster VMs can use up to NODE_COUNT × NODE_MEMORY of RAM.
+# Containers share each member's kernel, so they cost ~200 MiB instead of ~1 GiB;
+# Landscape (step 3) and USG (step 4) work the same in them.
 # ---------------------------------------------------------------------------
-NODE_COUNT=10            # MicroCloud cluster members (VMs on this host)
+NODE_COUNT=3             # MicroCloud cluster members (VMs on this host)
 NODE_CPU=2
-NODE_MEMORY=4GiB
-NODE_ROOT_DISK=20GiB
-NODE_CEPH_DISK=20GiB
+NODE_MEMORY=3GiB
+NODE_ROOT_DISK=15GiB
+NODE_CEPH_DISK=15GiB
 
-INSTANCE_COUNT=5         # Workload instances provisioned on MicroCloud
-INSTANCE_TYPE=vm         # vm, or "container" if nested virtualization is unavailable
+INSTANCE_COUNT=3         # Workload instances provisioned on MicroCloud
+INSTANCE_TYPE=container  # container (light) or vm (needs ~1 GiB each + nested virtualization)
 INSTANCE_CPU=1
-INSTANCE_MEMORY=1GiB
+INSTANCE_MEMORY=512MiB
 
 UBUNTU_IMAGE=ubuntu:24.04
 UPLINK_SUBNET=10.20.0    # first three octets of the MicroCloud uplink network

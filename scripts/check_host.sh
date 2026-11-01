@@ -26,6 +26,16 @@ mem_needed_gib=$(( NODE_COUNT * ${NODE_MEMORY%GiB} + 4 ))
 mem_total_gib=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 / 1024 ))
 if (( mem_total_gib >= mem_needed_gib )); then ok "Memory: ${mem_total_gib} GiB (need ~${mem_needed_gib} GiB)"
 else fail "Memory: ${mem_total_gib} GiB, need ~${mem_needed_gib} GiB for ${NODE_COUNT} × ${NODE_MEMORY}. Lower NODE_COUNT or NODE_MEMORY in demo.conf."; fi
+# Total RAM can be enough while desktop apps are using most of it right now.
+mem_avail_gib=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) / 1024 / 1024 ))
+lab_running=$(lxc list "${NODE_PREFIX}-" -c s -f csv 2>/dev/null | grep -c RUNNING || true)
+vm_mem_gib=$(( mem_needed_gib - 4 ))
+if (( lab_running == 0 )); then
+    if (( mem_avail_gib >= vm_mem_gib + 2 )); then ok "Memory available right now: ${mem_avail_gib} GiB (VMs use up to ${vm_mem_gib} GiB)"
+    else warn "Memory available right now: ${mem_avail_gib} GiB, the VMs can use up to ${vm_mem_gib} GiB. Close some apps, or lower NODE_COUNT / NODE_MEMORY."; fi
+fi
+
+(( NODE_COUNT >= 3 )) || fail "NODE_COUNT=${NODE_COUNT}: MicroCloud needs at least 3 members."
 
 cpu_total=$(nproc)
 if (( cpu_total >= NODE_COUNT )); then ok "CPU: ${cpu_total} threads"

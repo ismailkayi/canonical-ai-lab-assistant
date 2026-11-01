@@ -53,6 +53,14 @@ def load_settings() -> dict:
 
 
 S = load_settings()
+NODES = S.get("NODE_COUNT", "5")
+INSTANCES = S.get("INSTANCE_COUNT", "3")
+
+
+def words(n: str) -> str:
+    """'5' -> 'five' for spoken narration; other values are returned unchanged."""
+    names = "zero one two three four five six seven eight nine ten eleven twelve".split()
+    return names[int(n)] if n.isdigit() and int(n) < len(names) else n
 
 
 # --------------------------------------------------------------------------
@@ -60,26 +68,26 @@ S = load_settings()
 # --------------------------------------------------------------------------
 STEPS = [
     {
-        "title": f"Build a {S.get('NODE_COUNT', '10')}-node MicroCloud",
+        "title": f"Build a {NODES}-node MicroCloud",
         "script": "step1_build_microcloud.sh",
-        "goal": "Create 10 VMs on one host and join them into a single MicroCloud cluster "
+        "goal": f"Create {NODES} VMs on one host and join them into a single MicroCloud cluster "
         "(LXD for compute, MicroCeph for distributed storage, MicroOVN for networking).",
-        "intro": "We start with ten separate machines. Here they are VMs on one host, but "
-        "they could just as well be ten physical servers. MicroCloud installs LXD, Ceph and "
+        "intro": f"We start with {words(NODES)} separate machines. Here they are VMs on one host, but "
+        f"they could just as well be {words(NODES)} physical servers. MicroCloud installs LXD, Ceph and "
         "OVN on each of them and joins them into one cluster with a single command, so "
-        "compute, storage and networking are shared across all ten.",
-        "outro": "Ten machines are now one cloud. Every member shows as ONLINE in the "
+        f"compute, storage and networking are shared across all {words(NODES)}.",
+        "outro": f"{words(NODES).capitalize()} machines are now one cloud. Every member shows as ONLINE in the "
         "cluster list, and storage and networking are spread across all of them.",
     },
     {
-        "title": f"Pool the resources and provision {S.get('INSTANCE_COUNT', '5')} instances",
+        "title": f"Pool the resources and provision {INSTANCES} instances",
         "script": "step2_provision_instances.sh",
-        "goal": "Show the 10 members' CPU and RAM as one pooled total, then launch 5 VM "
+        "goal": f"Show the {NODES} members' CPU and RAM as one pooled total, then launch {INSTANCES} "
         "instances on demand without choosing where they run; the scheduler places them.",
         "intro": "This is the cloud idea: resource pooling and on-demand provisioning. "
         "We stop thinking about individual servers. We see one pool of CPU, memory and "
-        "storage, ask it for five instances, and MicroCloud decides where each one runs.",
-        "outro": "Five instances came out of the shared pool. Look at the LOCATION column: "
+        f"storage, ask it for {words(INSTANCES)} instances, and MicroCloud decides where each one runs.",
+        "outro": f"{words(INSTANCES).capitalize()} instances came out of the shared pool. Look at the LOCATION column: "
         "MicroCloud spread them across different members by itself, and their disks live on "
         "replicated Ceph storage, so no single server is a single point of failure.",
     },
@@ -87,13 +95,13 @@ STEPS = [
         "title": "Register the instances in Landscape",
         "script": "step3_register_landscape.sh",
         "goal": "Install landscape-client in each instance and register it with Landscape as "
-        "MC-Instance_1 ... MC-Instance_5, tagged microcloud-demo.",
+        f"MC-Instance_1 ... MC-Instance_{INSTANCES}, tagged microcloud-demo.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. Each instance now registers itself as MC-Instance "
         "with its number.",
-        "outro": "All five instances have registered. In the Landscape web UI, filter by the "
-        "tag microcloud-demo to see MC-Instance_1 to MC-Instance_5, ready for patching and "
+        "outro": f"All {words(INSTANCES)} instances have registered. In the Landscape web UI, filter by the "
+        f"tag microcloud-demo to see MC-Instance_1 to MC-Instance_{INSTANCES}, ready for patching and "
         "reporting.",
     },
     {
@@ -125,9 +133,9 @@ class CoPresenter:
         self.system = (
             "You are the AI co-presenter in a live Canonical technical demo shown to an "
             "audience. The demo: (1) create "
-            f"{S.get('NODE_COUNT', '10')} VMs and join them into one MicroCloud cluster "
+            f"{NODES} VMs and join them into one MicroCloud cluster "
             "(LXD, MicroCeph, MicroOVN); (2) show the members' resources as one pool and "
-            f"provision {S.get('INSTANCE_COUNT', '5')} instances that the scheduler spreads "
+            f"provision {INSTANCES} instances that the scheduler spreads "
             "across members (resource pooling and on-demand provisioning); (3) register the "
             "instances with Landscape as MC-Instance_1..N; (4) audit one instance with the "
             "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
@@ -225,15 +233,49 @@ def banner(number: int, step: dict) -> None:
     print(f"{GREEN}{line}{RESET}")
 
 
-def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
+def show_commands(number: int) -> str:
+    """Print the hands-on commands for a step; return them as plain text for the AI."""
+    script = str(SCRIPTS / STEPS[number - 1]["script"])
+    subprocess.call(["bash", script, "--print"])  # straight to the terminal, in colour
+    return subprocess.run(["bash", script, "--print"], capture_output=True, text=True).stdout
+
+
+def do_manual(number: int, ai: CoPresenter, interactive: bool) -> bool:
+    """Hands-on mode: print the commands, the learner types them, the AI only explains."""
+    step = STEPS[number - 1]
+    commands = show_commands(number)
+    if not interactive:
+        return True
+    while True:
+        choice = prompt("Type the commands above in another terminal.\n"
+                        "[Enter] done, next step   [c] show the commands again   [q] quit   "
+                        "or ask the AI about any command")
+        if choice == "":
+            break
+        if choice.lower() == "c":
+            show_commands(number)
+            continue
+        if choice.lower() == "q":
+            return False
+        say(ai.ask(f"A learner is typing step {number} by hand with these commands:\n{commands}\n"
+                   f"Their question: {choice}\nAnswer as a patient teacher. Explain the command "
+                   "or concept they ask about, and how to tell whether it worked."))
+    say(ai.ask(f"The learner has typed step {number} by hand ({step['goal']}). In 2-4 short "
+               "sentences, tell them what they should now see and which command from the "
+               f"list proves it:\n{commands}", step["outro"]))
+    return True
+
+
+def do_step(number: int, ai: CoPresenter, interactive: bool = True, manual: bool = False) -> bool:
     """Present one step. Returns False if the presenter chose to quit."""
     step = STEPS[number - 1]
     banner(number, step)
     say(ai.ask(f"We are about to start step {number}: {step['goal']} Introduce it to the "
                "audience: what we will do and why it matters.", step["intro"]))
 
+    action = "show the commands to type" if manual else "run this step"
     while interactive:
-        choice = prompt("[Enter] run this step   [s] skip   [q] quit   or type a question for the AI")
+        choice = prompt(f"[Enter] {action}   [s] skip   [q] quit   or type a question for the AI")
         if choice == "":
             break
         if choice.lower() == "s":
@@ -241,6 +283,9 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
         if choice.lower() == "q":
             return False
         say(ai.ask(choice))
+
+    if manual:
+        return do_manual(number, ai, interactive)
 
     while True:
         success, output = run_script(step["script"])
@@ -276,13 +321,16 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
 def cmd_run(args, ai):
     print(f"{BOLD}MicroCloud demo{RESET}  —  AI co-presenter: "
           f"{ai.model if ai.enabled else 'off (built-in narration)'}")
+    if args.manual:
+        print(f"{DIM}Hands-on mode: nothing is run for you. Each step prints the commands to "
+              f"type yourself.{RESET}")
     for number in range(args.start, len(STEPS) + 1):
-        if not do_step(number, ai):
+        if not do_step(number, ai, manual=args.manual):
             print("Demo stopped. Resume any time with: ./demo.py run --from <step>")
             return 0
     say(ai.ask("The demo is complete. Give a short closing summary of all four steps for the "
                "audience and invite questions.",
-               "That's the full story: ten machines became one cloud, we provisioned instances "
+               f"That's the full story: {words(NODES)} machines became one cloud, we provisioned instances "
                "from the shared pool, managed them centrally with Landscape, and measurably "
                "hardened one with USG. Questions?"))
     chat_loop(ai)
@@ -292,7 +340,17 @@ def cmd_run(args, ai):
 def cmd_step(args, ai):
     if not 1 <= args.number <= len(STEPS):
         sys.exit(f"Step must be 1-{len(STEPS)}")
-    return 0 if do_step(args.number, ai, interactive=not args.yes) else 1
+    return 0 if do_step(args.number, ai, interactive=not args.yes, manual=args.manual) else 1
+
+
+def cmd_commands(args, ai):
+    numbers = [args.number] if args.number else range(1, len(STEPS) + 1)
+    for number in numbers:
+        if not 1 <= number <= len(STEPS):
+            sys.exit(f"Step must be 1-{len(STEPS)}")
+        show_commands(number)
+        print()
+    return 0
 
 
 def chat_loop(ai):
@@ -336,6 +394,8 @@ def main():
               ./demo.py check          verify the host, settings and AI
               ./demo.py step 1 --yes   before the audience arrives (slow part)
               ./demo.py run            present all four steps
+              ./demo.py run --manual   hands-on: print each step's commands to type yourself
+              ./demo.py commands 2     just print step 2's commands (no AI, runs nothing)
               ./demo.py cleanup        afterwards: delete everything
         """),
     )
@@ -343,9 +403,15 @@ def main():
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="present all steps interactively (default)")
     run.add_argument("--from", dest="start", type=int, default=1, help="start at this step")
+    run.add_argument("--manual", action="store_true",
+                     help="hands-on: print each step's commands for you to type, run nothing")
     step = sub.add_parser("step", help="run a single step (1-4)")
     step.add_argument("number", type=int)
     step.add_argument("--yes", action="store_true", help="no pauses (for preparing beforehand)")
+    step.add_argument("--manual", action="store_true",
+                      help="hands-on: print the commands for you to type, run nothing")
+    commands = sub.add_parser("commands", help="print the commands of one step (or all), run nothing")
+    commands.add_argument("number", type=int, nargs="?")
     ask = sub.add_parser("ask", help="ask the AI a question (no question = chat mode)")
     ask.add_argument("question", nargs="*")
     sub.add_parser("check", help="pre-flight checks for host, settings and AI")
@@ -357,8 +423,9 @@ def main():
     ai = CoPresenter(enabled=not args.no_ai)
     command = args.command or "run"
     if command == "run" and not args.command:
-        args.start = 1
-    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check}
+        args.start, args.manual = 1, False
+    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check,
+                "commands": cmd_commands}
     if command in handlers:
         return handlers[command](args, ai)
     script = {"setup": "setup_host.sh", "status": "status.sh", "cleanup": "cleanup.sh"}[command]

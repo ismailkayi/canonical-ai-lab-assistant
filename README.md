@@ -6,19 +6,19 @@ answers questions from the audience.
 
 | Step | What you show | What the audience learns |
 |---|---|---|
-| **1** | 10 VMs join together into **one MicroCloud** | Separate machines become one cloud |
-| **2** | Their CPU, RAM and storage shown as **one pool**, then **5 instances** provisioned from it | Resource pooling and on-demand provisioning |
-| **3** | The 5 instances registered in **Landscape** as `MC-Instance_1` … `MC-Instance_5` | Central management from day one |
+| **1** | 3 VMs join together into **one MicroCloud** | Separate machines become one cloud |
+| **2** | Their CPU, RAM and storage shown as **one pool**, then **3 instances** provisioned from it | Resource pooling and on-demand provisioning |
+| **3** | The 3 instances registered in **Landscape** as `MC-Instance_1` … `MC-Instance_3` | Central management from day one |
 | **4** | **USG** audits one instance against CIS, fixes **one rule**, and the score goes up | Compliance you can measure |
 
 ```text
  Your Ubuntu machine
  ┌───────────────────────────────────────────────────────────────┐
- │  mc-node-1   mc-node-2   ...   mc-node-10     ← Step 1: 10 VMs │
+ │  mc-node-1   mc-node-2   mc-node-3            ← Step 1: 3 VMs  │
  │  └──────────────── one MicroCloud ────────────────┘           │
  │        shared compute (LXD) · storage (Ceph) · network (OVN)  │
  │                                                               │
- │    mc-instance-1 ... mc-instance-5   ← Step 2: placed by the   │
+ │    mc-instance-1 ... mc-instance-3   ← Step 2: placed by the   │
  │        │                               cloud, not by you      │
  │        ├── registered in Landscape   ← Step 3                 │
  │        └── #1 hardened with USG      ← Step 4                 │
@@ -34,10 +34,16 @@ nested virtualization):
 
 | | Minimum | Why |
 |---|---|---|
-| RAM | **48 GiB** (64 GiB is more comfortable) | 10 VMs × 4 GiB, plus the host |
-| CPU | 16 threads | 10 VMs × 2 vCPU (can be shared) |
-| Free disk | 250 GiB | VM disks and Ceph disks |
-| Virtualization | `/dev/kvm` exists | The 10 VMs are real VMs |
+| RAM | **about 10 GiB free** (on top of whatever else you are running) | 3 VMs × 3 GiB; the instances are light system containers |
+| CPU | 8 threads | 3 VMs × 2 vCPU (can be shared) |
+| Free disk | 60 GiB | VM disks and Ceph disks |
+
+The defaults are the smallest working MicroCloud: **3 cluster members and 3
+container instances**, so the demo runs on a laptop that is busy with other
+apps. The narration follows `NODE_COUNT` and `INSTANCE_COUNT` in `demo.conf`; with
+more free RAM, use the bigger shapes listed in `demo.conf.example` (up to 10
+members and 5 VM instances). The minimum is 3 members.
+| Virtualization | `/dev/kvm` exists | The cluster members are real VMs |
 | Internet | Yes | Downloads Ubuntu images and packages |
 
 **Three accounts** (all have free options):
@@ -134,25 +140,59 @@ At every pause you can:
 
 After step 4 the AI gives a closing summary, then waits for audience questions.
 
+### Hands-on mode: type the commands yourself
+
+For anyone who wants to learn rather than watch a script run. Nothing is
+executed for you. Each step prints the exact commands to type, with your
+`demo.conf` values filled in and a comment on what each one does. Secrets
+(Pro token, Landscape key) show as `<placeholders>`.
+
+```bash
+./demo.py run --manual
+```
+
+The AI still introduces each step. Then you see the commands, type them in a
+second terminal, and press **Enter** when done. At the pause you can also ask
+the AI about any command (`what does lxc shell do?`) or press `c` to see the
+commands again.
+
+To print the commands without the AI or any pauses (to read, or to save to a
+file):
+
+```bash
+./demo.py commands 2
+```
+
+```bash
+./demo.py commands > all-steps.txt
+```
+
+Each step script does the same with `--print`, e.g.
+`bash scripts/step4_usg_harden.sh --print`. The hand-typed commands are the
+plain version of what the scripts do. The scripts add only checks, waiting and
+running things in parallel. Step 1 by hand uses the interactive
+`microcloud init` / `microcloud join` instead of a preseed file, so you see
+every question MicroCloud asks.
+
 ### What to point at in each step
 
-**Step 1 — One cloud from ten machines.**
-In `lxc cluster list`, all 10 members show `ONLINE`. *"These could be ten
+**Step 1 — One cloud from three machines.**
+In `lxc cluster list`, all 3 members show `ONLINE`. *"These could be three
 physical servers; MicroCloud turned them into one cloud with a single
 definition file."*
 
 **Step 2 — Resource pooling and provisioning.**
-The **POOLED TOTAL** row shows all CPU and RAM as one pool. Then 5 instances
+The **POOLED TOTAL** row shows all CPU and RAM as one pool. Then 3 instances
 launch without saying where they should run. In the final `lxc list`, the
 **LOCATION** column shows the cloud spread them across different members.
 *"We ask the pool for capacity; the cloud decides where it runs. Disks sit on
 replicated Ceph, so losing one server does not lose data."*
 
 **Step 3 — Landscape.**
-The terminal shows 5 ✔ lines. **Switch to the browser:** Landscape →
+The terminal shows 3 ✔ lines. **Switch to the browser:** Landscape →
 Instances, filter by tag `microcloud-demo`. If the machines show as
 **Pending**, select them all and click **Accept**. You now see
-`MC-Instance_1` … `MC-Instance_5`.
+`MC-Instance_1` … `MC-Instance_3`.
 
 **Step 4 — USG and CIS.**
 USG audits `MC-Instance_1` against **CIS Level 1 Server**, fixes **one** rule
@@ -167,7 +207,7 @@ full HTML reports are saved in `reports/` (`before-report.html`,
 ./demo.py cleanup
 ```
 
-This deletes the 10 VMs (and the instances inside them), their disks, and the
+This deletes the cluster VMs (and the instances inside them), their disks, and the
 `mcbr0` network. It asks you to type `delete` first. Remove the
 `MC-Instance_*` computers in Landscape yourself.
 
@@ -185,6 +225,7 @@ press `r`. Detailed logs are in `logs/`.
 | Problem | Fix |
 |---|---|
 | `./demo.py check` reports not enough memory | In `demo.conf`, lower `NODE_MEMORY` to `3GiB`, or `NODE_COUNT` (minimum 3) |
+| Laptop becomes sluggish or VMs get killed during step 1 | Set `NODE_MEMORY=2GiB` (tight but usually works with containers), run `./demo.py cleanup`, then step 1 again |
 | Step 2 says *"using system containers instead"* | The host does not allow nested virtualization. The demo still works; the instances are containers instead of VMs. |
 | Step 3: instances never appear in Landscape | Check they are not waiting under **Pending**. For self-hosted Landscape, check `LANDSCAPE_FQDN` and, with a self-signed certificate, set `LANDSCAPE_SSL_CERT`. See `logs/mc-instance-*-landscape.log`. |
 | Step 4: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
@@ -212,10 +253,11 @@ press `r`. Detailed logs are in `logs/`.
 
 ```text
 demo.py                 Runs the demo and talks to the AI (Python standard library only)
+                        commands / run --manual print the commands instead of running them
 demo.conf.example       All settings with explanations. Copy it to demo.conf.
 scripts/
-  step1_build_microcloud.sh      10 VMs → one MicroCloud
-  step2_provision_instances.sh   Pool summary + 5 instances
+  step1_build_microcloud.sh      N VMs → one MicroCloud
+  step2_provision_instances.sh   Pool summary + instances
   step3_register_landscape.sh    Landscape registration as MC-Instance_<n>
   step4_usg_harden.sh            USG audit → fix one rule → re-audit
   setup_host.sh / check_host.sh / status.sh / cleanup.sh
