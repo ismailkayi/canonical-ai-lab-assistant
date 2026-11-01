@@ -1,51 +1,6 @@
 #!/usr/bin/env bash
 # STEP 4 — Audit one instance against CIS with USG, fix ONE rule, audit again.
 source "$(dirname "$0")/common.sh"
-# --print: show the commands to type by hand instead of running them.
-guide() {
-    local i="${INSTANCE_PREFIX}-${USG_INSTANCE}" rule="${USG_RULE:-sshd_disable_root_login}"
-    local latest="\$(ls -t /var/lib/usg/*results*.xml | head -n1)"
-    print_guide <<EOF
-# ============================================================================
-# STEP 4 by hand: audit ${i} against CIS, fix ONE rule, audit again
-# ============================================================================
-
-# Open a shell on the first cluster member; the instance is reached from there.
-lxc shell ${LEADER}
-
-# 1/4  USG is part of Ubuntu Pro: attach the instance, then install USG.
-lxc exec ${i} -- pro attach <your-pro-token>
-lxc exec ${i} -- pro enable usg --assume-yes
-lxc exec ${i} -- apt-get install -y usg
-
-# 2/4  Baseline audit (takes a few minutes). Results land in /var/lib/usg/.
-lxc exec ${i} -- usg audit ${USG_PROFILE}
-
-# The score (look for the number after "score"):
-lxc exec ${i} -- sh -c 'grep -o "<[a-z:]*score[^>]*>[0-9.]*" ${latest}'
-# Our rule should say fail:
-lxc exec ${i} -- sh -c 'grep -A4 "rule_${rule}\"" ${latest} | grep -o "result>[a-z]*"'
-
-# 3/4  Fix exactly ONE rule. A tailoring file says which rules USG works on:
-#      generate one for the whole profile, switch every rule off, then switch ours back on.
-lxc exec ${i} -- usg generate-tailoring ${USG_PROFILE} /root/tailoring.xml
-lxc exec ${i} -- sed -i 's/selected="true"/selected="false"/g' /root/tailoring.xml
-lxc exec ${i} -- sed -i '/rule_${rule}"/s/selected="false"/selected="true"/' /root/tailoring.xml
-lxc exec ${i} -- usg fix --tailoring-file /root/tailoring.xml
-
-# 4/4  Audit again and compare: the score is higher and the rule now says pass.
-lxc exec ${i} -- usg audit ${USG_PROFILE}
-lxc exec ${i} -- sh -c 'grep -o "<[a-z:]*score[^>]*>[0-9.]*" ${latest}'
-lxc exec ${i} -- sh -c 'grep -A4 "rule_${rule}\"" ${latest} | grep -o "result>[a-z]*"'
-
-exit
-
-# The full HTML reports are in /var/lib/usg/ inside ${i}. To view one on the host:
-#   lxc exec ${LEADER} -- lxc file pull ${i}/var/lib/usg/<report>.html /root/
-#   lxc file pull ${LEADER}/root/<report>.html .
-EOF
-}
-[[ "${1:-}" != "--print" ]] || { guide; exit 0; }
 require_cluster
 
 inst=$(instance_name "${USG_INSTANCE}")

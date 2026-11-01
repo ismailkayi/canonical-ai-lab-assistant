@@ -233,49 +233,15 @@ def banner(number: int, step: dict) -> None:
     print(f"{GREEN}{line}{RESET}")
 
 
-def show_commands(number: int) -> str:
-    """Print the hands-on commands for a step; return them as plain text for the AI."""
-    script = str(SCRIPTS / STEPS[number - 1]["script"])
-    subprocess.call(["bash", script, "--print"])  # straight to the terminal, in colour
-    return subprocess.run(["bash", script, "--print"], capture_output=True, text=True).stdout
-
-
-def do_manual(number: int, ai: CoPresenter, interactive: bool) -> bool:
-    """Hands-on mode: print the commands, the learner types them, the AI only explains."""
-    step = STEPS[number - 1]
-    commands = show_commands(number)
-    if not interactive:
-        return True
-    while True:
-        choice = prompt("Type the commands above in another terminal.\n"
-                        "[Enter] done, next step   [c] show the commands again   [q] quit   "
-                        "or ask the AI about any command")
-        if choice == "":
-            break
-        if choice.lower() == "c":
-            show_commands(number)
-            continue
-        if choice.lower() == "q":
-            return False
-        say(ai.ask(f"A learner is typing step {number} by hand with these commands:\n{commands}\n"
-                   f"Their question: {choice}\nAnswer as a patient teacher. Explain the command "
-                   "or concept they ask about, and how to tell whether it worked."))
-    say(ai.ask(f"The learner has typed step {number} by hand ({step['goal']}). In 2-4 short "
-               "sentences, tell them what they should now see and which command from the "
-               f"list proves it:\n{commands}", step["outro"]))
-    return True
-
-
-def do_step(number: int, ai: CoPresenter, interactive: bool = True, manual: bool = False) -> bool:
+def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
     """Present one step. Returns False if the presenter chose to quit."""
     step = STEPS[number - 1]
     banner(number, step)
     say(ai.ask(f"We are about to start step {number}: {step['goal']} Introduce it to the "
                "audience: what we will do and why it matters.", step["intro"]))
 
-    action = "show the commands to type" if manual else "run this step"
     while interactive:
-        choice = prompt(f"[Enter] {action}   [s] skip   [q] quit   or type a question for the AI")
+        choice = prompt("[Enter] run this step   [s] skip   [q] quit   or type a question for the AI")
         if choice == "":
             break
         if choice.lower() == "s":
@@ -283,9 +249,6 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True, manual: bool
         if choice.lower() == "q":
             return False
         say(ai.ask(choice))
-
-    if manual:
-        return do_manual(number, ai, interactive)
 
     while True:
         success, output = run_script(step["script"])
@@ -321,11 +284,8 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True, manual: bool
 def cmd_run(args, ai):
     print(f"{BOLD}MicroCloud demo{RESET}  —  AI co-presenter: "
           f"{ai.model if ai.enabled else 'off (built-in narration)'}")
-    if args.manual:
-        print(f"{DIM}Hands-on mode: nothing is run for you. Each step prints the commands to "
-              f"type yourself.{RESET}")
     for number in range(args.start, len(STEPS) + 1):
-        if not do_step(number, ai, manual=args.manual):
+        if not do_step(number, ai):
             print("Demo stopped. Resume any time with: ./demo.py run --from <step>")
             return 0
     say(ai.ask("The demo is complete. Give a short closing summary of all four steps for the "
@@ -340,17 +300,7 @@ def cmd_run(args, ai):
 def cmd_step(args, ai):
     if not 1 <= args.number <= len(STEPS):
         sys.exit(f"Step must be 1-{len(STEPS)}")
-    return 0 if do_step(args.number, ai, interactive=not args.yes, manual=args.manual) else 1
-
-
-def cmd_commands(args, ai):
-    numbers = [args.number] if args.number else range(1, len(STEPS) + 1)
-    for number in numbers:
-        if not 1 <= number <= len(STEPS):
-            sys.exit(f"Step must be 1-{len(STEPS)}")
-        show_commands(number)
-        print()
-    return 0
+    return 0 if do_step(args.number, ai, interactive=not args.yes) else 1
 
 
 def chat_loop(ai):
@@ -394,8 +344,6 @@ def main():
               ./demo.py check          verify the host, settings and AI
               ./demo.py step 1 --yes   before the audience arrives (slow part)
               ./demo.py run            present all four steps
-              ./demo.py run --manual   hands-on: print each step's commands to type yourself
-              ./demo.py commands 2     just print step 2's commands (no AI, runs nothing)
               ./demo.py cleanup        afterwards: delete everything
         """),
     )
@@ -403,15 +351,9 @@ def main():
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="present all steps interactively (default)")
     run.add_argument("--from", dest="start", type=int, default=1, help="start at this step")
-    run.add_argument("--manual", action="store_true",
-                     help="hands-on: print each step's commands for you to type, run nothing")
     step = sub.add_parser("step", help="run a single step (1-4)")
     step.add_argument("number", type=int)
     step.add_argument("--yes", action="store_true", help="no pauses (for preparing beforehand)")
-    step.add_argument("--manual", action="store_true",
-                      help="hands-on: print the commands for you to type, run nothing")
-    commands = sub.add_parser("commands", help="print the commands of one step (or all), run nothing")
-    commands.add_argument("number", type=int, nargs="?")
     ask = sub.add_parser("ask", help="ask the AI a question (no question = chat mode)")
     ask.add_argument("question", nargs="*")
     sub.add_parser("check", help="pre-flight checks for host, settings and AI")
@@ -423,9 +365,8 @@ def main():
     ai = CoPresenter(enabled=not args.no_ai)
     command = args.command or "run"
     if command == "run" and not args.command:
-        args.start, args.manual = 1, False
-    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check,
-                "commands": cmd_commands}
+        args.start = 1
+    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check}
     if command in handlers:
         return handlers[command](args, ai)
     script = {"setup": "setup_host.sh", "status": "status.sh", "cleanup": "cleanup.sh"}[command]
