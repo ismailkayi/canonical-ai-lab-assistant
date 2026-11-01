@@ -202,6 +202,10 @@ def run_script(name: str, *args: str) -> tuple:
     tail = collections.deque(maxlen=150)
     proc = subprocess.Popen(
         ["bash", str(SCRIPTS / name), *args],
+        # Steps never need keyboard input. Without this, commands such as
+        # "lxc launch" run through "lxc exec" see a pipe instead of a terminal
+        # and wait forever for optional YAML on stdin.
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
