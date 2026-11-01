@@ -29,8 +29,10 @@ else fail "Memory: ${mem_total_gib} GiB, need ~${mem_needed_gib} GiB for ${NODE_
 # Total RAM can be enough while desktop apps are using most of it right now.
 mem_avail_gib=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) / 1024 / 1024 ))
 lab_running=$(lxc list "${NODE_PREFIX}-" -c s -f csv 2>/dev/null | grep -c RUNNING || true)
-if (( lab_running == 0 && mem_avail_gib < mem_needed_gib - 4 )); then
-    warn "Memory available right now: ${mem_avail_gib} GiB. Close browsers/IDEs before step 1 (the VMs can use up to $(( mem_needed_gib - 4 )) GiB)."
+vm_mem_gib=$(( mem_needed_gib - 4 ))
+if (( lab_running == 0 )); then
+    if (( mem_avail_gib >= vm_mem_gib + 2 )); then ok "Memory available right now: ${mem_avail_gib} GiB (VMs use up to ${vm_mem_gib} GiB)"
+    else warn "Memory available right now: ${mem_avail_gib} GiB, the VMs can use up to ${vm_mem_gib} GiB. Close some apps, or lower NODE_COUNT / NODE_MEMORY."; fi
 fi
 
 (( NODE_COUNT >= 3 )) || fail "NODE_COUNT=${NODE_COUNT}: MicroCloud needs at least 3 members."

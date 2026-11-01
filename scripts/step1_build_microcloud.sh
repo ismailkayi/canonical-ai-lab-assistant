@@ -145,6 +145,11 @@ if ! mc lxc network show default >/dev/null 2>&1; then
     mc lxc network create default --type=ovn network=UPLINK ipv6.address=none
 fi
 
+# Ceph OSDs aim to cache up to 4 GiB each by default; on small members that
+# would starve everything else. 1 GiB is plenty for a demo-sized cluster.
+mc microceph.ceph config set osd osd_memory_target 1073741824 >/dev/null 2>&1 \
+    || warn "Could not lower the Ceph OSD memory target (continuing)"
+
 echo
 ok "MicroCloud is up: ${NODE_COUNT} machines, one cloud."
 show lxc exec "${LEADER}" -- lxc cluster list

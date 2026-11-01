@@ -6,7 +6,7 @@ answers questions from the audience.
 
 | Step | What you show | What the audience learns |
 |---|---|---|
-| **1** | 5 VMs join together into **one MicroCloud** | Separate machines become one cloud |
+| **1** | 3 VMs join together into **one MicroCloud** | Separate machines become one cloud |
 | **2** | Their CPU, RAM and storage shown as **one pool**, then **3 instances** provisioned from it | Resource pooling and on-demand provisioning |
 | **3** | The 3 instances registered in **Landscape** as `MC-Instance_1` … `MC-Instance_3` | Central management from day one |
 | **4** | **USG** audits one instance against CIS, fixes **one rule**, and the score goes up | Compliance you can measure |
@@ -14,7 +14,7 @@ answers questions from the audience.
 ```text
  Your Ubuntu machine
  ┌───────────────────────────────────────────────────────────────┐
- │  mc-node-1   mc-node-2   ...   mc-node-5      ← Step 1: 5 VMs  │
+ │  mc-node-1   mc-node-2   mc-node-3            ← Step 1: 3 VMs  │
  │  └──────────────── one MicroCloud ────────────────┘           │
  │        shared compute (LXD) · storage (Ceph) · network (OVN)  │
  │                                                               │
@@ -34,14 +34,15 @@ nested virtualization):
 
 | | Minimum | Why |
 |---|---|---|
-| RAM | **32 GiB**, with about 24 GiB free when you build | 5 VMs × 4 GiB, plus the host |
-| CPU | 12–16 threads | 5 VMs × 2 vCPU (can be shared) |
-| Free disk | 120 GiB | VM disks and Ceph disks |
+| RAM | **about 10 GiB free** (on top of whatever else you are running) | 3 VMs × 3 GiB; the instances are light system containers |
+| CPU | 8 threads | 3 VMs × 2 vCPU (can be shared) |
+| Free disk | 60 GiB | VM disks and Ceph disks |
 
-The defaults are sized for a 32 GiB laptop: **5 cluster members and 3 instances**.
-The narration follows `NODE_COUNT` and `INSTANCE_COUNT` in `demo.conf`, so you can
-scale up (64 GiB: `NODE_COUNT=10`, `INSTANCE_COUNT=5`) or down (24 GiB:
-`NODE_COUNT=4`) without changing anything else. The minimum is 3 members.
+The defaults are the smallest working MicroCloud: **3 cluster members and 3
+container instances**, so the demo runs on a laptop that is busy with other
+apps. The narration follows `NODE_COUNT` and `INSTANCE_COUNT` in `demo.conf`; with
+more free RAM, use the bigger shapes listed in `demo.conf.example` (up to 10
+members and 5 VM instances). The minimum is 3 members.
 | Virtualization | `/dev/kvm` exists | The cluster members are real VMs |
 | Internet | Yes | Downloads Ubuntu images and packages |
 
@@ -141,8 +142,8 @@ After step 4 the AI gives a closing summary, then waits for audience questions.
 
 ### What to point at in each step
 
-**Step 1 — One cloud from five machines.**
-In `lxc cluster list`, all 5 members show `ONLINE`. *"These could be five
+**Step 1 — One cloud from three machines.**
+In `lxc cluster list`, all 3 members show `ONLINE`. *"These could be three
 physical servers; MicroCloud turned them into one cloud with a single
 definition file."*
 
@@ -190,7 +191,7 @@ press `r`. Detailed logs are in `logs/`.
 | Problem | Fix |
 |---|---|
 | `./demo.py check` reports not enough memory | In `demo.conf`, lower `NODE_MEMORY` to `3GiB`, or `NODE_COUNT` (minimum 3) |
-| Laptop becomes sluggish or VMs get killed during step 1 | Close browsers/IDEs, or set `NODE_COUNT=4` and run `./demo.py cleanup` then step 1 again |
+| Laptop becomes sluggish or VMs get killed during step 1 | Set `NODE_MEMORY=2GiB` (tight but usually works with containers), run `./demo.py cleanup`, then step 1 again |
 | Step 2 says *"using system containers instead"* | The host does not allow nested virtualization. The demo still works; the instances are containers instead of VMs. |
 | Step 3: instances never appear in Landscape | Check they are not waiting under **Pending**. For self-hosted Landscape, check `LANDSCAPE_FQDN` and, with a self-signed certificate, set `LANDSCAPE_SSL_CERT`. See `logs/mc-instance-*-landscape.log`. |
 | Step 4: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
