@@ -36,8 +36,10 @@ for i in $(seq 1 "${INSTANCE_COUNT}"); do
         continue
     fi
     # No --target: the cluster scheduler picks the member with the most room.
+    # </dev/null: "lxc launch" reads optional YAML from stdin when it is not a
+    # terminal, and would otherwise wait forever.
     show lxc exec "${LEADER}" -- lxc launch "${UBUNTU_IMAGE}" "${inst}" ${type_flag} \
-        -c limits.cpu="${INSTANCE_CPU}" -c limits.memory="${INSTANCE_MEMORY}"
+        -c limits.cpu="${INSTANCE_CPU}" -c limits.memory="${INSTANCE_MEMORY}" </dev/null
 done
 
 info "Waiting for the instances to boot and get network ..."

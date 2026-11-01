@@ -22,7 +22,7 @@ if lxc network show "${UPLINK_BRIDGE}" >/dev/null 2>&1; then
 else
     # No DHCP: MicroCloud's OVN router takes addresses from this range itself.
     show lxc network create "${UPLINK_BRIDGE}" \
-        ipv4.address="${UPLINK_SUBNET}.1/24" ipv4.nat=true ipv4.dhcp=false ipv6.address=none
+        ipv4.address="${UPLINK_SUBNET}.1/24" ipv4.nat=true ipv4.dhcp=false ipv6.address=none </dev/null
 fi
 
 # --- 2. The cluster-member VMs --------------------------------------------
@@ -34,10 +34,10 @@ for i in $(seq 1 "${NODE_COUNT}"); do
         continue
     fi
     lxc storage volume show "${POOL}" "${node}-ceph" >/dev/null 2>&1 \
-        || lxc storage volume create "${POOL}" "${node}-ceph" --type=block size="${NODE_CEPH_DISK}" >/dev/null
+        || lxc storage volume create "${POOL}" "${node}-ceph" --type=block size="${NODE_CEPH_DISK}" </dev/null >/dev/null
     lxc init "${UBUNTU_IMAGE}" "${node}" --vm \
         -c limits.cpu="${NODE_CPU}" -c limits.memory="${NODE_MEMORY}" \
-        -d root,size="${NODE_ROOT_DISK}" >/dev/null
+        -d root,size="${NODE_ROOT_DISK}" </dev/null >/dev/null
     lxc config device add "${node}" uplink nic network="${UPLINK_BRIDGE}" >/dev/null
     lxc config device add "${node}" ceph disk pool="${POOL}" source="${node}-ceph" >/dev/null
     lxc start "${node}"
@@ -142,7 +142,7 @@ done
 # Safety net: make sure the instance network exists.
 if ! mc lxc network show default >/dev/null 2>&1; then
     warn "Creating the OVN network that MicroCloud did not create"
-    mc lxc network create default --type=ovn network=UPLINK ipv6.address=none
+    mc lxc network create default --type=ovn network=UPLINK ipv6.address=none </dev/null
 fi
 
 # Ceph OSDs aim to cache up to 4 GiB each by default; on small members that
