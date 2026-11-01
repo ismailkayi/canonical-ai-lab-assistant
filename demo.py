@@ -53,6 +53,14 @@ def load_settings() -> dict:
 
 
 S = load_settings()
+NODES = S.get("NODE_COUNT", "5")
+INSTANCES = S.get("INSTANCE_COUNT", "3")
+
+
+def words(n: str) -> str:
+    """'5' -> 'five' for spoken narration; other values are returned unchanged."""
+    names = "zero one two three four five six seven eight nine ten eleven twelve".split()
+    return names[int(n)] if n.isdigit() and int(n) < len(names) else n
 
 
 # --------------------------------------------------------------------------
@@ -60,26 +68,26 @@ S = load_settings()
 # --------------------------------------------------------------------------
 STEPS = [
     {
-        "title": f"Build a {S.get('NODE_COUNT', '10')}-node MicroCloud",
+        "title": f"Build a {NODES}-node MicroCloud",
         "script": "step1_build_microcloud.sh",
-        "goal": "Create 10 VMs on one host and join them into a single MicroCloud cluster "
+        "goal": f"Create {NODES} VMs on one host and join them into a single MicroCloud cluster "
         "(LXD for compute, MicroCeph for distributed storage, MicroOVN for networking).",
-        "intro": "We start with ten separate machines. Here they are VMs on one host, but "
-        "they could just as well be ten physical servers. MicroCloud installs LXD, Ceph and "
+        "intro": f"We start with {words(NODES)} separate machines. Here they are VMs on one host, but "
+        f"they could just as well be {words(NODES)} physical servers. MicroCloud installs LXD, Ceph and "
         "OVN on each of them and joins them into one cluster with a single command, so "
-        "compute, storage and networking are shared across all ten.",
-        "outro": "Ten machines are now one cloud. Every member shows as ONLINE in the "
+        f"compute, storage and networking are shared across all {words(NODES)}.",
+        "outro": f"{words(NODES).capitalize()} machines are now one cloud. Every member shows as ONLINE in the "
         "cluster list, and storage and networking are spread across all of them.",
     },
     {
-        "title": f"Pool the resources and provision {S.get('INSTANCE_COUNT', '5')} instances",
+        "title": f"Pool the resources and provision {INSTANCES} instances",
         "script": "step2_provision_instances.sh",
-        "goal": "Show the 10 members' CPU and RAM as one pooled total, then launch 5 VM "
+        "goal": f"Show the {NODES} members' CPU and RAM as one pooled total, then launch {INSTANCES} "
         "instances on demand without choosing where they run; the scheduler places them.",
         "intro": "This is the cloud idea: resource pooling and on-demand provisioning. "
         "We stop thinking about individual servers. We see one pool of CPU, memory and "
-        "storage, ask it for five instances, and MicroCloud decides where each one runs.",
-        "outro": "Five instances came out of the shared pool. Look at the LOCATION column: "
+        f"storage, ask it for {words(INSTANCES)} instances, and MicroCloud decides where each one runs.",
+        "outro": f"{words(INSTANCES).capitalize()} instances came out of the shared pool. Look at the LOCATION column: "
         "MicroCloud spread them across different members by itself, and their disks live on "
         "replicated Ceph storage, so no single server is a single point of failure.",
     },
@@ -87,13 +95,13 @@ STEPS = [
         "title": "Register the instances in Landscape",
         "script": "step3_register_landscape.sh",
         "goal": "Install landscape-client in each instance and register it with Landscape as "
-        "MC-Instance_1 ... MC-Instance_5, tagged microcloud-demo.",
+        f"MC-Instance_1 ... MC-Instance_{INSTANCES}, tagged microcloud-demo.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. Each instance now registers itself as MC-Instance "
         "with its number.",
-        "outro": "All five instances have registered. In the Landscape web UI, filter by the "
-        "tag microcloud-demo to see MC-Instance_1 to MC-Instance_5, ready for patching and "
+        "outro": f"All {words(INSTANCES)} instances have registered. In the Landscape web UI, filter by the "
+        f"tag microcloud-demo to see MC-Instance_1 to MC-Instance_{INSTANCES}, ready for patching and "
         "reporting.",
     },
     {
@@ -125,9 +133,9 @@ class CoPresenter:
         self.system = (
             "You are the AI co-presenter in a live Canonical technical demo shown to an "
             "audience. The demo: (1) create "
-            f"{S.get('NODE_COUNT', '10')} VMs and join them into one MicroCloud cluster "
+            f"{NODES} VMs and join them into one MicroCloud cluster "
             "(LXD, MicroCeph, MicroOVN); (2) show the members' resources as one pool and "
-            f"provision {S.get('INSTANCE_COUNT', '5')} instances that the scheduler spreads "
+            f"provision {INSTANCES} instances that the scheduler spreads "
             "across members (resource pooling and on-demand provisioning); (3) register the "
             "instances with Landscape as MC-Instance_1..N; (4) audit one instance with the "
             "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
@@ -282,7 +290,7 @@ def cmd_run(args, ai):
             return 0
     say(ai.ask("The demo is complete. Give a short closing summary of all four steps for the "
                "audience and invite questions.",
-               "That's the full story: ten machines became one cloud, we provisioned instances "
+               f"That's the full story: {words(NODES)} machines became one cloud, we provisioned instances "
                "from the shared pool, managed them centrally with Landscape, and measurably "
                "hardened one with USG. Questions?"))
     chat_loop(ai)

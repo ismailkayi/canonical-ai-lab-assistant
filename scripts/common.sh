@@ -15,8 +15,8 @@ if [[ -f "${REPO_ROOT}/demo.conf" ]]; then
     source "${REPO_ROOT}/demo.conf"
 fi
 
-NODE_PREFIX="mc-node"            # host VMs: mc-node-1 .. mc-node-10
-INSTANCE_PREFIX="mc-instance"    # workloads: mc-instance-1 .. mc-instance-5
+NODE_PREFIX="mc-node"            # host VMs: mc-node-1 .. mc-node-<NODE_COUNT>
+INSTANCE_PREFIX="mc-instance"    # workloads: mc-instance-1 .. mc-instance-<INSTANCE_COUNT>
 UPLINK_BRIDGE="mcbr0"            # host bridge that gives MicroCloud's OVN network internet access
 LEADER="${NODE_PREFIX}-1"
 

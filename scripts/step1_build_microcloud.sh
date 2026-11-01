@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# STEP 1 — Create 10 VMs on this host and join them into one MicroCloud.
+# STEP 1 — Create NODE_COUNT VMs on this host and join them into one MicroCloud.
 # Safe to re-run: existing VMs are kept, and an existing cluster is just shown.
 source "$(dirname "$0")/common.sh"
 require_lxd
@@ -25,7 +25,7 @@ else
         ipv4.address="${UPLINK_SUBNET}.1/24" ipv4.nat=true ipv4.dhcp=false ipv6.address=none
 fi
 
-# --- 2. The 10 cluster-member VMs ----------------------------------------
+# --- 2. The cluster-member VMs --------------------------------------------
 title "2/4  Creating ${NODE_COUNT} VMs (${NODE_CPU} vCPU, ${NODE_MEMORY} RAM, ${NODE_CEPH_DISK} Ceph disk each)"
 for i in $(seq 1 "${NODE_COUNT}"); do
     node=$(node_name "$i")

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# STEP 2 — Show the 10 machines as ONE pool of resources, then provision
-# 5 instances from that pool. MicroCloud decides where each one runs.
+# STEP 2 — Show the cluster members as ONE pool of resources, then provision
+# INSTANCE_COUNT instances from that pool. MicroCloud decides where each one runs.
 source "$(dirname "$0")/common.sh"
 require_cluster
 

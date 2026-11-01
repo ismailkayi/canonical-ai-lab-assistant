@@ -34,15 +34,21 @@ LANDSCAPE_SSL_CERT=
 PRO_TOKEN=
 
 # ---------------------------------------------------------------------------
-# Demo shape — the defaults match the demo story. Change only if needed.
+# Demo shape — sized for a 32 GiB / 16-thread laptop (5 nodes ≈ 20 GiB RAM).
+# The narration follows these numbers automatically.
+#   32 GiB host:  NODE_COUNT=5   INSTANCE_COUNT=3   (default)
+#   24 GiB host:  NODE_COUNT=4   INSTANCE_COUNT=3   or NODE_COUNT=5 NODE_MEMORY=3GiB
+#   64 GiB host:  NODE_COUNT=10  INSTANCE_COUNT=5   (the full "ten machines" story)
+# NODE_COUNT must be at least 3 (Ceph and the cluster need three members).
+# Need ≈ NODE_COUNT × NODE_MEMORY + 4 GiB of RAM free when you run step 1.
 # ---------------------------------------------------------------------------
-NODE_COUNT=10            # MicroCloud cluster members (VMs on this host)
+NODE_COUNT=5             # MicroCloud cluster members (VMs on this host)
 NODE_CPU=2
 NODE_MEMORY=4GiB
 NODE_ROOT_DISK=20GiB
 NODE_CEPH_DISK=20GiB
 
-INSTANCE_COUNT=5         # Workload instances provisioned on MicroCloud
+INSTANCE_COUNT=3         # Workload instances provisioned on MicroCloud
 INSTANCE_TYPE=vm         # vm, or "container" if nested virtualization is unavailable
 INSTANCE_CPU=1
 INSTANCE_MEMORY=1GiB
