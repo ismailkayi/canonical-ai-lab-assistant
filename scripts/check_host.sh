@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pre-flight checks. Read-only: changes nothing.
 source "$(dirname "$0")/common.sh"
+TRACE_COMMANDS=no   # keep the pre-flight report short
 
 problems=0
 fail() { echo -e "${RED}✘${NC}  $*"; problems=$((problems + 1)); }
@@ -16,7 +17,7 @@ if [[ "${INSTANCE_TYPE}" == "vm" ]]; then
     else warn "Nested virtualization not detected — step 2 will fall back to containers. (Set INSTANCE_TYPE=container to silence this.)"; fi
 fi
 
-if command -v lxc >/dev/null && lxc info >/dev/null 2>&1; then
+if type -P lxc >/dev/null && lxc info >/dev/null 2>&1; then
     ok "LXD installed and usable by ${USER}"
 else
     fail "LXD missing or not usable — run ./demo.py setup (then log out and back in)"

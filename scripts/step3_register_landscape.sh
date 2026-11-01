@@ -36,7 +36,6 @@ register() {
 }
 
 title "Registering ${INSTANCE_COUNT} instances with Landscape (account: ${account})"
-echo -e "${BOLD}\$ landscape-config --silent --computer-title \"MC-Instance_<n>\" --account-name ${account} --tags microcloud-demo ...${NC}"
 
 pids=()
 for i in $(seq 1 "${INSTANCE_COUNT}"); do

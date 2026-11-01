@@ -8,7 +8,7 @@ cluster_ready() { lxc info "${LEADER}" >/dev/null 2>&1 && mc lxc cluster list >/
 
 if cluster_ready; then
     ok "MicroCloud is already built — showing it."
-    show lxc list "${NODE_PREFIX}-" -c ns4tL
+    show lxc list "${NODE_PREFIX}-" -c ns4t
     show lxc exec "${LEADER}" -- lxc cluster list
     exit 0
 fi
@@ -50,7 +50,7 @@ for i in $(seq 1 "${NODE_COUNT}"); do
     wait_for 600 "${node} to boot" lxc exec "${node}" -- true
     wait_for 600 "${node} to finish first boot" lxc exec "${node}" -- snap wait system seed.loaded
 done
-show lxc list "${NODE_PREFIX}-" -c ns4tL
+show lxc list "${NODE_PREFIX}-" -c ns4t
 
 # --- 3. Install MicroCloud software on every VM (in parallel) -------------
 title "3/4  Installing MicroCloud (LXD + MicroCeph + MicroOVN + MicroCloud) on every VM"

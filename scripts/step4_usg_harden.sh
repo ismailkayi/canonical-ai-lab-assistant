@@ -23,12 +23,10 @@ if grep -Eq '"attached": *true' <<<"${pro_status}"; then
     ok "Already attached to Ubuntu Pro"
 else
     [[ -n "${PRO_TOKEN}" ]] || die "Set PRO_TOKEN in demo.conf"
-    echo -e "${BOLD}${inst}\$ pro attach <your-token>${NC}"
-    in_instance "${inst}" pro attach "${PRO_TOKEN}" </dev/null
+    show_in "${inst}" pro attach "${PRO_TOKEN}" </dev/null
 fi
 show_in "${inst}" pro enable usg --assume-yes </dev/null || true
-echo -e "${BOLD}${inst}\$ apt install usg${NC}"
-in_instance "${inst}" sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -yq usg' </dev/null
+show_in "${inst}" sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -yq usg' </dev/null
 
 # --- 2. Baseline ------------------------------------------------------------
 title "2/4  Baseline audit: ${USG_PROFILE}  (takes a few minutes)"

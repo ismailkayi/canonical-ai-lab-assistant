@@ -140,6 +140,22 @@ At every pause you can:
 
 After step 4 the AI gives a closing summary, then waits for audience questions.
 
+### Every command is shown
+
+Each step prints every command it runs before running it, so nothing happens
+out of sight and newcomers can follow along and learn. The prefix says where
+the command runs:
+
+```text
+[host]$ lxc init ubuntu:24.04 mc-node-1 --vm -c limits.cpu=2 -c limits.memory=3GiB
+[mc-node-1]$ snap install microceph --channel=squid/stable
+[mc-node-1 → mc-instance-1]$ usg audit cis_level1_server
+```
+
+The key commands of each step are **bold**, and background ones (checks,
+installs, waits) are dimmed. Secrets such as the Pro token show as `<hidden>`.
+To show only the bold ones, set `TRACE_COMMANDS=no` in `demo.conf`.
+
 ### What to point at in each step
 
 **Step 1 — One cloud from three machines.**

@@ -4,7 +4,7 @@ source "$(dirname "$0")/common.sh"
 require_lxd
 
 title "Cluster-member VMs on this host"
-lxc list "${NODE_PREFIX}-" -c ns4tL
+lxc list "${NODE_PREFIX}-" -c ns4t
 
 if lxc info "${LEADER}" >/dev/null 2>&1 && mc lxc cluster list >/dev/null 2>&1; then
     title "MicroCloud cluster"
