@@ -50,6 +50,18 @@ disk_free_gib=$(df -BG --output=avail "$( [[ -d /var/snap ]] && echo /var/snap |
 if (( disk_free_gib >= disk_needed_gib )); then ok "Disk: ${disk_free_gib} GiB free (need ~${disk_needed_gib} GiB)"
 else warn "Disk: ${disk_free_gib} GiB free, ~${disk_needed_gib} GiB recommended."; fi
 
+title "Internet"
+# Step 1 downloads ~1 GiB of snaps from the Snap Store; steps 2-4 need the
+# Ubuntu image server and package archives.
+for url in https://api.snapcraft.io https://cloud-images.ubuntu.com https://archive.ubuntu.com; do
+    host="${url#https://}"
+    if python3 -c 'import sys, urllib.request, urllib.error
+try: urllib.request.urlopen(sys.argv[1], timeout=15)
+except urllib.error.HTTPError: pass   # any HTTP answer means the host is reachable' "${url}" 2>/dev/null
+    then ok "${host} reachable"
+    else fail "${host} not reachable within 15s — check your internet connection, VPN or proxy"; fi
+done
+
 title "Settings (demo.conf)"
 [[ -f "${REPO_ROOT}/demo.conf" ]] || fail "demo.conf not found — run: cp demo.conf.example demo.conf"
 if [[ -n "${LANDSCAPE_ACCOUNT_NAME}" || -n "${LANDSCAPE_FQDN}" ]]; then ok "Landscape configured"

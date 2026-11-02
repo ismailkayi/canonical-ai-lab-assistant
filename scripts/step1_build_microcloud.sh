@@ -59,34 +59,32 @@ title "3/4  Installing MicroCloud (LXD + MicroCeph + MicroOVN + MicroCloud) on e
 # Each snap is downloaded ONCE, on this host, and copied into the VMs.
 # Three fresh VMs all fetching ~1 GiB from the Snap Store at the same time,
 # while snapd also updates itself, is what made this step time out
-# ("Client.Timeout exceeded", "cannot get nonce from store"). The host's own
-# connection is fast and reliable, and the cache is reused on re-runs.
+# ("Client.Timeout exceeded", "cannot get nonce from store"). One patient,
+# resumable download on the host copes far better, and the cache in
+# cache/snaps is reused on re-runs, so an interrupted run continues.
 SNAP_CACHE="${REPO_ROOT}/cache/snaps"
 SNAPS="snapd:latest/stable core22:latest/stable core24:latest/stable
 lxd:${LXD_CHANNEL} microceph:${MICROCEPH_CHANNEL} microovn:${MICROOVN_CHANNEL} microcloud:${MICROCLOUD_CHANNEL}"
 
 download_snaps() {
+    # snap_fetch.py waits longer than "snap download", retries every request
+    # and resumes a broken download, so it copes with a flaky connection.
+    # shellcheck disable=SC2086
+    python3 "${REPO_ROOT}/scripts/snap_fetch.py" "${SNAP_CACHE}" ${SNAPS} && return 0
+    echo "Trying again with 'snap download' ..."
     mkdir -p "${SNAP_CACHE}"
     local entry name channel
     for entry in ${SNAPS}; do
         name="${entry%%:*}"; channel="${entry#*:}"
         if [[ -s "${SNAP_CACHE}/${name}.snap" && -s "${SNAP_CACHE}/${name}.assert" \
               && "$(cat "${SNAP_CACHE}/${name}.channel" 2>/dev/null)" == "${channel}" ]]; then
-            echo "${name} (${channel}): already downloaded"
             continue
         fi
-        local attempt
-        for attempt in 1 2 3 4 5; do
-            if snap download "${name}" --channel="${channel}" \
-                   --target-directory="${SNAP_CACHE}" --basename="${name}.new"; then
-                mv -f "${SNAP_CACHE}/${name}.new.snap" "${SNAP_CACHE}/${name}.snap"
-                mv -f "${SNAP_CACHE}/${name}.new.assert" "${SNAP_CACHE}/${name}.assert"
-                echo "${channel}" >"${SNAP_CACHE}/${name}.channel"
-                break
-            fi
-            (( attempt < 5 )) || return 1
-            echo "Download of ${name} failed, retrying in 10s ..."; sleep 10
-        done
+        snap download "${name}" --channel="${channel}" \
+            --target-directory="${SNAP_CACHE}" --basename="${name}.new" || return 1
+        mv -f "${SNAP_CACHE}/${name}.new.snap" "${SNAP_CACHE}/${name}.snap"
+        mv -f "${SNAP_CACHE}/${name}.new.assert" "${SNAP_CACHE}/${name}.assert"
+        echo "${channel}" >"${SNAP_CACHE}/${name}.channel"
     done
 }
 
@@ -155,7 +153,9 @@ if run_logged host "${LOG_DIR}/snap-download.log" download_snaps; then
     USE_SNAP_CACHE=yes
 else
     USE_SNAP_CACHE=no
-    warn "Could not download the snaps on this host; each VM will fetch them from the Snap Store instead."
+    warn "Could not download the snaps on this host: this machine cannot reach the Snap Store"
+    warn "(api.snapcraft.io) reliably. Each VM will try the store itself, which will likely fail too."
+    warn "Check your internet connection or VPN (see README, 'If something goes wrong'), then run step 1 again."
 fi
 
 info "Installing on all ${NODE_COUNT} VMs in parallel; this takes several minutes. Progress:"

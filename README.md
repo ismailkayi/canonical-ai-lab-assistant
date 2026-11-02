@@ -265,7 +265,7 @@ press `r`. Detailed logs are in `logs/`.
 | Step 4: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
 | Step 4: *"None of the preferred rules are failing"* | You already fixed them in a rehearsal. Use another instance (`USG_INSTANCE=3`) or set `USG_RULE` to a rule that fails in `reports/before-report.html`. |
 | AI unavailable / HTTP 401 / unknown model | Check `OPENROUTER_API_KEY`. Pick a model name from <https://openrouter.ai/models> for `OPENROUTER_MODEL`. The demo keeps going with built-in narration. |
-| Step 1: `Client.Timeout exceeded` / `cannot get nonce from store` | The VMs could not reach the Snap Store. Step 1 now downloads the snaps on the host and copies them in, so this should not happen; if the host download itself fails, check the host's internet/VPN, then run step 1 again. |
+| Step 1: `Client.Timeout exceeded`, `connection reset by peer`, `cannot get nonce from store` | This machine's connection to the Snap Store (`api.snapcraft.io`) is unreliable. Step 1 downloads on the host with long timeouts, retries and resume, so a flaky link usually just slows it down; leave it running. If it still fails: disconnect or reconnect the VPN, try another network (e.g. a phone hotspot), and test with `curl -v https://api.snapcraft.io`. If `snap download hello` also fails on this machine, it is the network, not the demo. Already-downloaded snaps in `cache/snaps/` are kept, so each retry continues where it stopped. |
 | The MicroCloud UI asks for a certificate or says *not authorized* | Import `ui-access/microcloud-demo-ui.pfx` (password `microcloud`) into the browser, then restart the browser. `./demo.py ui` re-adds the certificate to the cluster if needed. |
 | Something is stuck | Press `Ctrl+C`, then run the step again. Every step can be re-run. |
 
@@ -297,6 +297,7 @@ scripts/
   step4_usg_harden.sh            USG audit → fix one rule → re-audit
   ui_links.sh                    Links to the MicroCloud/LXD, Landscape and USG UIs (+ UI login cert)
   setup_host.sh / check_host.sh / status.sh / cleanup.sh
+  snap_fetch.py                  Resumable Snap Store downloader used by step 1
   pool_summary.py, usg_tools.py  Small helpers used by steps 2 and 4
 cache/snaps/            Snaps downloaded by step 1 (reused on re-runs; not in git)
 ui-access/              Browser login certificate for the MicroCloud UI (not in git)
