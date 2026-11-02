@@ -440,7 +440,7 @@ scripts/
                            verifies the SHA3-384 hash, writes .snap + .assert like `snap download`)
   pool_summary.py          Turns LXD's resources/instances JSON into the pool table
   usg_tools.py             Reads OpenSCAP XML: score, a rule's result, rules fixed, pick/select failing rules, build a
-                           one-rule tailoring file
+                           tailoring file (one rule, or every safe failing rule)
 Generated at runtime (git-ignored):
   demo.conf                Your keys and overrides
   logs/                    Per-node install/join logs, preseed YAML, Landscape logs
