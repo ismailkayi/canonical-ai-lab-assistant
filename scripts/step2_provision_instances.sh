@@ -19,7 +19,7 @@ mc sh -c '
 show lxc exec "${LEADER}" -- lxc storage info remote
 
 # --- 2. Provision from the pool ------------------------------------------
-title "2/3  Provisioning ${INSTANCE_COUNT} instances (${INSTANCE_CPU} vCPU, ${INSTANCE_MEMORY} RAM each)"
+title "2/3  Provisioning $(count "${INSTANCE_COUNT}" instance) (${INSTANCE_CPU} vCPU, ${INSTANCE_MEMORY} RAM each)"
 
 type_flag="--vm"
 if [[ "${INSTANCE_TYPE}" != "vm" ]]; then
@@ -42,7 +42,7 @@ for i in $(seq 1 "${INSTANCE_COUNT}"); do
         -c limits.cpu="${INSTANCE_CPU}" -c limits.memory="${INSTANCE_MEMORY}" </dev/null
 done
 
-info "Waiting for the instances to boot and get network ..."
+info "Waiting for $(count "${INSTANCE_COUNT}" instance) to boot and get network ..."
 for i in $(seq 1 "${INSTANCE_COUNT}"); do
     inst=$(instance_name "$i")
     wait_for 600 "${inst} to boot" in_instance "${inst}" true
@@ -53,5 +53,5 @@ done
 title "3/3  Where did they land?"
 show lxc exec "${LEADER}" -- lxc list -c ns4tL
 echo
-ok "${INSTANCE_COUNT} instances provisioned on demand, placed automatically across the pool,"
+ok "$(count "${INSTANCE_COUNT}" instance) provisioned on demand, placed automatically by the cluster,"
 ok "with disks on shared Ceph storage and networking on OVN."

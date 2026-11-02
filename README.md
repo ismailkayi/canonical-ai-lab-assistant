@@ -7,8 +7,8 @@ answers questions from the audience.
 | Step | What you show | What the audience learns |
 |---|---|---|
 | **1** | 3 VMs join together into **one MicroCloud** | Separate machines become one cloud |
-| **2** | Their CPU, RAM and storage shown as **one pool**, then **3 instances** provisioned from it | Resource pooling and on-demand provisioning |
-| **3** | The 3 instances registered in **Landscape** as `MC-Instance_1` … `MC-Instance_3` | Central management from day one |
+| **2** | Their CPU, RAM and storage shown as **one pool**, then **one instance** provisioned from it | Resource pooling and on-demand provisioning |
+| **3** | The instance registered in **Landscape** as `MC-Instance_1` | Central management from day one |
 | **4** | **USG** audits one instance against CIS, fixes **one rule**, and the score goes up | Compliance you can measure |
 
 ```text
@@ -18,7 +18,7 @@ answers questions from the audience.
  │  └──────────────── one MicroCloud ────────────────┘           │
  │        shared compute (LXD) · storage (Ceph) · network (OVN)  │
  │                                                               │
- │    mc-instance-1 ... mc-instance-3   ← Step 2: placed by the   │
+ │    mc-instance-1                     ← Step 2: placed by the   │
  │        │                               cloud, not by you      │
  │        ├── registered in Landscape   ← Step 3                 │
  │        └── #1 hardened with USG      ← Step 4                 │
@@ -34,15 +34,15 @@ nested virtualization):
 
 | | Minimum | Why |
 |---|---|---|
-| RAM | **about 10 GiB free** (on top of whatever else you are running) | 3 VMs × 3 GiB; the instances are light system containers |
+| RAM | **about 10 GiB free** (on top of whatever else you are running) | 3 VMs × 3 GiB; the instance is a light system container |
 | CPU | 8 threads | 3 VMs × 2 vCPU (can be shared) |
 | Free disk | 60 GiB | VM disks and Ceph disks |
 
-The defaults are the smallest working MicroCloud: **3 cluster members and 3
-container instances**, so the demo runs on a laptop that is busy with other
+The defaults are the smallest working MicroCloud: **3 cluster members pooled
+into one cloud, and one container instance** from that pool, so the demo runs on a laptop that is busy with other
 apps. The narration follows `NODE_COUNT` and `INSTANCE_COUNT` in `demo.conf`; with
 more free RAM, use the bigger shapes listed in `demo.conf.example` (up to 10
-members and 5 VM instances). The minimum is 3 members.
+members and 5 VM instances). The minimum is 3 members. Each extra instance also needs its own Landscape seat.
 | Virtualization | `/dev/kvm` exists | The cluster members are real VMs |
 | Internet | Yes | Downloads Ubuntu images and packages |
 
@@ -164,17 +164,18 @@ physical servers; MicroCloud turned them into one cloud with a single
 definition file."*
 
 **Step 2 — Resource pooling and provisioning.**
-The **POOLED TOTAL** row shows all CPU and RAM as one pool. Then 3 instances
-launch without saying where they should run. In the final `lxc list`, the
-**LOCATION** column shows the cloud spread them across different members.
+The **POOLED TOTAL** row shows all CPU and RAM as one pool. Then the instance
+launches without saying where it should run. In the final `lxc list`, the
+**LOCATION** column shows the member the cloud picked for it.
 *"We ask the pool for capacity; the cloud decides where it runs. Disks sit on
 replicated Ceph, so losing one server does not lose data."*
 
 **Step 3 — Landscape.**
-The terminal shows 3 ✔ lines. **Switch to the browser:** Landscape →
-Instances, filter by tag `microcloud-demo`. If the machines show as
-**Pending**, select them all and click **Accept**. You now see
-`MC-Instance_1` … `MC-Instance_3`.
+The terminal shows a ✔ line. **Switch to the browser:** Landscape →
+Instances, filter by tag `microcloud-demo`. If the machine shows as
+**Pending**, select it and click **Accept**. You now see `MC-Instance_1`.
+Accepting needs a free seat on your Landscape account (shown as *Remaining
+registrations* on the account page).
 
 **Step 4 — USG and CIS.**
 USG audits `MC-Instance_1` against **CIS Level 1 Server**, fixes **one** rule

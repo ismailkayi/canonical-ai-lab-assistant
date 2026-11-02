@@ -35,7 +35,7 @@ register() {
     in_instance "${inst}" landscape-config "${args[@]}"
 }
 
-title "Registering ${INSTANCE_COUNT} instances with Landscape (account: ${account})"
+title "Registering $(count "${INSTANCE_COUNT}" instance) with Landscape (account: ${account})"
 
 pids=()
 for i in $(seq 1 "${INSTANCE_COUNT}"); do
@@ -55,6 +55,6 @@ done
 
 echo
 (( failed == 0 )) || die "${failed} instance(s) failed to register"
-ok "All ${INSTANCE_COUNT} instances sent their registration to Landscape."
+ok "$(count "${INSTANCE_COUNT}" instance) sent the registration to Landscape."
 info "Open ${console} → Instances (filter by tag 'microcloud-demo')."
 info "If they show as Pending, select them and click Accept."

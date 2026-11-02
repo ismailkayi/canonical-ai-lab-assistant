@@ -37,7 +37,7 @@ PRO_TOKEN=
 # Demo shape — sized to fit in about 10 GiB of RAM, for a laptop that is
 # also running a desktop, browser and IDE. The narration follows these numbers.
 #
-#   ~10 GiB free:  NODE_COUNT=3  NODE_MEMORY=3GiB  INSTANCE_TYPE=container  (default)
+#   ~10 GiB free:  NODE_COUNT=3  NODE_MEMORY=3GiB  INSTANCE_TYPE=container  INSTANCE_COUNT=1  (default)
 #   ~24 GiB free:  NODE_COUNT=5  NODE_MEMORY=4GiB  INSTANCE_TYPE=vm  INSTANCE_MEMORY=1GiB
 #   ~48 GiB free:  NODE_COUNT=10 NODE_MEMORY=4GiB  INSTANCE_TYPE=vm  INSTANCE_COUNT=5
 #
@@ -52,7 +52,11 @@ NODE_MEMORY=3GiB
 NODE_ROOT_DISK=15GiB
 NODE_CEPH_DISK=15GiB
 
-INSTANCE_COUNT=3         # Workload instances provisioned on MicroCloud
+# One instance by default: the 3 VMs are pooled into one cloud, and that one
+# instance is registered in Landscape (step 3) and hardened with USG (step 4).
+# Each extra instance needs its own Landscape seat. Raise it to show the cloud
+# spreading several instances across members.
+INSTANCE_COUNT=1         # Workload instances provisioned on MicroCloud
 INSTANCE_TYPE=container  # container (light) or vm (needs ~1 GiB each + nested virtualization)
 INSTANCE_CPU=1
 INSTANCE_MEMORY=512MiB

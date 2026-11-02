@@ -53,14 +53,25 @@ def load_settings() -> dict:
 
 
 S = load_settings()
-NODES = S.get("NODE_COUNT", "5")
-INSTANCES = S.get("INSTANCE_COUNT", "3")
+NODES = S.get("NODE_COUNT", "3")
+INSTANCES = S.get("INSTANCE_COUNT", "1")
+ONE = INSTANCES == "1"
 
 
 def words(n: str) -> str:
     """'5' -> 'five' for spoken narration; other values are returned unchanged."""
     names = "zero one two three four five six seven eight nine ten eleven twelve".split()
     return names[int(n)] if n.isdigit() and int(n) < len(names) else n
+
+
+def count(n: str, noun: str) -> str:
+    """('1', 'instance') -> '1 instance'; ('3', 'instance') -> '3 instances'."""
+    return f"{n} {noun}" if n == "1" else f"{n} {noun}s"
+
+
+# Wording for the instances, which can be a single one or several.
+INST = "an instance" if ONE else f"{words(INSTANCES)} instances"
+TITLES = "MC-Instance_1" if ONE else f"MC-Instance_1 ... MC-Instance_{INSTANCES}"
 
 
 # --------------------------------------------------------------------------
@@ -80,29 +91,41 @@ STEPS = [
         "cluster list, and storage and networking are spread across all of them.",
     },
     {
-        "title": f"Pool the resources and provision {INSTANCES} instances",
+        "title": f"Pool the resources and provision {count(INSTANCES, 'instance')}",
         "script": "step2_provision_instances.sh",
-        "goal": f"Show the {NODES} members' CPU and RAM as one pooled total, then launch {INSTANCES} "
-        "instances on demand without choosing where they run; the scheduler places them.",
+        "goal": f"Show the {NODES} members' CPU and RAM as one pooled total, then launch "
+        f"{count(INSTANCES, 'instance')} on demand without choosing where "
+        f"{'it runs; the scheduler places it' if ONE else 'they run; the scheduler places them'}.",
         "intro": "This is the cloud idea: resource pooling and on-demand provisioning. "
         "We stop thinking about individual servers. We see one pool of CPU, memory and "
-        f"storage, ask it for {words(INSTANCES)} instances, and MicroCloud decides where each one runs.",
-        "outro": f"{words(INSTANCES).capitalize()} instances came out of the shared pool. Look at the LOCATION column: "
-        "MicroCloud spread them across different members by itself, and their disks live on "
-        "replicated Ceph storage, so no single server is a single point of failure.",
+        f"storage, ask it for {INST}, and MicroCloud decides where "
+        f"{'it runs' if ONE else 'each one runs'}.",
+        "outro": (
+            "Our instance came out of the shared pool. We never said where it should run: the "
+            "LOCATION column shows the member MicroCloud chose, and its disk lives on Ceph "
+            "storage replicated across all members, so no single server is a single point of "
+            "failure."
+            if ONE else
+            f"{words(INSTANCES).capitalize()} instances came out of the shared pool. Look at the "
+            "LOCATION column: MicroCloud spread them across different members by itself, and "
+            "their disks live on replicated Ceph storage, so no single server is a single point "
+            "of failure."
+        ),
     },
     {
-        "title": "Register the instances in Landscape",
+        "title": f"Register the {'instance' if ONE else 'instances'} in Landscape",
         "script": "step3_register_landscape.sh",
-        "goal": "Install landscape-client in each instance and register it with Landscape as "
-        f"MC-Instance_1 ... MC-Instance_{INSTANCES}, tagged microcloud-demo.",
+        "goal": f"Install landscape-client in {'the' if ONE else 'each'} instance and register it "
+        f"with Landscape as {TITLES}, tagged microcloud-demo.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
-        "whole fleet from one place. Each instance now registers itself as MC-Instance "
-        "with its number.",
-        "outro": f"All {words(INSTANCES)} instances have registered. In the Landscape web UI, filter by the "
-        f"tag microcloud-demo to see MC-Instance_1 to MC-Instance_{INSTANCES}, ready for patching and "
-        "reporting.",
+        "whole fleet from one place. "
+        + ("Our new instance now registers itself as MC-Instance_1." if ONE else
+           "Each instance now registers itself as MC-Instance with its number."),
+        "outro": ("The instance has registered." if ONE else
+                  f"All {words(INSTANCES)} instances have registered.")
+        + f" In the Landscape web UI, filter by the tag microcloud-demo to see {TITLES}, "
+        "ready for patching and reporting.",
     },
     {
         "title": "Harden an instance with USG (CIS)",
@@ -135,9 +158,9 @@ class CoPresenter:
             "audience. The demo: (1) create "
             f"{NODES} VMs and join them into one MicroCloud cluster "
             "(LXD, MicroCeph, MicroOVN); (2) show the members' resources as one pool and "
-            f"provision {INSTANCES} instances that the scheduler spreads "
-            "across members (resource pooling and on-demand provisioning); (3) register the "
-            "instances with Landscape as MC-Instance_1..N; (4) audit one instance with the "
+            f"provision {count(INSTANCES, 'instance')} that the cluster scheduler places on "
+            "members by itself (resource pooling and on-demand provisioning); (3) register "
+            f"{'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
             "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
             "show the higher score.\n"
             "Style: speak to the audience, plainly and confidently, in 2-5 short sentences. "
@@ -294,7 +317,8 @@ def cmd_run(args, ai):
             return 0
     say(ai.ask("The demo is complete. Give a short closing summary of all four steps for the "
                "audience and invite questions.",
-               f"That's the full story: {words(NODES)} machines became one cloud, we provisioned instances "
+               f"That's the full story: {words(NODES)} machines became one cloud, we provisioned "
+               f"{'an instance' if ONE else 'instances'} "
                "from the shared pool, managed them centrally with Landscape, and measurably "
                "hardened one with USG. Questions?"))
     chat_loop(ai)

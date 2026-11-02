@@ -10,7 +10,7 @@ title "This will permanently delete:"
 printf '  VM:      %s\n' "${nodes[@]:-(none)}"
 echo   "  Disks:   ${NODE_PREFIX}-*-ceph in pool '${POOL}'"
 echo   "  Network: ${UPLINK_BRIDGE}"
-echo   "  ...and the ${INSTANCE_COUNT} instances inside MicroCloud along with them."
+echo   "  ...and the instances inside MicroCloud along with them."
 read -r -p "Type 'delete' to continue: " answer
 [[ "${answer}" == "delete" ]] || die "Cancelled — nothing was deleted."
 
