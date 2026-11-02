@@ -74,6 +74,8 @@ show() {
 
 # --- MicroCloud helpers ----------------------------------------------------
 node_name()     { echo "${NODE_PREFIX}-$1"; }
+# "1 instance" / "3 instances"
+count() { if [[ "$1" == 1 ]]; then echo "$1 $2"; else echo "$1 $2s"; fi; }
 instance_name() { echo "${INSTANCE_PREFIX}-$1"; }
 
 # Run a command inside MicroCloud (on the first cluster member).
