@@ -4,6 +4,10 @@ A scripted, step-by-step live demo that runs on one Ubuntu machine. An AI model
 reached through [OpenRouter](https://openrouter.ai) narrates each step and
 answers questions from the audience.
 
+> New to MicroCloud, LXD, Landscape or Ubuntu Pro? Read
+> [BACKGROUND.md](BACKGROUND.md) first: it explains the products and how
+> every part of this repo works.
+
 | Step | What you show | What the audience learns |
 |---|---|---|
 | **1** | 3 VMs join together into **one MicroCloud** | Separate machines become one cloud |
