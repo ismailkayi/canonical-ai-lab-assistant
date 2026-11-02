@@ -98,6 +98,15 @@ require_cluster() {
     mc lxc cluster list >/dev/null 2>&1 || die "MicroCloud is not running on ${LEADER}. Run step 1 first."
 }
 
+# Run a (usually background) job, saving its output to a log file AND showing
+# it live, each line prefixed with a label, so long jobs never look frozen:
+#   run_logged mc-node-1 logs/mc-node-1-install.log install_snaps mc-node-1 &
+# The exit status is the job's own (pipefail), so "wait" still sees failures.
+run_logged() {
+    local label="$1" log="$2"; shift 2
+    ( set -o pipefail; "$@" 2>&1 | tee "${log}" | sed -u "s/^/    ${label} │ /" )
+}
+
 # Wait until a command succeeds, or fail after a timeout (seconds).
 wait_for() {
     local timeout="$1" what="$2"; shift 2
