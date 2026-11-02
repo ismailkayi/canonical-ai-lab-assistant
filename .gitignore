@@ -4,6 +4,8 @@ demo.conf
 # Generated during the demo
 logs/
 reports/
+cache/
+ui-access/
 
 __pycache__/
 *.py[cod]

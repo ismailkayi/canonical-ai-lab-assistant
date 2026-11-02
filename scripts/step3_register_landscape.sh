@@ -6,11 +6,9 @@ require_cluster
 if [[ -n "${LANDSCAPE_FQDN}" ]]; then
     account="standalone"
     server_args=(--url "https://${LANDSCAPE_FQDN}/message-system" --ping-url "http://${LANDSCAPE_FQDN}/ping")
-    console="https://${LANDSCAPE_FQDN}"
 elif [[ -n "${LANDSCAPE_ACCOUNT_NAME}" ]]; then
     account="${LANDSCAPE_ACCOUNT_NAME}"
     server_args=()
-    console="https://landscape.canonical.com"
 else
     die "Set LANDSCAPE_ACCOUNT_NAME (SaaS) or LANDSCAPE_FQDN (self-hosted) in demo.conf"
 fi
@@ -56,5 +54,4 @@ done
 echo
 (( failed == 0 )) || die "${failed} instance(s) failed to register"
 ok "$(count "${INSTANCE_COUNT}" instance) sent the registration to Landscape."
-info "Open ${console} → Instances (filter by tag 'microcloud-demo')."
-info "If they show as Pending, select them and click Accept."
+bash "${REPO_ROOT}/scripts/ui_links.sh" landscape

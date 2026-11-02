@@ -8,14 +8,22 @@ require_cluster
 title "1/3  ${NODE_COUNT} machines, one resource pool"
 show lxc exec "${LEADER}" -- lxc cluster list
 
-mc sh -c '
-    # Member names from the API ("/1.0/cluster/members/<name>"), one per line.
-    for m in $(lxc query /1.0/cluster/members | sed -n "s|.*/1.0/cluster/members/\([^\"]*\)\".*|\1|p"); do
-        printf "%s " "$m"
-        lxc query "/1.0/resources?target=$m" | tr -d "\n"
+# Each member's hardware, plus every instance with where it runs and its
+# limits, so the table shows how much of the pool is already handed out.
+pool_report() {
+    mc sh -c '
+        # Member names from the API ("/1.0/cluster/members/<name>"), one per line.
+        for m in $(lxc query /1.0/cluster/members | sed -n "s|.*/1.0/cluster/members/\([^\"]*\)\".*|\1|p"); do
+            printf "%s " "$m"
+            lxc query "/1.0/resources?target=$m" | tr -d "\n"
+            echo
+        done
+        printf "@instances "
+        lxc query "/1.0/instances?recursion=1" | tr -d "\n"
         echo
-    done
-' | python3 "${REPO_ROOT}/scripts/pool_summary.py"
+    ' | python3 "${REPO_ROOT}/scripts/pool_summary.py"
+}
+pool_report
 show lxc exec "${LEADER}" -- lxc storage info remote
 
 # --- 2. Provision from the pool ------------------------------------------
@@ -50,8 +58,10 @@ for i in $(seq 1 "${INSTANCE_COUNT}"); do
 done
 
 # --- 3. Result -------------------------------------------------------------
-title "3/3  Where did they land?"
+title "3/3  Where did they land, and what did they take from the pool?"
 show lxc exec "${LEADER}" -- lxc list -c ns4tL
+pool_report
 echo
 ok "$(count "${INSTANCE_COUNT}" instance) provisioned on demand, placed automatically by the cluster,"
 ok "with disks on shared Ceph storage and networking on OVN."
+bash "${REPO_ROOT}/scripts/ui_links.sh" microcloud

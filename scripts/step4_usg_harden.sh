@@ -63,3 +63,5 @@ printf '\n  Rule %s:  %s  →  %s\n\n' "${short_rule}" \
     "$(python3 "${tools}" result "${REPORT_DIR}/before-results.xml" "${rule}")" \
     "$(python3 "${tools}" result "${REPORT_DIR}/after-results.xml" "${rule}")"
 ok "HTML reports saved: reports/before-report.html and reports/after-report.html"
+bash "${REPO_ROOT}/scripts/ui_links.sh" usg
+bash "${REPO_ROOT}/scripts/ui_links.sh" landscape

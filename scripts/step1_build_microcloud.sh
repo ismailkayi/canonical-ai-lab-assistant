@@ -10,6 +10,7 @@ if cluster_ready; then
     ok "MicroCloud is already built — showing it."
     show lxc list "${NODE_PREFIX}-" -c ns4t
     show lxc exec "${LEADER}" -- lxc cluster list
+    bash "${REPO_ROOT}/scripts/ui_links.sh" microcloud
     exit 0
 fi
 
@@ -54,12 +55,52 @@ show lxc list "${NODE_PREFIX}-" -c ns4t
 
 # --- 3. Install MicroCloud software on every VM (in parallel) -------------
 title "3/4  Installing MicroCloud (LXD + MicroCeph + MicroOVN + MicroCloud) on every VM"
+
+# Each snap is downloaded ONCE, on this host, and copied into the VMs.
+# Three fresh VMs all fetching ~1 GiB from the Snap Store at the same time,
+# while snapd also updates itself, is what made this step time out
+# ("Client.Timeout exceeded", "cannot get nonce from store"). The host's own
+# connection is fast and reliable, and the cache is reused on re-runs.
+SNAP_CACHE="${REPO_ROOT}/cache/snaps"
+SNAPS="snapd:latest/stable core22:latest/stable core24:latest/stable
+lxd:${LXD_CHANNEL} microceph:${MICROCEPH_CHANNEL} microovn:${MICROOVN_CHANNEL} microcloud:${MICROCLOUD_CHANNEL}"
+
+download_snaps() {
+    mkdir -p "${SNAP_CACHE}"
+    local entry name channel
+    for entry in ${SNAPS}; do
+        name="${entry%%:*}"; channel="${entry#*:}"
+        if [[ -s "${SNAP_CACHE}/${name}.snap" && -s "${SNAP_CACHE}/${name}.assert" \
+              && "$(cat "${SNAP_CACHE}/${name}.channel" 2>/dev/null)" == "${channel}" ]]; then
+            echo "${name} (${channel}): already downloaded"
+            continue
+        fi
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            if snap download "${name}" --channel="${channel}" \
+                   --target-directory="${SNAP_CACHE}" --basename="${name}.new"; then
+                mv -f "${SNAP_CACHE}/${name}.new.snap" "${SNAP_CACHE}/${name}.snap"
+                mv -f "${SNAP_CACHE}/${name}.new.assert" "${SNAP_CACHE}/${name}.assert"
+                echo "${channel}" >"${SNAP_CACHE}/${name}.channel"
+                break
+            fi
+            (( attempt < 5 )) || return 1
+            echo "Download of ${name} failed, retrying in 10s ..."; sleep 10
+        done
+    done
+}
+
 install_snaps() {
     local node="$1"
-    # On a VM's first boot snapd often refreshes itself, and installs fail
-    # until it is done ("Waiting for automatic snapd restart", "change in
-    # progress"). So: wait for that refresh, and retry each command.
-    lxc exec "${node}" -- sh -ec '
+    if [[ "${USE_SNAP_CACHE}" == yes ]]; then
+        echo "Copying the downloaded snaps into ${node} ..."
+        lxc exec "${node}" -- mkdir -p /root/snaps
+        lxc file push "${SNAP_CACHE}"/*.snap "${SNAP_CACHE}"/*.assert "${node}/root/snaps/" >/dev/null
+    fi
+    # Snaps are installed from those files when present, and from the store
+    # otherwise. Every command is retried, because on a VM's first boot snapd
+    # often restarts itself ("Waiting for automatic snapd restart").
+    lxc exec "${node}" -- env SNAPS="${SNAPS}" sh -ec '
         retry() {
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
                 echo "→ $*"
@@ -72,17 +113,51 @@ install_snaps() {
         snap wait system seed.loaded
         echo "Waiting for any snapd self-update to finish ..."
         snap watch --last=auto-refresh 2>/dev/null || true
-        if snap list lxd >/dev/null 2>&1; then
-            retry snap refresh lxd --channel=5.21/stable
-        else
-            retry snap install lxd --channel=5.21/stable
-        fi
-        retry snap install microceph --channel=squid/stable
-        retry snap install microovn --channel=24.03/stable
-        retry snap install microcloud --channel=2/stable
-        retry snap refresh --hold lxd microceph microovn microcloud   # no surprise updates mid-demo
+        # No automatic refreshes from now on: they compete for the network
+        # during the install, and must not change anything mid-demo.
+        snap refresh --hold >/dev/null 2>&1 || true
+        for entry in ${SNAPS}; do
+            name="${entry%%:*}"; channel="${entry#*:}"
+            case "${name}" in
+                snapd|core22|core24) required=no ;;
+                *) required=yes ;;
+            esac
+            if [ -s "/root/snaps/${name}.snap" ]; then
+                have=$(snap list "${name}" 2>/dev/null | awk "NR == 2 {print \$3}")
+                want=$(sed -n "s/^snap-revision: *//p" "/root/snaps/${name}.assert" | head -n1)
+                # Skip what is already there: any base, a snapd at least as new,
+                # or the very same revision.
+                if [ -n "${have}" ]; then
+                    case "${name}" in core22|core24) continue ;; esac
+                    [ "${have}" = "${want}" ] && continue
+                    [ "${name}" = snapd ] && [ "${have}" -ge "${want:-0}" ] 2>/dev/null && continue
+                fi
+                retry snap ack "/root/snaps/${name}.assert"
+                retry snap install "/root/snaps/${name}.snap"
+                # Track the intended channel, as a store install would.
+                snap switch --channel="${channel}" "${name}" >/dev/null 2>&1 || true
+            elif [ "${required}" = yes ]; then
+                if snap list "${name}" >/dev/null 2>&1; then
+                    retry snap refresh "${name}" --channel="${channel}"
+                else
+                    retry snap install "${name}" --channel="${channel}"
+                fi
+            fi
+        done
+        rm -rf /root/snaps
+        retry snap refresh --hold lxd microceph microovn microcloud >/dev/null   # no surprise updates mid-demo
+        snap list lxd microceph microovn microcloud
     '
 }
+
+info "Downloading the snaps once on this host (cached in cache/snaps for re-runs) ..."
+if run_logged host "${LOG_DIR}/snap-download.log" download_snaps; then
+    USE_SNAP_CACHE=yes
+else
+    USE_SNAP_CACHE=no
+    warn "Could not download the snaps on this host; each VM will fetch them from the Snap Store instead."
+fi
+
 info "Installing on all ${NODE_COUNT} VMs in parallel; this takes several minutes. Progress:"
 pids=()
 for i in $(seq 1 "${NODE_COUNT}"); do
@@ -173,3 +248,4 @@ mc microceph.ceph config set osd osd_memory_target 1073741824 >/dev/null 2>&1 \
 echo
 ok "MicroCloud is up: ${NODE_COUNT} machines, one cloud."
 show lxc exec "${LEADER}" -- lxc cluster list
+bash "${REPO_ROOT}/scripts/ui_links.sh" microcloud
