@@ -177,6 +177,9 @@ class CoPresenter:
         messages.append({"role": "user", "content": prompt})
         try:
             answer = self._complete(messages)
+        except KeyboardInterrupt:  # Ctrl+C while the AI is answering: skip the answer
+            print(f"{DIM}(AI answer skipped){RESET}")
+            return fallback or ""
         except Exception as exc:  # network down, bad key, unknown model...
             print(f"{DIM}(AI unavailable: {exc}. Using built-in narration.){RESET}")
             return fallback or "(The AI could not be reached.)"

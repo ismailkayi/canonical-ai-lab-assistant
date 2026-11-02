@@ -56,12 +56,29 @@ show lxc list "${NODE_PREFIX}-" -c ns4t
 title "3/4  Installing MicroCloud (LXD + MicroCeph + MicroOVN + MicroCloud) on every VM"
 install_snaps() {
     local node="$1"
+    # On a VM's first boot snapd often refreshes itself, and installs fail
+    # until it is done ("Waiting for automatic snapd restart", "change in
+    # progress"). So: wait for that refresh, and retry each command.
     lxc exec "${node}" -- sh -ec '
-        snap install lxd --channel=5.21/stable 2>/dev/null || snap refresh lxd --channel=5.21/stable
-        snap install microceph --channel=squid/stable
-        snap install microovn --channel=24.03/stable
-        snap install microcloud --channel=2/stable
-        snap refresh --hold lxd microceph microovn microcloud   # no surprise updates mid-demo
+        retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                "$@" && return 0
+                echo "Attempt ${attempt} failed: $* (snapd may still be busy). Retrying in 15s ..."
+                sleep 15
+            done
+            echo "Giving up: $*"; return 1
+        }
+        snap wait system seed.loaded
+        snap watch --last=auto-refresh 2>/dev/null || true   # wait for a self-refresh in progress
+        if snap list lxd >/dev/null 2>&1; then
+            retry snap refresh lxd --channel=5.21/stable
+        else
+            retry snap install lxd --channel=5.21/stable
+        fi
+        retry snap install microceph --channel=squid/stable
+        retry snap install microovn --channel=24.03/stable
+        retry snap install microcloud --channel=2/stable
+        retry snap refresh --hold lxd microceph microovn microcloud   # no surprise updates mid-demo
     '
 }
 pids=()

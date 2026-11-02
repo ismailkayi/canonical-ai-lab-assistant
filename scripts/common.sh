@@ -102,8 +102,9 @@ require_cluster() {
 wait_for() {
     local timeout="$1" what="$2"; shift 2
     local start=$SECONDS
-    TRACE_NOTE="repeated until it succeeds" _trace_cmd "$@"
-    local TRACE_QUIET=1   # do not print every retry
+    # The first attempt is printed (as the real lxc command); retries are quiet.
+    TRACE_NOTE="repeated until it succeeds" "$@" >/dev/null 2>&1 && return 0
+    local TRACE_QUIET=1
     until "$@" >/dev/null 2>&1; do
         (( SECONDS - start > timeout )) && die "Timed out waiting for ${what}"
         sleep 3
