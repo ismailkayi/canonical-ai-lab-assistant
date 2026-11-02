@@ -4,7 +4,12 @@
 source "$(dirname "$0")/common.sh"
 require_lxd
 
-cluster_ready() { lxc info "${LEADER}" >/dev/null 2>&1 && mc lxc cluster list >/dev/null 2>&1; }
+# "snap list" first: on Ubuntu 24.04 a bare "lxc" with no LXD snap installs LXD
+# from the store and can hang there, so never call it before step 3 ran.
+cluster_ready() {
+    lxc info "${LEADER}" >/dev/null 2>&1 && mc snap list microcloud >/dev/null 2>&1 \
+        && timeout 60 lxc exec "${LEADER}" -- lxc cluster list >/dev/null 2>&1
+}
 
 if cluster_ready; then
     ok "MicroCloud is already built — showing it."
