@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import webbrowser
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -28,6 +29,8 @@ BOLD, DIM, CYAN, GREEN, RED, RESET = (
     else ("",) * 6
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Web UI links as printed by scripts/ui_links.sh: "  <label>   <url>" lines.
+URL = re.compile(r"^  [^│\n]*?((?:https?|file)://\S+)[ \t]*$", re.M)
 
 
 # --------------------------------------------------------------------------
@@ -95,14 +98,20 @@ STEPS = [
         "script": "step2_provision_instances.sh",
         "goal": f"Show the {NODES} members' CPU and RAM as one pooled total, then launch "
         f"{count(INSTANCES, 'instance')} on demand without choosing where "
-        f"{'it runs; the scheduler places it' if ONE else 'they run; the scheduler places them'}.",
+        f"{'it runs; the scheduler places it' if ONE else 'they run; the scheduler places them'}, "
+        "and show how much of the pool is now allocated and how much is still free. Each "
+        "instance runs on one member, so a single instance is never bigger than one member; "
+        "the pool is the capacity all instances share.",
         "intro": "This is the cloud idea: resource pooling and on-demand provisioning. "
         "We stop thinking about individual servers. We see one pool of CPU, memory and "
         f"storage, ask it for {INST}, and MicroCloud decides where "
-        f"{'it runs' if ONE else 'each one runs'}.",
+        f"{'it runs' if ONE else 'each one runs'}. Pooling does not glue the machines into "
+        "one giant computer: each instance lives on one member, and the pool is the total "
+        "capacity that all instances draw from.",
         "outro": (
             "Our instance came out of the shared pool. We never said where it should run: the "
-            "LOCATION column shows the member MicroCloud chose, and its disk lives on Ceph "
+            "LOCATION column shows the member MicroCloud chose, the allocation table shows "
+            "what it took from the pool and what is still free, and its disk lives on Ceph "
             "storage replicated across all members, so no single server is a single point of "
             "failure."
             if ONE else
@@ -163,6 +172,17 @@ class CoPresenter:
             f"{'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
             "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
             "show the higher score.\n"
+            "Facts to get right: resource pooling means the members' capacity is managed and "
+            "consumed as one total. An instance always runs on exactly one member, so a single "
+            "instance can never be larger than one member (LXD does not merge machines into one "
+            "big computer); the pool is the total that all instances share, and the scheduler "
+            "places each new instance where there is room. If an instance needs more, it can "
+            "be resized up to its member's size, live-migrated, or the cluster grows by adding "
+            "members.\n"
+            "Web UIs: MicroCloud's web UI is the LXD UI on port 8443 of any member; Landscape has "
+            "its own web UI; USG has no web UI, its results are HTML reports, and Pro "
+            "subscriptions are visible in the Ubuntu Pro dashboard. './demo.py ui' lists the "
+            "links.\n"
             "Style: speak to the audience, plainly and confidently, in 2-5 short sentences. "
             "Plain text only: no markdown, no bullet lists, no headings. Never invent numbers; "
             "use only numbers that appear in the command output you are given. If you are "
@@ -249,6 +269,21 @@ def run_script(name: str, *args: str) -> tuple:
     return proc.returncode == 0, "".join(tail)
 
 
+def open_links(output: str) -> None:
+    """Open every web UI link that a step printed in the default browser."""
+    links = list(dict.fromkeys(URL.findall(output)))
+    if not links:
+        print("No web UI links in this step's output.")
+        return
+    for link in links:
+        print(f"{DIM}Opening {link}{RESET}")
+        try:
+            webbrowser.open_new_tab(link)
+        except Exception as exc:  # no browser on a headless host
+            print(f"{RED}Could not open a browser ({exc}). Copy the link instead.{RESET}")
+            return
+
+
 def prompt(choices: str) -> str:
     try:
         return input(f"{BOLD}{choices}{RESET}\n> ").strip()
@@ -287,6 +322,8 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
                        f"{output}\nExplain to the audience what this output proves, pointing "
                        "at the concrete names and numbers in it.", step["outro"]))
             options = "[Enter] next step   [r] run again   [q] quit   or type a question"
+            if URL.search(output):
+                options = "[Enter] next step   [o] open the web UIs   [r] run again   [q] quit   or type a question"
         else:
             print(f"\n{RED}{BOLD}Step {number} failed.{RESET} Full logs are in the logs/ folder.")
             say(ai.ask(f"Step {number} FAILED. End of the output:\n{output}\nSpeaking to the "
@@ -302,6 +339,9 @@ def do_step(number: int, ai: CoPresenter, interactive: bool = True) -> bool:
                 break
             if choice.lower() == "q":
                 return False
+            if choice.lower() == "o":
+                open_links(output)
+                continue
             if choice == "" and success or choice.lower() == "s":
                 return True
             if choice:
@@ -350,6 +390,16 @@ def cmd_ask(args, ai):
     return chat_loop(ai)
 
 
+def cmd_ui(args, ai):
+    ok, output = run_script("ui_links.sh", args.which)
+    if args.open:
+        open_links(output)
+    elif URL.search(output) and sys.stdin.isatty():
+        if prompt("[o] open them in the browser   [Enter] done").lower() == "o":
+            open_links(output)
+    return 0 if ok else 1
+
+
 def cmd_check(args, ai):
     ok, _ = run_script("check_host.sh")
     print(f"\n{BOLD}AI co-presenter{RESET}")
@@ -375,6 +425,7 @@ def main():
               ./demo.py check          verify the host, settings and AI
               ./demo.py step 1 --yes   before the audience arrives (slow part)
               ./demo.py run            present all four steps
+              ./demo.py ui             links to the MicroCloud, LXD, Landscape and USG UIs
               ./demo.py cleanup        afterwards: delete everything
         """),
     )
@@ -387,6 +438,9 @@ def main():
     step.add_argument("--yes", action="store_true", help="no pauses (for preparing beforehand)")
     ask = sub.add_parser("ask", help="ask the AI a question (no question = chat mode)")
     ask.add_argument("question", nargs="*")
+    ui = sub.add_parser("ui", help="show (and open) the MicroCloud/LXD, Landscape and USG web UIs")
+    ui.add_argument("which", nargs="?", default="all", choices=["all", "microcloud", "landscape", "usg"])
+    ui.add_argument("--open", action="store_true", help="open the links in the browser right away")
     sub.add_parser("check", help="pre-flight checks for host, settings and AI")
     sub.add_parser("setup", help="one-time host preparation (installs LXD)")
     sub.add_parser("status", help="show the cluster and instances")
@@ -397,7 +451,7 @@ def main():
     command = args.command or "run"
     if command == "run" and not args.command:
         args.start = 1
-    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check}
+    handlers = {"run": cmd_run, "step": cmd_step, "ask": cmd_ask, "check": cmd_check, "ui": cmd_ui}
     if command in handlers:
         return handlers[command](args, ai)
     script = {"setup": "setup_host.sh", "status": "status.sh", "cleanup": "cleanup.sh"}[command]

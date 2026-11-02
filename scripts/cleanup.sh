@@ -25,3 +25,4 @@ if lxc network show "${UPLINK_BRIDGE}" >/dev/null 2>&1; then
 fi
 rm -rf "${LOG_DIR:?}"/* "${REPORT_DIR:?}"/*
 ok "Clean. Remember to remove the MC-Instance_* computers in Landscape too."
+info "Kept for next time: cache/ (downloaded snaps) and ui-access/ (browser login certificate)."

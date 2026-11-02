@@ -38,6 +38,9 @@ fi
 
 (( NODE_COUNT >= 3 )) || fail "NODE_COUNT=${NODE_COUNT}: MicroCloud needs at least 3 members."
 
+if type -P openssl >/dev/null; then ok "openssl available (browser login for the MicroCloud UI)"
+else warn "openssl missing — needed for the MicroCloud web UI login: sudo apt install openssl"; fi
+
 cpu_total=$(nproc)
 if (( cpu_total >= NODE_COUNT )); then ok "CPU: ${cpu_total} threads"
 else warn "CPU: ${cpu_total} threads for ${NODE_COUNT} nodes — it will work, but slowly."; fi

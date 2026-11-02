@@ -104,7 +104,7 @@ Building the cluster is the slow part, so **do step 1 in advance**:
 
 | Step | How long | Run it live? |
 |---|---|---|
-| 1. Build MicroCloud | 30–60 min | **No, prepare it.** Live, the step just shows the finished cluster in seconds. |
+| 1. Build MicroCloud | 20–40 min (faster on re-runs: snaps are cached in `cache/`) | **No, prepare it.** Live, the step just shows the finished cluster in seconds. |
 | 2. Pool and provision | 5–15 min | Yes. If time is short, prepare this too. |
 | 3. Landscape | 3–5 min | Yes |
 | 4. USG | 10–15 min (two CIS audits) | Yes. Talk through the audit while it runs. |
@@ -112,9 +112,15 @@ Building the cluster is the slow part, so **do step 1 in advance**:
 Every step is **safe to run again**: anything that already exists is kept and
 shown again.
 
+Step 1 downloads the MicroCloud snaps **once, on this host**, and copies them
+into the VMs, instead of letting three fresh VMs pull them from the Snap Store
+at the same time (which timed out on busy or VPN connections). The downloads
+are kept in `cache/snaps/`, so re-running step 1 after a cleanup is quicker.
+
 Also before you start:
 
-- Log in to the Landscape web UI in a browser tab.
+- Open the web UIs in browser tabs (see [Web UIs](#web-uis) below), and log
+  in to Landscape.
 - Optional rehearsal of step 4: set `USG_INSTANCE=2` in `demo.conf`, run
   `./demo.py step 4 --yes`, then set it back to `1` for the real demo.
 
@@ -166,12 +172,24 @@ definition file."*
 **Step 2 — Resource pooling and provisioning.**
 The **POOLED TOTAL** row shows all CPU and RAM as one pool. Then the instance
 launches without saying where it should run. In the final `lxc list`, the
-**LOCATION** column shows the member the cloud picked for it.
+**LOCATION** column shows the member the cloud picked for it, and the pool
+table now shows what the instance **took from the pool** and what is still
+**free** for more instances.
 *"We ask the pool for capacity; the cloud decides where it runs. Disks sit on
 replicated Ceph, so losing one server does not lose data."*
 
+> **What pooling does and does not mean.** The pool is the members' combined
+> capacity, managed as one: 3 × 2 vCPU / 3 GiB = 6 vCPU / ~9 GiB that *all
+> instances together* can use. It does **not** turn the three VMs into one
+> giant computer: each instance runs on exactly one member, so a single
+> instance is at most one member's size (here 2 vCPU / ~3 GiB). That is how
+> LXD, OpenStack, VMware and public clouds all work. To show the pool being
+> consumed, raise `INSTANCE_COUNT` (instances get spread across members), or
+> raise `INSTANCE_CPU` / `INSTANCE_MEMORY` up to one member's size.
+
 **Step 3 — Landscape.**
-The terminal shows a ✔ line. **Switch to the browser:** Landscape →
+The terminal shows a ✔ line and the Landscape link (press **o** to open it).
+**Switch to the browser:** Landscape →
 Instances, filter by tag `microcloud-demo`. If the machine shows as
 **Pending**, select it and click **Accept**. You now see `MC-Instance_1`.
 Accepting needs a free seat on your Landscape account (shown as *Remaining
@@ -182,7 +200,40 @@ USG audits `MC-Instance_1` against **CIS Level 1 Server**, fixes **one** rule
 (by default *"disable SSH root login"*), and audits again. The final table
 shows **Before** and **After** scores and the rule going `fail → pass`. The
 full HTML reports are saved in `reports/` (`before-report.html`,
-`after-report.html`). Open them in a browser if the audience wants detail.
+`after-report.html`); press **o** to open them in the browser.
+
+### Web UIs
+
+After steps 1, 2, 3 and 4 the terminal prints the matching Canonical web UIs,
+and the prompt offers **`[o] open the web UIs`**. Any time, list (or open) them all:
+
+```bash
+./demo.py ui
+```
+
+```bash
+./demo.py ui --open
+```
+
+| UI | Where | Shown after |
+|---|---|---|
+| **MicroCloud / LXD UI** | `https://<mc-node-1 IP>:8443/ui/` — cluster members, instances, Ceph storage, OVN networks. MicroCloud's web UI *is* the LXD UI. | Steps 1 and 2 |
+| **Landscape** | `https://landscape.canonical.com/` (SaaS) or `https://<LANDSCAPE_FQDN>/` | Steps 3 and 4 |
+| **USG** | USG has no web UI of its own: its results are the HTML reports in `reports/`, opened as `file://` links | Step 4 |
+| **Ubuntu Pro dashboard** | `https://ubuntu.com/pro/dashboard` — the subscription the instance attached to for USG | Step 4 |
+
+**Logging in to the MicroCloud / LXD UI (once per browser).** The UI logs in
+with a client certificate. The demo creates one in `ui-access/` and adds it to
+the cluster's trust store for you. Import
+`ui-access/microcloud-demo-ui.pfx` (password `microcloud`) into your browser:
+
+- Chrome / Chromium: `chrome://certificate-manager` → *Your certificates* → *Import*
+- Firefox: *Settings → Privacy & Security → View Certificates → Your Certificates → Import*
+
+Then open the link, accept the warning about the server's self-signed
+certificate, and choose *MicroCloud demo UI* when asked for a certificate.
+The members' addresses are on LXD's own bridge, so open the UI on the machine
+running the demo.
 
 ## 5. Afterwards
 
@@ -214,6 +265,8 @@ press `r`. Detailed logs are in `logs/`.
 | Step 4: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
 | Step 4: *"None of the preferred rules are failing"* | You already fixed them in a rehearsal. Use another instance (`USG_INSTANCE=3`) or set `USG_RULE` to a rule that fails in `reports/before-report.html`. |
 | AI unavailable / HTTP 401 / unknown model | Check `OPENROUTER_API_KEY`. Pick a model name from <https://openrouter.ai/models> for `OPENROUTER_MODEL`. The demo keeps going with built-in narration. |
+| Step 1: `Client.Timeout exceeded` / `cannot get nonce from store` | The VMs could not reach the Snap Store. Step 1 now downloads the snaps on the host and copies them in, so this should not happen; if the host download itself fails, check the host's internet/VPN, then run step 1 again. |
+| The MicroCloud UI asks for a certificate or says *not authorized* | Import `ui-access/microcloud-demo-ui.pfx` (password `microcloud`) into the browser, then restart the browser. `./demo.py ui` re-adds the certificate to the cluster if needed. |
 | Something is stuck | Press `Ctrl+C`, then run the step again. Every step can be re-run. |
 
 ## 7. Background you might be asked about
@@ -242,8 +295,11 @@ scripts/
   step2_provision_instances.sh   Pool summary + instances
   step3_register_landscape.sh    Landscape registration as MC-Instance_<n>
   step4_usg_harden.sh            USG audit → fix one rule → re-audit
+  ui_links.sh                    Links to the MicroCloud/LXD, Landscape and USG UIs (+ UI login cert)
   setup_host.sh / check_host.sh / status.sh / cleanup.sh
   pool_summary.py, usg_tools.py  Small helpers used by steps 2 and 4
+cache/snaps/            Snaps downloaded by step 1 (reused on re-runs; not in git)
+ui-access/              Browser login certificate for the MicroCloud UI (not in git)
 ```
 
 Each step script is plain bash and can also be run on its own, e.g.
