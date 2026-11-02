@@ -62,6 +62,7 @@ install_snaps() {
     lxc exec "${node}" -- sh -ec '
         retry() {
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                echo "→ $*"
                 "$@" && return 0
                 echo "Attempt ${attempt} failed: $* (snapd may still be busy). Retrying in 15s ..."
                 sleep 15
@@ -69,7 +70,8 @@ install_snaps() {
             echo "Giving up: $*"; return 1
         }
         snap wait system seed.loaded
-        snap watch --last=auto-refresh 2>/dev/null || true   # wait for a self-refresh in progress
+        echo "Waiting for any snapd self-update to finish ..."
+        snap watch --last=auto-refresh 2>/dev/null || true
         if snap list lxd >/dev/null 2>&1; then
             retry snap refresh lxd --channel=5.21/stable
         else
@@ -81,10 +83,11 @@ install_snaps() {
         retry snap refresh --hold lxd microceph microovn microcloud   # no surprise updates mid-demo
     '
 }
+info "Installing on all ${NODE_COUNT} VMs in parallel; this takes several minutes. Progress:"
 pids=()
 for i in $(seq 1 "${NODE_COUNT}"); do
     node=$(node_name "$i")
-    install_snaps "${node}" >"${LOG_DIR}/${node}-install.log" 2>&1 &
+    run_logged "${node}" "${LOG_DIR}/${node}-install.log" install_snaps "${node}" &
     pids+=("$!")
 done
 for idx in "${!pids[@]}"; do
@@ -146,7 +149,7 @@ pids=()
 for i in $(seq 2 "${NODE_COUNT}"); do
     node=$(node_name "$i")
     lxc file push "${PRESEED}" "${node}/root/preseed.yaml" >/dev/null
-    lxc exec "${node}" -- sh -c 'microcloud preseed < /root/preseed.yaml' >"${LOG_DIR}/${node}-join.log" 2>&1 &
+    run_logged "${node}" "${LOG_DIR}/${node}-join.log" lxc exec "${node}" -- sh -c 'microcloud preseed < /root/preseed.yaml' &
     pids+=("$!")
 done
 lxc file push "${PRESEED}" "${LEADER}/root/preseed.yaml" >/dev/null
