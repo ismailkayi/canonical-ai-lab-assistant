@@ -125,7 +125,8 @@ STEPS = [
         "title": f"Register the {'instance' if ONE else 'instances'} in Landscape",
         "script": "step3_register_landscape.sh",
         "goal": f"Attach {'the' if ONE else 'each'} instance to Ubuntu Pro first, then install "
-        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo.",
+        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo. "
+        "USG is also installed quietly so step 4 runs in seconds.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. "
@@ -141,19 +142,18 @@ STEPS = [
     {
         "title": "Harden an instance with USG (CIS)",
         "script": "step4_usg_harden.sh",
-        "goal": "On one instance (attached to Ubuntu Pro in step 3): enable and install the "
-        "Ubuntu Security Guide (USG), "
-        "audit against CIS Level 1 Server, fix every failing rule that is safe to fix in one "
-        "pass, re-audit and compare scores.",
+        "goal": "On one instance (Ubuntu Pro and USG were set up in step 3): audit a focused "
+        "set of about twenty CIS Level 1 Server rules (SSH, login banners, kernel modules, "
+        "core dumps, password ageing), fix every failing one with a single command, re-audit "
+        "and compare scores. Takes about 30 seconds.",
         "intro": "Last, compliance. The Ubuntu Security Guide, part of Ubuntu Pro, checks a "
-        "machine against the CIS benchmark and can fix what it finds. We take a baseline "
-        "score, let USG remediate every failing rule it safely can in one pass, and measure "
-        "again.",
-        "outro": "Look at the jump: dozens of failing CIS rules now pass, from one command. "
-        "USG fixed them and proved it with a fresh audit. The few rules left failing were "
-        "skipped on purpose, such as a default-deny firewall that would cut the instance off "
-        "from Landscape, and are left for a planned change. The same tool hardens a whole "
-        "fleet in minutes, and the HTML reports are evidence for auditors.",
+        "machine against the CIS benchmark and can fix what it finds. To keep it quick on "
+        "stage we focus on a set of CIS rules: take a baseline score, let USG fix every "
+        "failing one in one command, and measure again.",
+        "outro": "Look at the jump: the failing rules now pass, from one command, and USG "
+        "proved it with a fresh audit. The score is for the focused rule set we chose; the "
+        "full CIS profile works the same way, it just takes longer. The same tool hardens a "
+        "whole fleet, and the HTML reports are evidence for auditors.",
     },
 ]
 
@@ -177,8 +177,9 @@ class CoPresenter:
             f"provision {count(INSTANCES, 'instance')} that the cluster scheduler places on "
             "members by itself (resource pooling and on-demand provisioning); (3) attach "
             f"{'it' if ONE else 'them'} to Ubuntu Pro and register {'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
-            "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, remediate every failing rule "
-            "that is safe to fix in one pass, and show the much higher score.\n"
+            "Ubuntu Security Guide (USG, Ubuntu Pro) against a focused set of about twenty CIS Level 1 "
+            "rules, fix every failing one in one command, and show the much higher score (the "
+            "score covers only that rule set, not the full profile).\n"
             "Facts to get right: resource pooling means the members' capacity is managed and "
             "consumed as one total. An instance always runs on exactly one member, so a single "
             "instance can never be larger than one member (LXD does not merge machines into one "
