@@ -124,13 +124,15 @@ STEPS = [
     {
         "title": f"Register the {'instance' if ONE else 'instances'} in Landscape",
         "script": "step3_register_landscape.sh",
-        "goal": f"Install landscape-client in {'the' if ONE else 'each'} instance and register it "
-        f"with Landscape as {TITLES}, tagged microcloud-demo.",
+        "goal": f"Attach {'the' if ONE else 'each'} instance to Ubuntu Pro first, then install "
+        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. "
-        + ("Our new instance now registers itself as MC-Instance_1." if ONE else
-           "Each instance now registers itself as MC-Instance with its number."),
+        + ("Our new instance is first attached to Ubuntu Pro, then registers itself as "
+           "MC-Instance_1." if ONE else
+           "Each instance is first attached to Ubuntu Pro, then registers itself as "
+           "MC-Instance with its number."),
         "outro": ("The instance has registered." if ONE else
                   f"All {words(INSTANCES)} instances have registered.")
         + f" In the Landscape web UI, filter by the tag microcloud-demo to see {TITLES}, "
@@ -139,14 +141,19 @@ STEPS = [
     {
         "title": "Harden an instance with USG (CIS)",
         "script": "step4_usg_harden.sh",
-        "goal": "On one instance: attach Ubuntu Pro, install the Ubuntu Security Guide (USG), "
-        "audit against CIS Level 1 Server, fix exactly one rule, re-audit and compare scores.",
+        "goal": "On one instance (attached to Ubuntu Pro in step 3): enable and install the "
+        "Ubuntu Security Guide (USG), "
+        "audit against CIS Level 1 Server, fix every failing rule that is safe to fix in one "
+        "pass, re-audit and compare scores.",
         "intro": "Last, compliance. The Ubuntu Security Guide, part of Ubuntu Pro, checks a "
         "machine against the CIS benchmark and can fix what it finds. We take a baseline "
-        "score, apply one CIS rule, and measure again.",
-        "outro": "The score went up because one failing rule now passes. USG fixed it and "
-        "proved the fix with a fresh audit. Applied to the full profile, the same tool "
-        "hardens a whole fleet in minutes, and the HTML reports are evidence for auditors.",
+        "score, let USG remediate every failing rule it safely can in one pass, and measure "
+        "again.",
+        "outro": "Look at the jump: dozens of failing CIS rules now pass, from one command. "
+        "USG fixed them and proved it with a fresh audit. The few rules left failing were "
+        "skipped on purpose, such as a default-deny firewall that would cut the instance off "
+        "from Landscape, and are left for a planned change. The same tool hardens a whole "
+        "fleet in minutes, and the HTML reports are evidence for auditors.",
     },
 ]
 
@@ -168,10 +175,10 @@ class CoPresenter:
             f"{NODES} VMs and join them into one MicroCloud cluster "
             "(LXD, MicroCeph, MicroOVN); (2) show the members' resources as one pool and "
             f"provision {count(INSTANCES, 'instance')} that the cluster scheduler places on "
-            "members by itself (resource pooling and on-demand provisioning); (3) register "
-            f"{'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
-            "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
-            "show the higher score.\n"
+            "members by itself (resource pooling and on-demand provisioning); (3) attach "
+            f"{'it' if ONE else 'them'} to Ubuntu Pro and register {'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
+            "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, remediate every failing rule "
+            "that is safe to fix in one pass, and show the much higher score.\n"
             "Facts to get right: resource pooling means the members' capacity is managed and "
             "consumed as one total. An instance always runs on exactly one member, so a single "
             "instance can never be larger than one member (LXD does not merge machines into one "

@@ -42,8 +42,8 @@ The four steps follow the life of a machine in a company:
 |---|---|---|---|
 | 1 | "Turn hardware into a cloud" | MicroCloud (LXD + MicroCeph + MicroOVN) | Three separate machines become one cluster. |
 | 2 | "Self-service capacity" | MicroCloud / LXD | You ask the cloud for a server; it picks where to run it. |
-| 3 | "Manage from day one" | Landscape | The new server reports to a central management console. |
-| 4 | "Prove you are secure" | Ubuntu Pro + USG (CIS benchmark) | Audit, fix one rule, audit again: the score goes up. |
+| 3 | "Manage from day one" | Ubuntu Pro + Landscape | The new server is attached to Ubuntu Pro, then reports to a central management console. |
+| 4 | "Prove you are secure" | Ubuntu Pro + USG (CIS benchmark) | Audit, fix every safe failing rule, audit again: the score jumps. |
 
 If you know public clouds, a rough mapping is:
 
@@ -127,8 +127,8 @@ what fails. The **CIS benchmarks** (from the Center for Internet Security) are
 widely used checklists of secure settings, e.g. "SSH must not allow root
 login". *CIS Level 1 Server* is the baseline profile. Under the hood USG uses
 **OpenSCAP**, which writes results as XML (machine-readable) and HTML
-(human-readable). A **tailoring file** customises a profile, e.g. "only this
-one rule", which is how step 4 fixes exactly one thing.
+(human-readable). A **tailoring file** customises a profile, e.g. "only these
+rules", which is how step 4 fixes every failing rule except a short skip list.
 
 ### Landscape
 
@@ -178,8 +178,8 @@ Your laptop (Ubuntu 24.04)                         ← "host"
 │
 │        Inside the MicroCloud (LXD #2, clustered):
 │        └── mc-instance-1  (container by default, or VM)
-│                ├── landscape-client  → Landscape   (step 3)
-│                └── usg + Ubuntu Pro                 (step 4)
+│                ├── Ubuntu Pro (attach) → then landscape-client → Landscape (step 3)
+│                └── usg (needs Pro)                                    (step 4)
 ```
 
 So a command has to "hop" through the layers. You'll see this pattern
@@ -307,7 +307,9 @@ OpenRouter.
 ### Step 3 — `scripts/step3_register_landscape.sh`
 
 For each instance (in parallel, output to `logs/mc-instance-N-landscape.log`):
-`apt-get install landscape-client`, then
+`pro attach <PRO_TOKEN>` first (skipped if already attached — the instance
+must be on Ubuntu Pro before it registers), `apt-get install landscape-client`,
+then
 
 ```bash
 landscape-config --silent --computer-title MC-Instance_1 \
@@ -324,19 +326,23 @@ web UI (maybe as **Pending**, needing **Accept**).
 
 All inside `mc-instance-<USG_INSTANCE>`:
 
-1. `pro attach <PRO_TOKEN>` (skipped if already attached), `pro enable usg`,
+1. `pro attach <PRO_TOKEN>` (already done in step 3, so normally skipped), `pro enable usg`,
    `apt-get install usg`.
 2. **Baseline**: `usg audit cis_level1_server`. Copy the newest results XML
    and HTML report out to `reports/before-*`. `usg_tools.py score` reads the
    XML and prints score / passed / failed.
-3. **Pick one rule**: `usg_tools.py pick` chooses `USG_RULE` if it is failing,
-   otherwise the first failing rule from a list of *safe* ones (rules that
-   won't lock you out, e.g. `sshd_disable_root_login`).
-4. **Fix one rule**: `usg generate-tailoring` dumps the full profile;
-   `usg_tools.py tailor` edits it so only that one rule is selected; push it
-   back and run `usg fix --tailoring-file …`.
-5. **Prove it**: audit again, copy out `reports/after-*`, print a
-   Before/After table and the rule going `fail → pass`.
+3. **Choose what to fix**: `usg generate-tailoring` dumps the full profile.
+   With `USG_FIX=all` (default), `usg_tools.py harden` selects every rule that
+   failed the baseline, minus `SKIP_RULES` (firewall default-deny, which would
+   cut Landscape off; AIDE, which takes 10+ minutes; AppArmor enforcement,
+   bootloader and mount rules, which don't apply in a container; package
+   removals) and anything in `USG_SKIP_RULES`. With `USG_FIX=one`,
+   `usg_tools.py pick` + `tailor` select just `USG_RULE`.
+4. **Fix**: push the tailoring file back and run
+   `usg fix --tailoring-file …` — one command, all the selected rules.
+5. **Prove it**: audit the full profile again, copy out `reports/after-*`,
+   print a Before/After/Change table and the rules that went `fail → pass`
+   (`usg_tools.py fixed`).
 
 (`usg audit` returns a non-zero exit code whenever any rule fails, which is
 normal, so those lines end with `|| true`.)
@@ -426,15 +432,15 @@ scripts/
   check_host.sh            Pre-flight checks
   step1_build_microcloud.sh  VMs → MicroCloud cluster
   step2_provision_instances.sh  Pool table + launch instances
-  step3_register_landscape.sh   landscape-client registration
-  step4_usg_harden.sh      Pro attach, USG audit → fix one rule → re-audit
+  step3_register_landscape.sh   Pro attach, then landscape-client registration
+  step4_usg_harden.sh      Pro attach, USG audit → fix all safe failing rules → re-audit
   ui_links.sh              Web UI links + browser certificate for the LXD UI
   status.sh / cleanup.sh   Show / delete what the demo created
   snap_fetch.py            Patient, resumable Snap Store downloader (talks to the store API directly,
                            verifies the SHA3-384 hash, writes .snap + .assert like `snap download`)
   pool_summary.py          Turns LXD's resources/instances JSON into the pool table
-  usg_tools.py             Reads OpenSCAP XML: score, a rule's result, pick a failing rule, build a
-                           one-rule tailoring file
+  usg_tools.py             Reads OpenSCAP XML: score, a rule's result, rules fixed, pick/select failing rules, build a
+                           tailoring file (one rule, or every safe failing rule)
 Generated at runtime (git-ignored):
   demo.conf                Your keys and overrides
   logs/                    Per-node install/join logs, preseed YAML, Landscape logs
@@ -452,7 +458,7 @@ Generated at runtime (git-ignored):
 | `UBUNTU_IMAGE` | `ubuntu:24.04` = image from Canonical's image server. |
 | `*_CHANNEL` | Which snap version line to install on the nodes. |
 | `UPLINK_SUBNET` | First three octets of `mcbr0`. Change if it clashes with your network. |
-| `USG_INSTANCE`, `USG_PROFILE`, `USG_RULE` | Which instance step 4 hardens, which benchmark, which rule. |
+| `USG_INSTANCE`, `USG_PROFILE`, `USG_FIX`, `USG_SKIP_RULES`, `USG_RULE` | Which instance step 4 hardens, which benchmark, fix all safe rules or just one, extra rules to skip, the rule for one-rule mode. |
 | `TRACE_COMMANDS` | `no` hides the dimmed background commands. |
 
 ## 9. Learn by poking at it yourself

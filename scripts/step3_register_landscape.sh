@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# STEP 3 — Register every instance with Landscape as "MC-Instance_<n>".
+# STEP 3 — Attach every instance to Ubuntu Pro, then register it with Landscape
+# as "MC-Instance_<n>".
 source "$(dirname "$0")/common.sh"
 require_cluster
 
@@ -12,6 +13,7 @@ elif [[ -n "${LANDSCAPE_ACCOUNT_NAME}" ]]; then
 else
     die "Set LANDSCAPE_ACCOUNT_NAME (SaaS) or LANDSCAPE_FQDN (self-hosted) in demo.conf"
 fi
+[[ -n "${PRO_TOKEN}" ]] || die "Set PRO_TOKEN in demo.conf (instances are attached to Ubuntu Pro before Landscape registration)"
 [[ -z "${LANDSCAPE_REGISTRATION_KEY}" ]] || server_args+=(--registration-key "${LANDSCAPE_REGISTRATION_KEY}")
 
 if [[ -n "${LANDSCAPE_SSL_CERT}" ]]; then
@@ -28,12 +30,18 @@ register() {
         mc lxc file push /tmp/landscape.pem "${inst}/etc/landscape/server.pem" --create-dirs
         args+=(--ssl-public-key /etc/landscape/server.pem)
     fi
+    # Ubuntu Pro first: the instance must be attached before it registers with Landscape.
+    if in_instance "${inst}" pro status --format json </dev/null | grep -Eq '"attached": *true'; then
+        echo "${inst} is already attached to Ubuntu Pro"
+    else
+        in_instance "${inst}" pro attach "${PRO_TOKEN}" </dev/null
+    fi
     in_instance "${inst}" sh -ec 'export DEBIAN_FRONTEND=noninteractive
         apt-get update -q && apt-get install -yq landscape-client'
     in_instance "${inst}" landscape-config "${args[@]}"
 }
 
-title "Registering $(count "${INSTANCE_COUNT}" instance) with Landscape (account: ${account})"
+title "Attaching $(count "${INSTANCE_COUNT}" instance) to Ubuntu Pro and registering with Landscape (account: ${account})"
 
 pids=()
 for i in $(seq 1 "${INSTANCE_COUNT}"); do
@@ -44,7 +52,7 @@ failed=0
 for idx in "${!pids[@]}"; do
     i=$((idx + 1))
     if wait "${pids[$idx]}"; then
-        ok "$(instance_name "$i")  →  registered as MC-Instance_${i}"
+        ok "$(instance_name "$i")  →  Pro attached, registered as MC-Instance_${i}"
     else
         warn "$(instance_name "$i") failed — see logs/$(instance_name "$i")-landscape.log"
         failed=$((failed + 1))
