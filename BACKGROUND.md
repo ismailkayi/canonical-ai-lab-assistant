@@ -43,7 +43,7 @@ The four steps follow the life of a machine in a company:
 | 1 | "Turn hardware into a cloud" | MicroCloud (LXD + MicroCeph + MicroOVN) | Three separate machines become one cluster. |
 | 2 | "Self-service capacity" | MicroCloud / LXD | You ask the cloud for a server; it picks where to run it. |
 | 3 | "Manage from day one" | Ubuntu Pro + Landscape | The new server is attached to Ubuntu Pro, then reports to a central management console. |
-| 4 | "Prove you are secure" | Ubuntu Pro + USG (CIS benchmark) | Audit, fix every safe failing rule, audit again: the score jumps. |
+| 4 | "Prove you are secure" | Ubuntu Pro + USG (CIS benchmark) | Audit a focused set of CIS rules, fix every failing one, audit again: the score jumps. |
 
 If you know public clouds, a rough mapping is:
 
@@ -128,7 +128,8 @@ widely used checklists of secure settings, e.g. "SSH must not allow root
 login". *CIS Level 1 Server* is the baseline profile. Under the hood USG uses
 **OpenSCAP**, which writes results as XML (machine-readable) and HTML
 (human-readable). A **tailoring file** customises a profile, e.g. "only these
-rules", which is how step 4 fixes every failing rule except a short skip list.
+rules", which is how step 4 audits and fixes a focused set of about twenty
+rules in seconds instead of the whole profile.
 
 ### Landscape
 
@@ -319,29 +320,31 @@ landscape-config --silent --computer-title MC-Instance_1 \
 ```
 
 The bracketed options depend on whether you use SaaS or self-hosted Landscape
-(see `demo.conf.example`). After this, the machine shows up in the Landscape
+(see `demo.conf.example`). On instance `USG_INSTANCE` it then also runs
+`pro enable usg`, `apt-get install usg` and `usg generate-tailoring`, so
+step 4 has nothing to download. After this, the machine shows up in the Landscape
 web UI (maybe as **Pending**, needing **Accept**).
 
 ### Step 4 — `scripts/step4_usg_harden.sh`
 
 All inside `mc-instance-<USG_INSTANCE>`:
 
-1. `pro attach <PRO_TOKEN>` (already done in step 3, so normally skipped), `pro enable usg`,
-   `apt-get install usg`.
-2. **Baseline**: `usg audit cis_level1_server`. Copy the newest results XML
-   and HTML report out to `reports/before-*`. `usg_tools.py score` reads the
-   XML and prints score / passed / failed.
-3. **Choose what to fix**: `usg generate-tailoring` dumps the full profile.
-   With `USG_FIX=all` (default), `usg_tools.py harden` selects every rule that
-   failed the baseline, minus `SKIP_RULES` (firewall default-deny, which would
-   cut Landscape off; AIDE, which takes 10+ minutes; AppArmor enforcement,
-   bootloader and mount rules, which don't apply in a container; package
-   removals) and anything in `USG_SKIP_RULES`. With `USG_FIX=one`,
-   `usg_tools.py pick` + `tailor` select just `USG_RULE`.
-4. **Fix**: push the tailoring file back and run
-   `usg fix --tailoring-file …` — one command, all the selected rules.
-5. **Prove it**: audit the full profile again, copy out `reports/after-*`,
-   print a Before/After/Change table and the rules that went `fail → pass`
+The whole step takes about 30 seconds and fits in a 512 MiB instance. (A
+full CIS profile audit takes minutes and needed more memory than that: oscap
+was OOM-killed.) Step 3 already ran `pro enable usg`, `apt-get install usg`
+and `usg generate-tailoring cis_level1_server /root/tailoring-full.xml`;
+step 4 only repeats them if they are missing.
+
+1. **Choose the rules**: `usg_tools.py select` turns the full tailoring file
+   into one where only `DEMO_RULES` (about twenty quick config-file rules:
+   SSH, banners, kernel modules, core dumps, password ageing) or your
+   `USG_RULES` are selected.
+2. **Baseline**: `usg audit --tailoring-file …`. Copy the results XML and HTML
+   report it wrote out to `reports/before-*`. `usg_tools.py score` reads the
+   XML and prints score / passed / failed (for the selected rules).
+3. **Fix**: `usg fix --tailoring-file …` — one command, every failing rule.
+4. **Prove it**: audit again, copy out `reports/after-*`, print a
+   Before/After/Change table and the rules that went `fail → pass`
    (`usg_tools.py fixed`).
 
 (`usg audit` returns a non-zero exit code whenever any rule fails, which is
@@ -433,14 +436,14 @@ scripts/
   step1_build_microcloud.sh  VMs → MicroCloud cluster
   step2_provision_instances.sh  Pool table + launch instances
   step3_register_landscape.sh   Pro attach, then landscape-client registration
-  step4_usg_harden.sh      Pro attach, USG audit → fix all safe failing rules → re-audit
+  step4_usg_harden.sh      USG audit → fix → re-audit on a focused CIS rule set
   ui_links.sh              Web UI links + browser certificate for the LXD UI
   status.sh / cleanup.sh   Show / delete what the demo created
   snap_fetch.py            Patient, resumable Snap Store downloader (talks to the store API directly,
                            verifies the SHA3-384 hash, writes .snap + .assert like `snap download`)
   pool_summary.py          Turns LXD's resources/instances JSON into the pool table
-  usg_tools.py             Reads OpenSCAP XML: score, a rule's result, rules fixed, pick/select failing rules, build a
-                           tailoring file (one rule, or every safe failing rule)
+  usg_tools.py             Reads OpenSCAP XML (score, a rule's result, rules fixed) and builds
+                           the tailoring file that selects step 4's focused rule set
 Generated at runtime (git-ignored):
   demo.conf                Your keys and overrides
   logs/                    Per-node install/join logs, preseed YAML, Landscape logs
@@ -458,7 +461,7 @@ Generated at runtime (git-ignored):
 | `UBUNTU_IMAGE` | `ubuntu:24.04` = image from Canonical's image server. |
 | `*_CHANNEL` | Which snap version line to install on the nodes. |
 | `UPLINK_SUBNET` | First three octets of `mcbr0`. Change if it clashes with your network. |
-| `USG_INSTANCE`, `USG_PROFILE`, `USG_FIX`, `USG_SKIP_RULES`, `USG_RULE` | Which instance step 4 hardens, which benchmark, fix all safe rules or just one, extra rules to skip, the rule for one-rule mode. |
+| `USG_INSTANCE`, `USG_PROFILE`, `USG_RULES` | Which instance step 4 hardens (step 3 installs USG on it), which benchmark, which rules (empty = the built-in quick set). |
 | `TRACE_COMMANDS` | `no` hides the dimmed background commands. |
 
 ## 9. Learn by poking at it yourself
