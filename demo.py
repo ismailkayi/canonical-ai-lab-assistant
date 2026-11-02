@@ -143,13 +143,17 @@ STEPS = [
         "script": "step4_usg_harden.sh",
         "goal": "On one instance (attached to Ubuntu Pro in step 3): enable and install the "
         "Ubuntu Security Guide (USG), "
-        "audit against CIS Level 1 Server, fix exactly one rule, re-audit and compare scores.",
+        "audit against CIS Level 1 Server, fix every failing rule that is safe to fix in one "
+        "pass, re-audit and compare scores.",
         "intro": "Last, compliance. The Ubuntu Security Guide, part of Ubuntu Pro, checks a "
         "machine against the CIS benchmark and can fix what it finds. We take a baseline "
-        "score, apply one CIS rule, and measure again.",
-        "outro": "The score went up because one failing rule now passes. USG fixed it and "
-        "proved the fix with a fresh audit. Applied to the full profile, the same tool "
-        "hardens a whole fleet in minutes, and the HTML reports are evidence for auditors.",
+        "score, let USG remediate every failing rule it safely can in one pass, and measure "
+        "again.",
+        "outro": "Look at the jump: dozens of failing CIS rules now pass, from one command. "
+        "USG fixed them and proved it with a fresh audit. The few rules left failing were "
+        "skipped on purpose, such as a default-deny firewall that would cut the instance off "
+        "from Landscape, and are left for a planned change. The same tool hardens a whole "
+        "fleet in minutes, and the HTML reports are evidence for auditors.",
     },
 ]
 
@@ -173,8 +177,8 @@ class CoPresenter:
             f"provision {count(INSTANCES, 'instance')} that the cluster scheduler places on "
             "members by itself (resource pooling and on-demand provisioning); (3) attach "
             f"{'it' if ONE else 'them'} to Ubuntu Pro and register {'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
-            "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
-            "show the higher score.\n"
+            "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, remediate every failing rule "
+            "that is safe to fix in one pass, and show the much higher score.\n"
             "Facts to get right: resource pooling means the members' capacity is managed and "
             "consumed as one total. An instance always runs on exactly one member, so a single "
             "instance can never be larger than one member (LXD does not merge machines into one "

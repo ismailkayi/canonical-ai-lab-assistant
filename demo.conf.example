@@ -78,5 +78,12 @@ TRACE_COMMANDS=yes
 
 USG_INSTANCE=1           # which instance to harden in step 4
 USG_PROFILE=cis_level1_server
-# Rule to fix. Leave empty to auto-pick the first failing rule from a safe list.
+# all = fix every failing rule in one pass (big score jump), except a few that
+#       would break the demo (firewall default-deny, AIDE, AppArmor, bootloader,
+#       mounts, package removals — see SKIP_RULES in scripts/usg_tools.py).
+# one = fix only USG_RULE, for a slower "one rule at a time" story.
+USG_FIX=all
+# Extra rules to leave alone with USG_FIX=all (space-separated, * wildcards OK).
+USG_SKIP_RULES=
+# Rule for USG_FIX=one. Leave empty to auto-pick the first failing rule from a safe list.
 USG_RULE=sshd_disable_root_login

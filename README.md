@@ -13,7 +13,7 @@ answers questions from the audience.
 | **1** | 3 VMs join together into **one MicroCloud** | Separate machines become one cloud |
 | **2** | Their CPU, RAM and storage shown as **one pool**, then **one instance** provisioned from it | Resource pooling and on-demand provisioning |
 | **3** | The instance registered in **Landscape** as `MC-Instance_1` | Central management from day one |
-| **4** | **USG** audits one instance against CIS, fixes **one rule**, and the score goes up | Compliance you can measure |
+| **4** | **USG** audits one instance against CIS, fixes every failing rule it safely can, and the score jumps | Compliance you can measure |
 
 ```text
  Your Ubuntu machine
@@ -111,7 +111,7 @@ Building the cluster is the slow part, so **do step 1 in advance**:
 | 1. Build MicroCloud | 20–40 min (faster on re-runs: snaps are cached in `cache/`) | **No, prepare it.** Live, the step just shows the finished cluster in seconds. |
 | 2. Pool and provision | 5–15 min | Yes. If time is short, prepare this too. |
 | 3. Landscape | 3–5 min | Yes |
-| 4. USG | 10–15 min (two CIS audits) | Yes. Talk through the audit while it runs. |
+| 4. USG | 15–25 min (two CIS audits + a full remediation) | Yes. Talk through the audit while it runs. |
 
 Every step is **safe to run again**: anything that already exists is kept and
 shown again.
@@ -201,9 +201,12 @@ Accepting needs a free seat on your Landscape account (shown as *Remaining
 registrations* on the account page).
 
 **Step 4 — USG and CIS.**
-USG audits `MC-Instance_1` against **CIS Level 1 Server**, fixes **one** rule
-(by default *"disable SSH root login"*), and audits again. The final table
-shows **Before** and **After** scores and the rule going `fail → pass`. The
+USG audits `MC-Instance_1` against **CIS Level 1 Server**, then remediates
+**every failing rule in one pass**, except a short skip list that would break
+the demo (firewall default-deny, AIDE, AppArmor enforcement, bootloader, mount
+options, package removals), and audits again. The final table shows **Before**,
+**After** and the **Change**, followed by the rules that went `fail → pass`.
+For the old single-rule story set `USG_FIX=one` (fixes `USG_RULE`). The
 full HTML reports are saved in `reports/` (`before-report.html`,
 `after-report.html`); press **o** to open them in the browser.
 
@@ -268,7 +271,8 @@ press `r`. Detailed logs are in `logs/`.
 | Step 2 says *"using system containers instead"* | The host does not allow nested virtualization. The demo still works; the instances are containers instead of VMs. |
 | Step 3: instances never appear in Landscape | Check they are not waiting under **Pending**. For self-hosted Landscape, check `LANDSCAPE_FQDN` and, with a self-signed certificate, set `LANDSCAPE_SSL_CERT`. See `logs/mc-instance-*-landscape.log`. |
 | Step 3: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
-| Step 4: *"None of the preferred rules are failing"* | You already fixed them in a rehearsal. Use another instance (`USG_INSTANCE=3`) or set `USG_RULE` to a rule that fails in `reports/before-report.html`. |
+| Step 4: *"No failing rules left to fix"* / *"None of the preferred rules are failing"* | You already hardened this instance in a rehearsal. Use another instance (`USG_INSTANCE=2`), or rebuild it with steps 2–3. |
+| Step 4: hardening broke something you need | Add the rule to `USG_SKIP_RULES` in `demo.conf` (names are in `reports/after-report.html`), rebuild the instance and run again. |
 | AI unavailable / HTTP 401 / unknown model | Check `OPENROUTER_API_KEY`. Pick a model name from <https://openrouter.ai/models> for `OPENROUTER_MODEL`. The demo keeps going with built-in narration. |
 | Step 1: `Client.Timeout exceeded`, `connection reset by peer`, `cannot get nonce from store` | This machine's connection to the Snap Store (`api.snapcraft.io`) is unreliable. Step 1 downloads on the host with long timeouts, retries and resume, so a flaky link usually just slows it down; leave it running. If it still fails: disconnect or reconnect the VPN, try another network (e.g. a phone hotspot), and test with `curl -v https://api.snapcraft.io`. If `snap download hello` also fails on this machine, it is the network, not the demo. Already-downloaded snaps in `cache/snaps/` are kept, so each retry continues where it stopped. |
 | The MicroCloud UI asks for a certificate or says *not authorized* | Import `ui-access/microcloud-demo-ui.pfx` (password `microcloud`) into the browser, then restart the browser. `./demo.py ui` re-adds the certificate to the cluster if needed. |
@@ -299,7 +303,7 @@ scripts/
   step1_build_microcloud.sh      N VMs → one MicroCloud
   step2_provision_instances.sh   Pool summary + instances
   step3_register_landscape.sh    Pro attach + Landscape registration as MC-Instance_<n>
-  step4_usg_harden.sh            USG audit → fix one rule → re-audit
+  step4_usg_harden.sh            USG audit → fix all safe failing rules → re-audit
   ui_links.sh                    Links to the MicroCloud/LXD, Landscape and USG UIs (+ UI login cert)
   setup_host.sh / check_host.sh / status.sh / cleanup.sh
   snap_fetch.py                  Resumable Snap Store downloader used by step 1

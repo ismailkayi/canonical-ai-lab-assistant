@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# STEP 4 — Audit one instance against CIS with USG, fix ONE rule, audit again.
+# STEP 4 — Audit one instance against CIS with USG, harden it, audit again.
+#   USG_FIX=all  (default) fix every failing rule except the few in
+#                usg_tools.py SKIP_RULES (and USG_SKIP_RULES): a big score jump.
+#   USG_FIX=one  fix only USG_RULE (or the first failing rule from a safe list).
 source "$(dirname "$0")/common.sh"
 require_cluster
 
@@ -36,17 +39,29 @@ read -r score_before pass_before fail_before < <(python3 "${tools}" score "${REP
 echo
 ok "BEFORE:  score ${score_before}%   (${pass_before} rules pass, ${fail_before} fail)"
 
-rule=$(python3 "${tools}" pick "${REPORT_DIR}/before-results.xml" "${USG_RULE}")
-[[ -n "${rule}" ]] || die "None of the preferred rules are failing — set USG_RULE in demo.conf to a failing rule (see reports/before-report.html)"
-short_rule="${rule#xccdf_org.ssgproject.content_rule_}"
-
-# --- 3. Fix exactly one rule ------------------------------------------------
-title "3/4  Applying ONE CIS rule: ${short_rule}"
+# --- 3. Harden ----------------------------------------------------------------
 in_instance "${inst}" usg generate-tailoring "${USG_PROFILE}" /root/tailoring-full.xml </dev/null >/dev/null
 in_instance "${inst}" cat /root/tailoring-full.xml </dev/null >"${REPORT_DIR}/tailoring-full.xml"
-python3 "${tools}" tailor "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/tailoring-one-rule.xml" "${rule}"
-in_instance "${inst}" sh -c 'cat > /root/tailoring-one-rule.xml' <"${REPORT_DIR}/tailoring-one-rule.xml"
-show_in "${inst}" usg fix --tailoring-file /root/tailoring-one-rule.xml </dev/null || true
+
+fix_mode="${USG_FIX:-all}"
+if [[ "${fix_mode}" == "one" ]]; then
+    rule=$(python3 "${tools}" pick "${REPORT_DIR}/before-results.xml" "${USG_RULE}")
+    [[ -n "${rule}" ]] || die "None of the preferred rules are failing — set USG_RULE in demo.conf to a failing rule (see reports/before-report.html)"
+    tailoring=tailoring-one-rule.xml
+    python3 "${tools}" tailor "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" "${rule}"
+    title "3/4  Applying ONE CIS rule: ${rule#xccdf_org.ssgproject.content_rule_}"
+else
+    tailoring=tailoring-harden.xml
+    read -ra extra_skip <<<"${USG_SKIP_RULES:-}"
+    selected=$(python3 "${tools}" harden "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" \
+        "${REPORT_DIR}/before-results.xml" "${extra_skip[@]}")
+    (( selected > 0 )) || die "No failing rules left to fix — this instance is already hardened (try another USG_INSTANCE)"
+    title "3/4  Hardening: fixing ${selected} failing CIS rules in one pass  (takes a few minutes)"
+    echo -e "  ${DIM}Skipped on purpose: firewall default-deny, AIDE, AppArmor enforcement, bootloader,"
+    echo -e "  mount options and package removals (see SKIP_RULES in scripts/usg_tools.py).${NC}"
+fi
+in_instance "${inst}" sh -c "cat > /root/${tailoring}" <"${REPORT_DIR}/${tailoring}"
+show_in "${inst}" env DEBIAN_FRONTEND=noninteractive usg fix --tailoring-file "/root/${tailoring}" </dev/null || true
 
 # --- 4. Prove it --------------------------------------------------------------
 title "4/4  Re-audit: ${USG_PROFILE}"
@@ -59,9 +74,14 @@ title "Result for ${inst} (MC-Instance_${USG_INSTANCE})"
 printf '  %-10s %-8s %-8s %s\n' "" "Score" "Pass" "Fail"
 printf '  %-10s %-8s %-8s %s\n' "Before" "${score_before}%" "${pass_before}" "${fail_before}"
 printf '  %-10s %-8s %-8s %s\n' "After" "${score_after}%" "${pass_after}" "${fail_after}"
-printf '\n  Rule %s:  %s  →  %s\n\n' "${short_rule}" \
-    "$(python3 "${tools}" result "${REPORT_DIR}/before-results.xml" "${rule}")" \
-    "$(python3 "${tools}" result "${REPORT_DIR}/after-results.xml" "${rule}")"
+printf '  %-10s %-8s %-8s %s\n' "Change" "$(awk -v a="${score_after}" -v b="${score_before}" 'BEGIN{d=a-b; printf "%+.1f", d}' 2>/dev/null)" \
+    "$(( pass_after - pass_before ))" "$(( fail_after - fail_before ))"
+mapfile -t flipped < <(python3 "${tools}" fixed "${REPORT_DIR}/before-results.xml" "${REPORT_DIR}/after-results.xml" 12)
+printf '\n  %s rules went fail → pass' "${flipped[0]}"
+(( ${#flipped[@]} > 1 )) && printf ', including:\n' || printf '\n'
+for r in "${flipped[@]:1}"; do printf '    ✔ %s\n' "${r}"; done
+(( flipped[0] > ${#flipped[@]} - 1 )) && printf '    … and %s more (see reports/after-report.html)\n' "$(( flipped[0] - ${#flipped[@]} + 1 ))"
+echo
 ok "HTML reports saved: reports/before-report.html and reports/after-report.html"
 bash "${REPO_ROOT}/scripts/ui_links.sh" usg
 bash "${REPO_ROOT}/scripts/ui_links.sh" landscape
