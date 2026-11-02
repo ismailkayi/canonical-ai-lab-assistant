@@ -56,7 +56,7 @@ members and 5 VM instances). The minimum is 3 members. Each extra instance also 
 |---|---|---|
 | OpenRouter API key | The AI co-presenter | <https://openrouter.ai/keys> (a full demo costs a few cents) |
 | Landscape | Step 3 | Landscape SaaS account name + registration key, **or** your own Landscape server |
-| Ubuntu Pro token | Step 4 (USG needs Pro) | <https://ubuntu.com/pro/dashboard> (free for up to 5 machines) |
+| Ubuntu Pro token | Steps 3 and 4 (attached before Landscape; USG needs Pro) | <https://ubuntu.com/pro/dashboard> (free for up to 5 machines) |
 
 > The demo still works without the OpenRouter key: you get fixed built-in
 > narration instead of the AI.
@@ -191,8 +191,9 @@ replicated Ceph, so losing one server does not lose data."*
 > consumed, raise `INSTANCE_COUNT` (instances get spread across members), or
 > raise `INSTANCE_CPU` / `INSTANCE_MEMORY` up to one member's size.
 
-**Step 3 — Landscape.**
-The terminal shows a ✔ line and the Landscape link (press **o** to open it).
+**Step 3 — Ubuntu Pro + Landscape.**
+Each instance is first attached to Ubuntu Pro with `PRO_TOKEN`, then
+registered with Landscape. The terminal shows a ✔ line and the Landscape link (press **o** to open it).
 **Switch to the browser:** Landscape →
 Instances, filter by tag `microcloud-demo`. If the machine shows as
 **Pending**, select it and click **Accept**. You now see `MC-Instance_1`.
@@ -224,7 +225,7 @@ and the prompt offers **`[o] open the web UIs`**. Any time, list (or open) them 
 | **MicroCloud / LXD UI** | `https://<mc-node-1 IP>:8443/ui/` — cluster members, instances, Ceph storage, OVN networks. MicroCloud's web UI *is* the LXD UI. | Steps 1 and 2 |
 | **Landscape** | `https://landscape.canonical.com/` (SaaS) or `https://<LANDSCAPE_FQDN>/` | Steps 3 and 4 |
 | **USG** | USG has no web UI of its own: its results are the HTML reports in `reports/`, opened as `file://` links | Step 4 |
-| **Ubuntu Pro dashboard** | `https://ubuntu.com/pro/dashboard` — the subscription the instance attached to for USG | Step 4 |
+| **Ubuntu Pro dashboard** | `https://ubuntu.com/pro/dashboard` — the subscription the instances attached to in step 3 | Steps 3 and 4 |
 
 **Logging in to the MicroCloud / LXD UI (once per browser).** The UI logs in
 with a client certificate. The demo creates one in `ui-access/` and adds it to
@@ -266,7 +267,7 @@ press `r`. Detailed logs are in `logs/`.
 | Laptop becomes sluggish or VMs get killed during step 1 | Set `NODE_MEMORY=2GiB` (tight but usually works with containers), run `./demo.py cleanup`, then step 1 again |
 | Step 2 says *"using system containers instead"* | The host does not allow nested virtualization. The demo still works; the instances are containers instead of VMs. |
 | Step 3: instances never appear in Landscape | Check they are not waiting under **Pending**. For self-hosted Landscape, check `LANDSCAPE_FQDN` and, with a self-signed certificate, set `LANDSCAPE_SSL_CERT`. See `logs/mc-instance-*-landscape.log`. |
-| Step 4: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
+| Step 3: `pro attach` fails | The token is wrong or used up. Free tokens cover 5 machines; detach unused ones in the Pro dashboard. |
 | Step 4: *"None of the preferred rules are failing"* | You already fixed them in a rehearsal. Use another instance (`USG_INSTANCE=3`) or set `USG_RULE` to a rule that fails in `reports/before-report.html`. |
 | AI unavailable / HTTP 401 / unknown model | Check `OPENROUTER_API_KEY`. Pick a model name from <https://openrouter.ai/models> for `OPENROUTER_MODEL`. The demo keeps going with built-in narration. |
 | Step 1: `Client.Timeout exceeded`, `connection reset by peer`, `cannot get nonce from store` | This machine's connection to the Snap Store (`api.snapcraft.io`) is unreliable. Step 1 downloads on the host with long timeouts, retries and resume, so a flaky link usually just slows it down; leave it running. If it still fails: disconnect or reconnect the VPN, try another network (e.g. a phone hotspot), and test with `curl -v https://api.snapcraft.io`. If `snap download hello` also fails on this machine, it is the network, not the demo. Already-downloaded snaps in `cache/snaps/` are kept, so each retry continues where it stopped. |
@@ -297,7 +298,7 @@ demo.conf.example       All settings with explanations. Copy it to demo.conf.
 scripts/
   step1_build_microcloud.sh      N VMs → one MicroCloud
   step2_provision_instances.sh   Pool summary + instances
-  step3_register_landscape.sh    Landscape registration as MC-Instance_<n>
+  step3_register_landscape.sh    Pro attach + Landscape registration as MC-Instance_<n>
   step4_usg_harden.sh            USG audit → fix one rule → re-audit
   ui_links.sh                    Links to the MicroCloud/LXD, Landscape and USG UIs (+ UI login cert)
   setup_host.sh / check_host.sh / status.sh / cleanup.sh

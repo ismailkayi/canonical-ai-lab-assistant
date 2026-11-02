@@ -67,7 +67,7 @@ title "Settings (demo.conf)"
 if [[ -n "${LANDSCAPE_ACCOUNT_NAME}" || -n "${LANDSCAPE_FQDN}" ]]; then ok "Landscape configured"
 else fail "Landscape not configured (LANDSCAPE_ACCOUNT_NAME or LANDSCAPE_FQDN) — needed for step 3"; fi
 if [[ -n "${PRO_TOKEN}" ]]; then ok "Ubuntu Pro token set"
-else fail "PRO_TOKEN empty — needed for step 4 (USG)"; fi
+else fail "PRO_TOKEN empty — needed for step 3 (attached before Landscape) and step 4 (USG)"; fi
 if [[ -n "${OPENROUTER_API_KEY}" ]]; then ok "OpenRouter key set (model: ${OPENROUTER_MODEL})"
 else warn "OPENROUTER_API_KEY empty — the demo uses built-in narration instead of the AI"; fi
 

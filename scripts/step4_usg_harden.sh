@@ -22,7 +22,7 @@ pro_status=$(in_instance "${inst}" pro status --format json </dev/null || true)
 if grep -Eq '"attached": *true' <<<"${pro_status}"; then
     ok "Already attached to Ubuntu Pro"
 else
-    [[ -n "${PRO_TOKEN}" ]] || die "Set PRO_TOKEN in demo.conf"
+    [[ -n "${PRO_TOKEN}" ]] || die "Set PRO_TOKEN in demo.conf"   # normally done in step 3
     show_in "${inst}" pro attach "${PRO_TOKEN}" </dev/null
 fi
 show_in "${inst}" pro enable usg --assume-yes </dev/null || true

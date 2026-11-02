@@ -124,13 +124,15 @@ STEPS = [
     {
         "title": f"Register the {'instance' if ONE else 'instances'} in Landscape",
         "script": "step3_register_landscape.sh",
-        "goal": f"Install landscape-client in {'the' if ONE else 'each'} instance and register it "
-        f"with Landscape as {TITLES}, tagged microcloud-demo.",
+        "goal": f"Attach {'the' if ONE else 'each'} instance to Ubuntu Pro first, then install "
+        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. "
-        + ("Our new instance now registers itself as MC-Instance_1." if ONE else
-           "Each instance now registers itself as MC-Instance with its number."),
+        + ("Our new instance is first attached to Ubuntu Pro, then registers itself as "
+           "MC-Instance_1." if ONE else
+           "Each instance is first attached to Ubuntu Pro, then registers itself as "
+           "MC-Instance with its number."),
         "outro": ("The instance has registered." if ONE else
                   f"All {words(INSTANCES)} instances have registered.")
         + f" In the Landscape web UI, filter by the tag microcloud-demo to see {TITLES}, "
@@ -139,7 +141,8 @@ STEPS = [
     {
         "title": "Harden an instance with USG (CIS)",
         "script": "step4_usg_harden.sh",
-        "goal": "On one instance: attach Ubuntu Pro, install the Ubuntu Security Guide (USG), "
+        "goal": "On one instance (attached to Ubuntu Pro in step 3): enable and install the "
+        "Ubuntu Security Guide (USG), "
         "audit against CIS Level 1 Server, fix exactly one rule, re-audit and compare scores.",
         "intro": "Last, compliance. The Ubuntu Security Guide, part of Ubuntu Pro, checks a "
         "machine against the CIS benchmark and can fix what it finds. We take a baseline "
@@ -168,8 +171,8 @@ class CoPresenter:
             f"{NODES} VMs and join them into one MicroCloud cluster "
             "(LXD, MicroCeph, MicroOVN); (2) show the members' resources as one pool and "
             f"provision {count(INSTANCES, 'instance')} that the cluster scheduler places on "
-            "members by itself (resource pooling and on-demand provisioning); (3) register "
-            f"{'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
+            "members by itself (resource pooling and on-demand provisioning); (3) attach "
+            f"{'it' if ONE else 'them'} to Ubuntu Pro and register {'it' if ONE else 'them'} with Landscape as {TITLES}; (4) audit one instance with the "
             "Ubuntu Security Guide (USG, Ubuntu Pro) against CIS Level 1, fix one rule and "
             "show the higher score.\n"
             "Facts to get right: resource pooling means the members' capacity is managed and "

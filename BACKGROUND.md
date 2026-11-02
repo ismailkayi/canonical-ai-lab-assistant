@@ -42,7 +42,7 @@ The four steps follow the life of a machine in a company:
 |---|---|---|---|
 | 1 | "Turn hardware into a cloud" | MicroCloud (LXD + MicroCeph + MicroOVN) | Three separate machines become one cluster. |
 | 2 | "Self-service capacity" | MicroCloud / LXD | You ask the cloud for a server; it picks where to run it. |
-| 3 | "Manage from day one" | Landscape | The new server reports to a central management console. |
+| 3 | "Manage from day one" | Ubuntu Pro + Landscape | The new server is attached to Ubuntu Pro, then reports to a central management console. |
 | 4 | "Prove you are secure" | Ubuntu Pro + USG (CIS benchmark) | Audit, fix one rule, audit again: the score goes up. |
 
 If you know public clouds, a rough mapping is:
@@ -178,8 +178,8 @@ Your laptop (Ubuntu 24.04)                         ← "host"
 │
 │        Inside the MicroCloud (LXD #2, clustered):
 │        └── mc-instance-1  (container by default, or VM)
-│                ├── landscape-client  → Landscape   (step 3)
-│                └── usg + Ubuntu Pro                 (step 4)
+│                ├── Ubuntu Pro (attach) → then landscape-client → Landscape (step 3)
+│                └── usg (needs Pro)                                    (step 4)
 ```
 
 So a command has to "hop" through the layers. You'll see this pattern
@@ -307,7 +307,9 @@ OpenRouter.
 ### Step 3 — `scripts/step3_register_landscape.sh`
 
 For each instance (in parallel, output to `logs/mc-instance-N-landscape.log`):
-`apt-get install landscape-client`, then
+`pro attach <PRO_TOKEN>` first (skipped if already attached — the instance
+must be on Ubuntu Pro before it registers), `apt-get install landscape-client`,
+then
 
 ```bash
 landscape-config --silent --computer-title MC-Instance_1 \
@@ -324,7 +326,7 @@ web UI (maybe as **Pending**, needing **Accept**).
 
 All inside `mc-instance-<USG_INSTANCE>`:
 
-1. `pro attach <PRO_TOKEN>` (skipped if already attached), `pro enable usg`,
+1. `pro attach <PRO_TOKEN>` (already done in step 3, so normally skipped), `pro enable usg`,
    `apt-get install usg`.
 2. **Baseline**: `usg audit cis_level1_server`. Copy the newest results XML
    and HTML report out to `reports/before-*`. `usg_tools.py score` reads the
@@ -426,7 +428,7 @@ scripts/
   check_host.sh            Pre-flight checks
   step1_build_microcloud.sh  VMs → MicroCloud cluster
   step2_provision_instances.sh  Pool table + launch instances
-  step3_register_landscape.sh   landscape-client registration
+  step3_register_landscape.sh   Pro attach, then landscape-client registration
   step4_usg_harden.sh      Pro attach, USG audit → fix one rule → re-audit
   ui_links.sh              Web UI links + browser certificate for the LXD UI
   status.sh / cleanup.sh   Show / delete what the demo created

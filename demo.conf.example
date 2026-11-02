@@ -15,6 +15,7 @@ OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
 
 # ---------------------------------------------------------------------------
 # Landscape (step 3)                                                 REQUIRED
+# Each instance is attached to Ubuntu Pro (PRO_TOKEN below) before it registers.
 # Landscape SaaS:     set LANDSCAPE_ACCOUNT_NAME and leave LANDSCAPE_FQDN empty.
 # Self-hosted:        set LANDSCAPE_FQDN (e.g. landscape.example.com);
 #                     the account name is then "standalone".
@@ -28,7 +29,7 @@ LANDSCAPE_REGISTRATION_KEY=
 LANDSCAPE_SSL_CERT=
 
 # ---------------------------------------------------------------------------
-# Ubuntu Pro (step 4 — USG needs Pro)                                REQUIRED
+# Ubuntu Pro (step 3 attaches it before Landscape; step 4's USG needs it) REQUIRED
 # Get a token at https://ubuntu.com/pro/dashboard (free for personal use).
 # ---------------------------------------------------------------------------
 PRO_TOKEN=
@@ -54,7 +55,8 @@ NODE_CEPH_DISK=15GiB
 
 # One instance by default: the 3 VMs are pooled into one cloud, and that one
 # instance is registered in Landscape (step 3) and hardened with USG (step 4).
-# Each extra instance needs its own Landscape seat. Raise it to show the cloud
+# Each extra instance needs its own Landscape seat and Ubuntu Pro seat
+# (free Pro tokens cover 5 machines). Raise it to show the cloud
 # spreading several instances across members.
 INSTANCE_COUNT=1         # Workload instances provisioned on MicroCloud
 INSTANCE_TYPE=container  # container (light) or vm (needs ~1 GiB each + nested virtualization)
