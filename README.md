@@ -193,7 +193,8 @@ replicated Ceph, so losing one server does not lose data."*
 
 **Step 3 — Ubuntu Pro + Landscape.**
 Each instance is first attached to Ubuntu Pro with `PRO_TOKEN`, then
-registered with Landscape. The terminal shows a ✔ line and the Landscape link (press **o** to open it).
+registered with Landscape. USG is also installed (in the background) on the
+instance step 4 hardens, so step 4 itself takes only seconds. The terminal shows a ✔ line and the Landscape link (press **o** to open it).
 **Switch to the browser:** Landscape →
 Instances, filter by tag `microcloud-demo`. If the machine shows as
 **Pending**, select it and click **Accept**. You now see `MC-Instance_1`.

@@ -319,7 +319,9 @@ landscape-config --silent --computer-title MC-Instance_1 \
 ```
 
 The bracketed options depend on whether you use SaaS or self-hosted Landscape
-(see `demo.conf.example`). After this, the machine shows up in the Landscape
+(see `demo.conf.example`). On instance `USG_INSTANCE` it then also runs
+`pro enable usg`, `apt-get install usg` and `usg generate-tailoring`, so
+step 4 has nothing to download. After this, the machine shows up in the Landscape
 web UI (maybe as **Pending**, needing **Accept**).
 
 ### Step 4 — `scripts/step4_usg_harden.sh`
@@ -443,8 +445,8 @@ scripts/
   snap_fetch.py            Patient, resumable Snap Store downloader (talks to the store API directly,
                            verifies the SHA3-384 hash, writes .snap + .assert like `snap download`)
   pool_summary.py          Turns LXD's resources/instances JSON into the pool table
-  usg_tools.py             Reads OpenSCAP XML: score, a rule's result, rules fixed, pick/select failing rules, build a
-                           tailoring file (one rule, or every safe failing rule)
+  usg_tools.py             Reads OpenSCAP XML (score, a rule's result, rules fixed) and builds
+                           the tailoring file that selects step 4's focused rule set
 Generated at runtime (git-ignored):
   demo.conf                Your keys and overrides
   logs/                    Per-node install/join logs, preseed YAML, Landscape logs

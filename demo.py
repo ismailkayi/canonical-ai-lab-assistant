@@ -125,7 +125,8 @@ STEPS = [
         "title": f"Register the {'instance' if ONE else 'instances'} in Landscape",
         "script": "step3_register_landscape.sh",
         "goal": f"Attach {'the' if ONE else 'each'} instance to Ubuntu Pro first, then install "
-        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo.",
+        f"landscape-client and register it with Landscape as {TITLES}, tagged microcloud-demo. "
+        "USG is also installed quietly so step 4 runs in seconds.",
         "intro": "New machines need to be managed from day one. Landscape is Canonical's "
         "management tool for Ubuntu: patching, inventory, compliance and scripts for the "
         "whole fleet from one place. "

@@ -39,6 +39,13 @@ register() {
     in_instance "${inst}" sh -ec 'export DEBIAN_FRONTEND=noninteractive
         apt-get update -q && apt-get install -yq landscape-client'
     in_instance "${inst}" landscape-config "${args[@]}"
+    # Get USG ready on the instance step 4 hardens, so step 4 only audits and fixes.
+    if [[ "$i" == "${USG_INSTANCE}" ]]; then
+        in_instance "${inst}" pro enable usg --assume-yes </dev/null || true   # non-zero if already enabled
+        in_instance "${inst}" sh -ec 'DEBIAN_FRONTEND=noninteractive apt-get install -yq usg'
+        in_instance "${inst}" test -s /root/tailoring-full.xml </dev/null ||
+            in_instance "${inst}" usg generate-tailoring "${USG_PROFILE}" /root/tailoring-full.xml </dev/null
+    fi
 }
 
 title "Attaching $(count "${INSTANCE_COUNT}" instance) to Ubuntu Pro and registering with Landscape (account: ${account})"
