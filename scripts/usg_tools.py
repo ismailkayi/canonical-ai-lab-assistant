@@ -1,6 +1,7 @@
 """Small helpers that read USG (OpenSCAP) result files for step 4.
 
-  usg_tools.py score  RESULTS.xml               -> "<score> <passed> <failed>"
+  usg_tools.py score  RESULTS.xml [PARTIAL.xml] -> "<pass%> <passed> <failed>"; PARTIAL (a
+                                                   re-audit of a few rules) overrides those rules
   usg_tools.py result RESULTS.xml RULE          -> pass / fail / notapplicable / ...
   usg_tools.py pick   RESULTS.xml RULE [RULE..] -> first rule in the list that FAILED
   usg_tools.py tailor IN.xml OUT.xml RULE       -> tailoring file selecting only RULE
@@ -27,7 +28,7 @@ SAFE_RULES = [
     "banner_etc_issue_net",
 ]
 
-# Rules the full hardening (USG_FIX=all) never applies, because they would break
+# Rules the opt-in full hardening (USG_FIX=all) never applies, because they would break
 # the demo instance or take far too long on stage. Shell-style patterns on the
 # short rule name. Everything else that fails the baseline gets fixed.
 SKIP_RULES = [
@@ -58,14 +59,17 @@ def rule_results(path: str) -> dict:
     return results
 
 
-def score(path: str) -> str:
-    value = "?"
-    for el in ET.parse(path).iter():
-        if local(el.tag) == "score":
-            value = f"{float(el.text):.1f}"
-            break
-    results = list(rule_results(path).values())
-    return f"{value} {results.count('pass')} {results.count('fail')}"
+def score(path: str, partial: str = "") -> str:
+    """Share of checked rules that pass. With PARTIAL, its results replace the
+    full audit's for those rules, so one fixed rule needs no second full audit."""
+    merged = rule_results(path)
+    if partial:
+        merged.update({r: v for r, v in rule_results(partial).items()
+                       if v in ("pass", "fail")})
+    results = list(merged.values())
+    passed, failed = results.count("pass"), results.count("fail")
+    value = f"{100 * passed / (passed + failed):.1f}" if passed + failed else "?"
+    return f"{value} {passed} {failed}"
 
 
 def pick(path: str, rules: list) -> str:
@@ -125,7 +129,7 @@ def fixed(before: str, after: str, limit: int) -> str:
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "score":
-        print(score(args[0]))
+        print(score(args[0], args[1] if len(args) > 1 else ""))
     elif cmd == "result":
         print(rule_results(args[0]).get(full_id(args[1]), "unknown"))
     elif cmd == "pick":
